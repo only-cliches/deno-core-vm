@@ -1,6 +1,6 @@
 import { getQuickJS } from "quickjs-emscripten"
 import fs from "fs";
-import { DenoWorker } from "../index.js";
+import { DenoWorker } from "../dist/index.js";
 
 const benchScript = fs.readFileSync("./bench/v8-bench.js").toString();
 

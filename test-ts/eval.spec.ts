@@ -1,4 +1,4 @@
-import { DenoWorker } from "../index";
+import { DenoWorker } from "../src/index";
 import { assertErrorLike } from "./helpers.assertions";
 
 describe("deno_worker: eval", () => {
@@ -52,4 +52,58 @@ describe("deno_worker: eval", () => {
     expect(dw.lastExecutionStats?.cpuTimeMs).toEqual(expect.any(Number));
     expect(dw.lastExecutionStats?.evalTimeMs).toEqual(expect.any(Number));
   });
+
+  it(
+    "per-eval maxEvalMs overrides global maxEvalMs for that call only",
+    async () => {
+      // Global limit is generous so it would NOT time out on its own.
+      dw = new DenoWorker({ maxEvalMs: 5_000 } as any);
+
+      // This call should time out due to per-call override.
+      const err1 = await dw.eval("while (true) {}", { maxEvalMs: 25 } as any).catch((e) => e);
+      expect(err1).toBeTruthy();
+
+      // Subsequent call without per-call override should still work (global is large).
+      await expect(dw.eval("1 + 1")).resolves.toBe(2);
+    },
+    20_000
+  );
+
+  it(
+    "per-eval maxEvalMs can be longer than global (overrides for that call)",
+    async () => {
+      // Global is small.
+      dw = new DenoWorker({ maxEvalMs: 25 } as any);
+
+      // Per-call sets a longer limit, so it should have time to finish.
+      await expect(
+        dw.eval(
+          `
+        const start = Date.now();
+        while (Date.now() - start < 75) {}
+        123;
+        `,
+          { maxEvalMs: 500 } as any
+        )
+      ).resolves.toBe(123);
+
+      // Without per-call override, the global limit should still apply.
+      const err2 = await dw.eval("while (true) {}").catch((e) => e);
+      expect(err2).toBeTruthy();
+    },
+    20_000
+  );
+
+  it(
+    "per-eval maxEvalMs overrides global maxEvalMs for that call only (and does not poison subsequent evals)",
+    async () => {
+      dw = new DenoWorker({ maxEvalMs: 5_000 } as any);
+
+      const err1 = await dw.eval("while (true) {}", { maxEvalMs: 25 } as any).catch((e) => e);
+      expect(err1).toBeTruthy();
+
+      await expect(dw.eval("1 + 1")).resolves.toBe(2);
+    },
+    20_000
+  );
 });

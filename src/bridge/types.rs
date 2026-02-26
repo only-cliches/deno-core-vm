@@ -35,6 +35,7 @@ pub struct EvalOptions {
     pub is_module: bool,
     pub args: Vec<JsValueBridge>,
     pub args_provided: bool,
+    pub max_eval_ms: Option<u64>,
 }
 
 impl Default for EvalOptions {
@@ -44,6 +45,7 @@ impl Default for EvalOptions {
             is_module: false,
             args: vec![],
             args_provided: false,
+            max_eval_ms: None,
         }
     }
 }
@@ -84,6 +86,15 @@ impl EvalOptions {
                     let item = arr.get::<JsValue, _, _>(cx, i)?;
                     out.args
                         .push(crate::bridge::neon_codec::from_neon_value(cx, item)?);
+                }
+            }
+        }
+
+        if let Ok(v) = obj.get::<JsValue, _, _>(cx, "maxEvalMs") {
+            if let Ok(n) = v.downcast::<JsNumber, _>(cx) {
+                let ms = n.value(cx);
+                if ms.is_finite() && ms > 0.0 {
+                    out.max_eval_ms = Some(ms as u64);
                 }
             }
         }

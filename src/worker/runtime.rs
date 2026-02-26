@@ -29,6 +29,55 @@ pub struct WorkerOpContext {
     pub node_tx: mpsc::Sender<NodeMsg>,
 }
 
+use deno_core::url::Url;
+
+fn cwd_dir_url_string() -> Option<String> {
+    let cwd = std::env::current_dir().ok()?;
+    let u = deno_core::url::Url::from_directory_path(cwd).ok()?;
+    Some(u.as_str().to_string())
+}
+
+fn normalize_module_base_url(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+
+    // If user already provided a file URL, normalize to a directory URL ending with '/'
+    if raw.starts_with("file://") {
+        if let Ok(u) = Url::parse(raw) {
+            let s = u.as_str().to_string();
+            return Some(if s.ends_with('/') {
+                s
+            } else {
+                format!("{}/", s)
+            });
+        }
+        return None;
+    }
+
+    // Treat as filesystem path; allow relative paths (resolve against current_dir)
+    let p = std::path::Path::new(raw);
+    let abs = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        std::env::current_dir().ok()?.join(p)
+    };
+
+    let u = Url::from_directory_path(&abs).ok()?;
+    let s = u.as_str().to_string();
+    Some(if s.ends_with('/') {
+        s
+    } else {
+        format!("{}/", s)
+    })
+}
+
+fn join_module_base(base: &str, name: &str) -> String {
+    // base is expected to end with '/'
+    format!("{}{}", base, name)
+}
+
 extension!(
     deno_worker_extension,
     ops = [op_post_message, op_host_call_sync, op_host_call_async]
@@ -38,19 +87,27 @@ extension!(
 struct ModuleRegistry {
     modules: Arc<Mutex<HashMap<String, String>>>,
     counter: Arc<AtomicUsize>,
+    base_url: Option<String>,
 }
 
 impl ModuleRegistry {
-    fn new() -> Self {
+    fn new(base_url: Option<String>) -> Self {
         Self {
             modules: Arc::new(Mutex::new(HashMap::new())),
             counter: Arc::new(AtomicUsize::new(0)),
+            base_url,
         }
     }
 
     fn next_specifier(&self) -> String {
         let n = self.counter.fetch_add(1, Ordering::Relaxed) + 1;
-        format!("file:///__denojs_worker_module_{}.js", n)
+        let name = format!("__denojs_worker_module_{}.js", n);
+
+        if let Some(base) = &self.base_url {
+            join_module_base(base, &name)
+        } else {
+            format!("file:///{}", name)
+        }
     }
 
     fn put(&self, specifier: &str, code: &str) {
@@ -68,17 +125,24 @@ impl ModuleRegistry {
     //         .cloned()
     //         .unwrap_or_default()
     // }
-    fn take(&self, specifier: &str) -> String {
-        self.modules
-            .lock()
-            .expect("modules lock")
-            .remove(specifier)
-            .unwrap_or_default()
-    }
+
+    // fn take(&self, specifier: &str) -> String {
+    //     self.modules
+    //         .lock()
+    //         .expect("modules lock")
+    //         .remove(specifier)
+    //         .unwrap_or_default()
+    // }
 }
+
+use crate::worker::messages::ImportDecision;
+use deno_core::FsModuleLoader;
 
 struct DynamicModuleLoader {
     reg: ModuleRegistry,
+    node_tx: mpsc::Sender<NodeMsg>,
+    imports_policy: crate::worker::state::ImportsPolicy,
+    fs: Arc<FsModuleLoader>,
 }
 
 impl ModuleLoader for DynamicModuleLoader {
@@ -95,20 +159,93 @@ impl ModuleLoader for DynamicModuleLoader {
     fn load(
         &self,
         module_specifier: &deno_core::url::Url,
-        _maybe_referrer: Option<&deno_core::ModuleLoadReferrer>,
-        _options: deno_core::ModuleLoadOptions,
+        maybe_referrer: Option<&deno_core::ModuleLoadReferrer>,
+        options: deno_core::ModuleLoadOptions,
     ) -> deno_core::ModuleLoadResponse {
         let spec = module_specifier.as_str().to_string();
-        let code = self.reg.take(&spec);
 
-        let source = ModuleSource::new(
-            ModuleType::JavaScript,
-            deno_core::ModuleSourceCode::String(code.into()),
-            module_specifier,
-            None,
-        );
+        // Best-effort referrer string for callback
+        let referrer = maybe_referrer
+            .map(|r| r.specifier.as_str().to_string())
+            .unwrap_or_default();
 
-        deno_core::ModuleLoadResponse::Sync(Ok(source))
+        // 1) Serve in-memory eval modules first (one-shot)
+        let maybe_code = {
+            let mut guard = self.reg.modules.lock().expect("modules lock");
+            guard.remove(&spec)
+        };
+
+        if let Some(code) = maybe_code {
+            let source = ModuleSource::new(
+                ModuleType::JavaScript,
+                deno_core::ModuleSourceCode::String(code.into()),
+                module_specifier,
+                None,
+            );
+            return deno_core::ModuleLoadResponse::Sync(Ok(source));
+        }
+
+        // 2) Enforce imports policy
+        match self.imports_policy {
+            crate::worker::state::ImportsPolicy::DenyAll => {
+                return deno_core::ModuleLoadResponse::Sync(Err(JsErrorBox::generic(format!(
+                    "Import blocked (imports disabled): {spec}"
+                ))));
+            }
+
+            crate::worker::state::ImportsPolicy::AllowDisk => {
+                return self.fs.load(module_specifier, maybe_referrer, options);
+            }
+
+            crate::worker::state::ImportsPolicy::Callback => {
+                // continue to async callback path
+            }
+        }
+
+        // 3) Callback path: ask Node, async
+        let node_tx = self.node_tx.clone();
+        let fs = self.fs.clone();
+        let module_specifier = module_specifier.clone();
+        let maybe_referrer_owned: Option<deno_core::ModuleLoadReferrer> = maybe_referrer.cloned();
+
+        deno_core::ModuleLoadResponse::Async(Box::pin(async move {
+            let (tx, rx) = tokio::sync::oneshot::channel::<ImportDecision>();
+
+            if node_tx
+                .send(NodeMsg::ImportRequest {
+                    specifier: spec.clone(),
+                    referrer,
+                    reply: tx,
+                })
+                .await
+                .is_err()
+            {
+                return Err(JsErrorBox::generic("Imports callback unavailable"));
+            }
+
+            match rx.await.unwrap_or(ImportDecision::Block) {
+                ImportDecision::Block => {
+                    Err(JsErrorBox::generic(format!("Import blocked: {spec}")))
+                }
+
+                ImportDecision::AllowDisk => {
+                    match fs.load(&module_specifier, maybe_referrer_owned.as_ref(), options) {
+                        deno_core::ModuleLoadResponse::Sync(r) => r,
+                        deno_core::ModuleLoadResponse::Async(fut) => fut.await,
+                    }
+                }
+
+                ImportDecision::Source(code) => {
+                    let source = ModuleSource::new(
+                        ModuleType::JavaScript,
+                        deno_core::ModuleSourceCode::String(code.into()),
+                        &module_specifier,
+                        None,
+                    );
+                    Ok(source)
+                }
+            }
+        }))
     }
 }
 
@@ -135,10 +272,21 @@ pub fn spawn_worker_thread(
                 return;
             };
 
-            let module_reg = ModuleRegistry::new();
+            let base_url = limits
+                .module_base_url
+                .as_deref()
+                .and_then(normalize_module_base_url)
+                .or_else(cwd_dir_url_string);
+
+            let module_reg = ModuleRegistry::new(base_url);
             let loader = std::rc::Rc::new(DynamicModuleLoader {
                 reg: module_reg.clone(),
+                node_tx: node_tx.clone(),
+                imports_policy: limits.imports.clone(),
+                fs: Arc::new(FsModuleLoader),
             });
+
+            apply_v8_flags_once(&limits);
 
             let mut runtime = JsRuntime::new(RuntimeOptions {
                 extensions: vec![deno_worker_extension::init()],
@@ -256,10 +404,18 @@ async fn handle_deno_msg(
         }
 
         DenoMsg::Memory { deferred } => {
-            let mem = serde_json::json!({
-                "ok": true,
-                "heapStatistics": "not_implemented_yet"
-            });
+            let mem = {
+                let isolate = runtime.v8_isolate();
+
+                // v8 145: no-arg getter returns the struct.
+                let hs = isolate.get_heap_statistics();
+
+                serde_json::json!({
+                    "ok": true,
+                    "heapStatistics": heap_stats_to_json(&hs),
+                    "heapSpaceStatistics": heap_space_stats_to_json(isolate),
+                })
+            };
 
             if let Some(tx) = get_node_tx(worker_id) {
                 send_node_msg_or_reject(
@@ -420,7 +576,9 @@ async fn eval_in_runtime(
 
     let cancel = Arc::new(AtomicBool::new(false));
 
-    let timeout_thread = limits.max_eval_ms.map(|ms| {
+    let effective_max_eval_ms = options.max_eval_ms.or(limits.max_eval_ms);
+
+    let timeout_thread = effective_max_eval_ms.map(|ms| {
         let cancel = cancel.clone();
         let isolate_handle = isolate_handle.clone();
         std::thread::spawn(move || {
@@ -434,13 +592,16 @@ async fn eval_in_runtime(
     let result = if options.is_module {
         eval_module(runtime, source, &options.filename).await
     } else {
-        eval_script_or_callable(runtime, source, &options).await
+        eval_script_or_callable(runtime, limits, source, &options).await
     };
 
     cancel.store(true, Ordering::SeqCst);
     if let Some(t) = timeout_thread {
         let _ = t.join();
     }
+
+    // IMPORTANT: terminate_execution is sticky. Clear it for subsequent calls.
+    runtime.v8_isolate().cancel_terminate_execution();
 
     let stats = ExecStats {
         cpu_time_ms: start_cpu.elapsed().as_nanos() as f64 / 1_000_000.0,
@@ -455,17 +616,34 @@ async fn eval_in_runtime(
 
 async fn eval_script_or_callable(
     runtime: &mut JsRuntime,
+    limits: &RuntimeLimits,
     source: &str,
     options: &EvalOptions,
 ) -> Result<JsValueBridge, JsValueBridge> {
     let filename = if options.filename.is_empty() {
-        "eval.js"
+        if let Some(base) = limits
+            .module_base_url
+            .as_deref()
+            .and_then(normalize_module_base_url)
+        {
+            join_module_base(&base, "eval.js")
+        } else {
+            "eval.js".to_string()
+        }
+    } else if options.filename.starts_with("file://") {
+        options.filename.clone()
+    } else if let Some(base) = limits
+        .module_base_url
+        .as_deref()
+        .and_then(normalize_module_base_url)
+    {
+        join_module_base(&base, &options.filename)
     } else {
-        &options.filename
+        options.filename.clone()
     };
 
     let global = runtime
-        .execute_script(filename.to_string(), source.to_string())
+        .execute_script(filename, source.to_string())
         .map_err(js_error_to_bridge)?;
 
     if options.args_provided {
@@ -725,6 +903,151 @@ fn dispatch_node_msg(worker_id: usize, msg: NodeMsg) {
                             Err(e) => settler.reject_with_value_in_cx(cx, &e),
                         },
                     }
+                    Ok(())
+                }
+
+                NodeMsg::ImportRequest { specifier, referrer, reply } => {
+                    use crate::worker::messages::ImportDecision;
+
+                    struct ImportState {
+                        reply: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<ImportDecision>>>,
+                        hooks: std::sync::Mutex<Option<(Root<JsFunction>, Root<JsFunction>)>>,
+                    }
+
+                    impl ImportState {
+                        fn send_once(&self, value: ImportDecision) {
+                            let tx_opt = self.reply.lock().ok().and_then(|mut g| g.take());
+                            if let Some(tx) = tx_opt {
+                                let _ = tx.send(value);
+                            }
+                        }
+
+                        fn clear_hooks(&self) {
+                            let _ = self.hooks.lock().ok().and_then(|mut g| g.take());
+                        }
+                    }
+
+                    fn interpret_value<'a>(cx: &mut TaskContext<'a>, v: Handle<'a, JsValue>) -> Option<ImportDecision> {
+                        if let Ok(s) = v.downcast::<JsString, _>(cx) {
+                            return Some(ImportDecision::Source(s.value(cx)));
+                        }
+                        if let Ok(b) = v.downcast::<JsBoolean, _>(cx) {
+                            return Some(if b.value(cx) {
+                                ImportDecision::AllowDisk
+                            } else {
+                                ImportDecision::Block
+                            });
+                        }
+                        None
+                    }
+
+                    let Some(cb_root) = callbacks.imports.as_ref() else {
+                        // Callback mode but no callback set: safest is block.
+                        let _ = reply.send(ImportDecision::Block);
+                        return Ok(());
+                    };
+
+                    let state = std::sync::Arc::new(ImportState {
+                        reply: std::sync::Mutex::new(Some(reply)),
+                        hooks: std::sync::Mutex::new(None),
+                    });
+
+                    let cb = cb_root.to_inner(cx);
+                    let js_spec = cx.string(&specifier);
+                    let js_ref = cx.string(&referrer);
+
+                    let this = cx.undefined();
+                    let returned = match cx.try_catch(|cx| cb.call(cx, this, &[js_spec.upcast(), js_ref.upcast()])) {
+                        Ok(v) => v,
+                        Err(_) => {
+                            state.send_once(ImportDecision::Block);
+                            return Ok(());
+                        }
+                    };
+
+                    // Sync return (string | boolean)
+                    if let Some(d) = interpret_value(cx, returned) {
+                        state.send_once(d);
+                        return Ok(());
+                    }
+
+                    // Promise return
+                    if returned.is_a::<neon::types::JsPromise, _>(cx) {
+                        let promise_obj: Handle<JsObject> = match returned.downcast::<JsObject, _>(cx) {
+                            Ok(o) => o,
+                            Err(_) => {
+                                state.send_once(ImportDecision::Block);
+                                return Ok(());
+                            }
+                        };
+
+                        let then_fn: Handle<JsFunction> =
+                            match cx.try_catch(|cx| promise_obj.get::<JsFunction, _, _>(cx, "then")) {
+                                Ok(f) => f,
+                                Err(_) => {
+                                    state.send_once(ImportDecision::Block);
+                                    return Ok(());
+                                }
+                            };
+
+                        let st_ok = state.clone();
+                        let on_fulfilled = JsFunction::new(cx, move |mut cx| {
+                            let v = cx.argument::<JsValue>(0)?;
+
+                            let decision = interpret_value(&mut cx, v).unwrap_or(ImportDecision::Block);
+                            st_ok.send_once(decision);
+                            st_ok.clear_hooks();
+
+                            Ok(cx.undefined())
+                        })?;
+
+                        let st_err = state.clone();
+                        let on_rejected = JsFunction::new(cx, move |mut cx| {
+                            st_err.send_once(ImportDecision::Block);
+                            st_err.clear_hooks();
+                            Ok(cx.undefined())
+                        })?;
+
+                        // Root hooks so V8 cannot GC them before the promise settles.
+                        {
+                            let f_root = on_fulfilled.root(cx);
+                            let r_root = on_rejected.root(cx);
+                            if let Ok(mut g) = state.hooks.lock() {
+                                *g = Some((f_root, r_root));
+                            }
+                        }
+
+                        let (on_fulfilled_handle, on_rejected_handle) = {
+                            let g = state
+                                .hooks
+                                .lock()
+                                .ok()
+                                .and_then(|g| g.as_ref().map(|(f, r)| (f.clone(cx), r.clone(cx))));
+                            match g {
+                                Some((f, r)) => (f.to_inner(cx), r.to_inner(cx)),
+                                None => (on_fulfilled, on_rejected),
+                            }
+                        };
+
+                        let attached = cx.try_catch(|cx| {
+                            let args: Vec<Handle<JsValue>> = vec![
+                                on_fulfilled_handle.upcast::<JsValue>(),
+                                on_rejected_handle.upcast::<JsValue>(),
+                            ];
+                            let _ = then_fn.call(cx, promise_obj, args.as_slice())?;
+                            Ok(())
+                        });
+
+                        if attached.is_err() {
+                            state.send_once(ImportDecision::Block);
+                            state.clear_hooks();
+                        }
+
+                        return Ok(());
+                    }
+
+                    // Any other return type: block
+                    state.send_once(ImportDecision::Block);
                     Ok(())
                 }
 
@@ -1049,5 +1372,68 @@ fn dispatch_node_msg(worker_id: usize, msg: NodeMsg) {
         }));
 
         Ok(())
+    });
+}
+
+fn heap_stats_to_json(stats: &v8::HeapStatistics) -> serde_json::Value {
+    serde_json::json!({
+        "totalHeapSize": stats.total_heap_size(),
+        "totalHeapSizeExecutable": stats.total_heap_size_executable(),
+        "totalPhysicalSize": stats.total_physical_size(),
+        "totalAvailableSize": stats.total_available_size(),
+        "usedHeapSize": stats.used_heap_size(),
+        "heapSizeLimit": stats.heap_size_limit(),
+        "mallocedMemory": stats.malloced_memory(),
+        "externalMemory": stats.external_memory(),
+        "peakMallocedMemory": stats.peak_malloced_memory(),
+        "numberOfNativeContexts": stats.number_of_native_contexts(),
+        "numberOfDetachedContexts": stats.number_of_detached_contexts(),
+        "doesZapGarbage": stats.does_zap_garbage(),
+    })
+}
+
+fn heap_space_stats_to_json(isolate: &mut v8::Isolate) -> serde_json::Value {
+    let count = isolate.number_of_heap_spaces();
+    let mut out = Vec::with_capacity(count as usize);
+
+    for i in 0..count {
+        if let Some(hs) = isolate.get_heap_space_statistics(i) {
+            out.push(serde_json::json!({
+                "spaceName": hs.space_name(),
+                "physicalSpaceSize": hs.physical_space_size(),
+                "spaceSize": hs.space_size(),
+                "spaceUsedSize": hs.space_used_size(),
+                "spaceAvailableSize": hs.space_available_size(),
+            }));
+        }
+    }
+
+    serde_json::Value::Array(out)
+}
+
+use std::sync::Once;
+
+static V8_FLAGS_ONCE: Once = Once::new();
+
+fn apply_v8_flags_once(limits: &RuntimeLimits) {
+    V8_FLAGS_ONCE.call_once(|| {
+        let mut flags: Vec<String> = Vec::new();
+
+        if let Some(bytes) = limits.max_stack_size_bytes {
+            // V8 flag is KB
+            let kb = (bytes / 1024).max(64);
+            flags.push(format!("--stack_size={}", kb));
+        }
+
+        if let Some(bytes) = limits.max_memory_bytes {
+            // V8 flag is MB, affects old space sizing
+            let mb = (bytes / (1024 * 1024)).max(16);
+            flags.push(format!("--max_old_space_size={}", mb));
+        }
+
+        if !flags.is_empty() {
+            // Applies process-wide. Must be called before isolates are created.
+            deno_core::v8_set_flags(flags);
+        }
     });
 }

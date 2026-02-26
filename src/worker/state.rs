@@ -57,6 +57,8 @@ pub struct RuntimeLimits {
     pub max_memory_bytes: Option<u64>,
     pub max_stack_size_bytes: Option<u64>,
     pub max_eval_ms: Option<u64>,
+    pub imports: ImportsPolicy,
+    pub module_base_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -81,6 +83,13 @@ impl WorkerCreateOptions {
             Err(_) => return Ok(out),
         };
 
+        if let Ok(v) = obj.get::<JsValue, _, _>(cx, "moduleRoot") {
+            if let Ok(s) = v.downcast::<JsString, _>(cx) {
+                let raw = s.value(cx);
+                out.runtime_options.module_base_url = Some(raw);
+            }
+        }
+
         if let Ok(v) = obj.get::<JsValue, _, _>(cx, "channelSize") {
             if let Ok(n) = v.downcast::<JsNumber, _>(cx) {
                 let s = n.value(cx);
@@ -104,7 +113,36 @@ impl WorkerCreateOptions {
                 out.runtime_options.max_stack_size_bytes = Some(n.value(cx) as u64);
             }
         }
+
+        if let Ok(v) = obj.get::<JsValue, _, _>(cx, "imports") {
+            if v.is_a::<JsBoolean, _>(cx) {
+                if let Ok(bv) = v.downcast::<JsBoolean, _>(cx) {
+                    let b = bv.value(cx);
+                    out.runtime_options.imports = if b {
+                        ImportsPolicy::AllowDisk
+                    } else {
+                        ImportsPolicy::DenyAll
+                    };
+                }
+            } else if v.is_a::<JsFunction, _>(cx) {
+                out.runtime_options.imports = ImportsPolicy::Callback;
+            }
+        }
         Ok(out)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum ImportsPolicy {
+    DenyAll,
+    AllowDisk,
+    Callback,
+}
+
+impl Default for ImportsPolicy {
+    fn default() -> Self {
+        // Safer default: deny disk imports unless explicitly enabled
+        ImportsPolicy::DenyAll
     }
 }
 

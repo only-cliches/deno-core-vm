@@ -1,4 +1,4 @@
-import { DenoWorker } from "../index";
+import { DenoWorker } from "../src/index";
 import { assertErrorLike, isDateLike } from "./helpers.assertions";
 
 describe("DenoWorker data and errors", () => {

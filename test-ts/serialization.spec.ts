@@ -1,4 +1,4 @@
-import { DenoWorker } from "../index";
+import { DenoWorker } from "../src/index";
 import fc from "fast-check";
 import { isDateLike } from "./helpers.assertions";
 

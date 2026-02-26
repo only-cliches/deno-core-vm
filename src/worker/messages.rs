@@ -9,6 +9,13 @@ pub struct ExecStats {
 }
 
 #[derive(Debug, Clone)]
+pub enum ImportDecision {
+    Block,
+    AllowDisk,
+    Source(String),
+}
+
+#[derive(Debug, Clone)]
 pub enum EvalReply {
     Ok {
         value: JsValueBridge,
@@ -64,10 +71,15 @@ pub enum NodeMsg {
     },
     EmitClose,
 
-    /// The ONLY message that carries a PromiseSettler.
     Resolve {
         settler: PromiseSettler,
         payload: ResolvePayload,
+    },
+
+    ImportRequest {
+        specifier: String,
+        referrer: String,
+        reply: tokio::sync::oneshot::Sender<ImportDecision>,
     },
 
     InvokeHostFunctionSync {

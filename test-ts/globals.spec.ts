@@ -1,4 +1,4 @@
-import { DenoWorker } from "../index";
+import { DenoWorker } from "../src/index";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 

@@ -72,6 +72,26 @@ fn create_worker(mut cx: FunctionContext) -> JsResult<JsObject> {
 
     worker::runtime::spawn_worker_thread(id, opts.runtime_options, deno_rx, node_rx);
 
+    // imports option: if provided as a function, store it in callbacks.imports
+    {
+        let raw_opts = cx.argument_opt(0);
+        if let Some(raw) = raw_opts {
+            if let Ok(obj) = raw.downcast::<JsObject, _>(&mut cx) {
+                if let Ok(v) = obj.get_value(&mut cx, "imports") {
+                    if let Ok(f) = v.downcast::<JsFunction, _>(&mut cx) {
+                        let rooted = f.root(&mut cx);
+
+                        if let Ok(mut map) = WORKERS.lock() {
+                            if let Some(w) = map.get_mut(&id) {
+                                w.callbacks.imports = Some(Arc::new(rooted));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     let api = cx.empty_object();
 
     // postMessage(msg)

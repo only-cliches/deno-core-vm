@@ -1,28 +1,61 @@
 // index.ts
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
-const native = require("./index.node");
+const native = require("../index.node");
 
 export type DenoWorkerEvent = "message" | "close";
 export type DenoWorkerMessageHandler = (msg: any) => void;
+export type ImportsCallbackResult = boolean | string;
+export type ImportsCallback = (specifier: string, referrer: string) => ImportsCallbackResult | Promise<ImportsCallbackResult>;
 
 export type DenoWorkerOptions = {
-    channelSize?: number;
     maxEvalMs?: number;
     maxMemoryBytes?: number;
     maxStackSizeBytes?: number;
+    channelSize?: number;
+    imports?: boolean | ImportsCallback;
+    moduleRoot?: string;
 };
 
 export type EvalOptions = {
     filename?: string;
     type?: "script" | "module";
     args?: any[];
+    maxEvalMs?: number;
 };
 
 export type ExecStats = {
     cpuTimeMs?: number;
     evalTimeMs?: number;
 };
+
+export type V8HeapStatistics = {
+    totalHeapSize: number;
+    totalHeapSizeExecutable: number;
+    totalPhysicalSize: number;
+    totalAvailableSize: number;
+    usedHeapSize: number;
+    heapSizeLimit: number;
+    mallocedMemory: number;
+    externalMemory: number;
+    peakMallocedMemory: number;
+    numberOfNativeContexts: number;
+    numberOfDetachedContexts: number;
+    doesZapGarbage: boolean;
+};
+
+export type V8HeapSpaceStatistics = {
+    spaceName: string;
+    physicalSpaceSize: number;
+    spaceSize: number;
+    spaceUsedSize: number;
+    spaceAvailableSize: number;
+};
+
+export type DenoWorkerMemory = {
+    heapStatistics: V8HeapStatistics;
+    heapSpaceStatistics: V8HeapSpaceStatistics[];
+}
 
 type NativeWorker = {
     postMessage(msg: any): void;
@@ -40,9 +73,6 @@ type NativeWorker = {
     lastExecutionStats: ExecStats;
 };
 
-function isPlainObject(v: unknown): v is Record<string, unknown> {
-    return !!v && typeof v === "object" && (Object.getPrototypeOf(v) === Object.prototype || Object.getPrototypeOf(v) === null);
-}
 
 function normalizeEvalOptions(options?: EvalOptions): EvalOptions | undefined {
     if (!options) return undefined;
@@ -50,7 +80,17 @@ function normalizeEvalOptions(options?: EvalOptions): EvalOptions | undefined {
     if (typeof options.filename === "string") out.filename = options.filename;
     if (options.type === "module") out.type = "module";
     if ("args" in options) out.args = Array.isArray(options.args) ? options.args : [];
+    if (typeof options.maxEvalMs === "number" && Number.isFinite(options.maxEvalMs) && options.maxEvalMs > 0) out.maxEvalMs = options.maxEvalMs;
     return out;
+}
+
+
+function coerceMemoryPayload(raw: unknown): DenoWorkerMemory {
+
+    const hs = (raw as any).heapStatistics;
+    const hss = (raw as any).heapSpaceStatistics;
+
+    return { heapStatistics: hs, heapSpaceStatistics: hss };
 }
 
 export class DenoWorker {
@@ -89,8 +129,9 @@ export class DenoWorker {
         await this.native.close();
     }
 
-    async memory(): Promise<any> {
-        return await this.native.memory();
+    async memory(): Promise<DenoWorkerMemory> {
+        const raw = await this.native.memory();
+        return coerceMemoryPayload(raw);
     }
 
     async setGlobal(key: string, value: any): Promise<void> {

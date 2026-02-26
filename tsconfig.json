@@ -28,9 +28,9 @@
     "types": ["node", "jest"]                    /* Include type definitions for Node.js and Jest globally. */
   },
   "include": [
-    "test/**/*",
-    "index.ts"
-, "test-back/api.spec.ts", "test-back/data.spec.ts", "test-back/eval.spec.ts", "test-back/helpers.assertions.ts", "test-back/limits.spec.ts", "test-back/messages.spec.ts", "test-back/modules.spec.ts", "test-back/promises.spec.ts", "test-back/serialization.spec.ts", "test-back/stress.spec.ts"  ],
+    "test-ts/**/*",
+    "src/index.ts"
+  ],
   "exclude": [
     "node_modules",
     "dist"

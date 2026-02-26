@@ -11,7 +11,7 @@ async function walk(dir) {
 
     if (entry.isDirectory()) {
       results.push(...(await walk(fullPath)));
-    } else if (entry.isFile() && (entry.name.endsWith(".rs") || entry.name.endsWith(".js"))) {
+    } else if (entry.isFile() && (entry.name.endsWith(".rs") || entry.name.endsWith(".js") || entry.name.endsWith(".ts"))) {
       results.push(fullPath);
     }
   }

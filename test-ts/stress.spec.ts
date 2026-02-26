@@ -1,4 +1,4 @@
-import { DenoWorker } from "../index";
+import { DenoWorker } from "../src/index";
 import pLimit from "p-limit";
 
 function sleep(ms: number) {
