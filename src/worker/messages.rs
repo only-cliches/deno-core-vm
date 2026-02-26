@@ -1,6 +1,6 @@
-use tokio::sync::oneshot;
 use crate::bridge::promise::PromiseSettler;
 use crate::bridge::types::{EvalOptions, JsValueBridge};
+use tokio::sync::oneshot;
 
 #[derive(Debug, Clone)]
 pub struct ExecStats {
@@ -10,8 +10,14 @@ pub struct ExecStats {
 
 #[derive(Debug, Clone)]
 pub enum EvalReply {
-    Ok { value: JsValueBridge, stats: ExecStats },
-    Err { error: JsValueBridge, stats: ExecStats }, // error is a JsValueBridge::Error{...}
+    Ok {
+        value: JsValueBridge,
+        stats: ExecStats,
+    },
+    Err {
+        error: JsValueBridge,
+        stats: ExecStats,
+    }, // error is a JsValueBridge::Error{...}
 }
 
 pub enum DenoMsg {
@@ -53,7 +59,9 @@ pub enum ResolvePayload {
 }
 
 pub enum NodeMsg {
-    EmitMessage { value: JsValueBridge },
+    EmitMessage {
+        value: JsValueBridge,
+    },
     EmitClose,
 
     /// The ONLY message that carries a PromiseSettler.
@@ -71,6 +79,6 @@ pub enum NodeMsg {
     InvokeHostFunctionAsync {
         func_id: usize,
         args: Vec<JsValueBridge>,
-        reply: tokio::sync::oneshot::Sender<Result<JsValueBridge, JsValueBridge>>
+        reply: tokio::sync::oneshot::Sender<Result<JsValueBridge, JsValueBridge>>,
     },
 }

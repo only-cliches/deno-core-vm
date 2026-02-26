@@ -199,14 +199,20 @@ pub fn to_neon_value<'a, C: Context<'a>>(
                 .arg(b)
                 .apply::<JsValue, _>(cx)
         }
-        JsValueBridge::Error { name, message, stack, code } => {
+        JsValueBridge::Error {
+            name,
+            message,
+            stack,
+            code,
+        } => {
             let err = cx.error(message)?;
             let obj = err.upcast::<JsObject>();
 
             // Force message/name to be enumerable so Jest toMatchObject sees them.
             if let (Ok(object_ctor), Ok(define_prop)) = (
                 cx.global::<JsFunction>("Object"),
-                cx.global::<JsObject>("Object").and_then(|o| o.get::<JsFunction, _, _>(cx, "defineProperty")),
+                cx.global::<JsObject>("Object")
+                    .and_then(|o| o.get::<JsFunction, _, _>(cx, "defineProperty")),
             ) {
                 let define = define_prop;
 
@@ -240,13 +246,13 @@ pub fn to_neon_value<'a, C: Context<'a>>(
                 let name = cx.string(name);
                 let _ = obj.set(cx, "message", msg);
                 let _ = obj.set(cx, "name", name);
-                if let Some(stack) = stack { 
+                if let Some(stack) = stack {
                     let st = cx.string(stack);
-                    let _ = obj.set(cx, "stack", st); 
+                    let _ = obj.set(cx, "stack", st);
                 };
-                if let Some(code) = code { 
+                if let Some(code) = code {
                     let cod = cx.string(code);
-                    let _ = obj.set(cx, "code", cod); 
+                    let _ = obj.set(cx, "code", cod);
                 };
             }
 

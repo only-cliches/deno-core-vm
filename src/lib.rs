@@ -6,8 +6,6 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc::error::TrySendError;
 
 mod bridge;
-mod deno_thread;
-mod log;
 mod worker;
 
 use crate::bridge::promise::PromiseSettler;
@@ -55,31 +53,6 @@ fn try_send_deno_msg_or_reject(tx: &tokio::sync::mpsc::Sender<DenoMsg>, msg: Den
             DenoMsg::Eval { deferred: None, .. } | DenoMsg::PostMessage { .. } => {}
         },
     }
-}
-
-fn is_async_function<'a>(cx: &mut FunctionContext<'a>, f: Handle<'a, JsFunction>) -> bool {
-    // Best-effort: fn.constructor.name === "AsyncFunction"
-    let ctor: Handle<JsValue> = match f.get(cx, "constructor") {
-        Ok(v) => v,
-        Err(_) => return false,
-    };
-
-    let ctor_obj: Handle<JsObject> = match ctor.downcast::<JsObject, _>(cx) {
-        Ok(o) => o,
-        Err(_) => return false,
-    };
-
-    let name: Handle<JsValue> = match ctor_obj.get(cx, "name") {
-        Ok(v) => v,
-        Err(_) => return false,
-    };
-
-    let name_str: Handle<JsString> = match name.downcast::<JsString, _>(cx) {
-        Ok(s) => s,
-        Err(_) => return false,
-    };
-
-    name_str.value(cx) == "AsyncFunction"
 }
 
 fn create_worker(mut cx: FunctionContext) -> JsResult<JsObject> {
@@ -172,7 +145,7 @@ fn create_worker(mut cx: FunctionContext) -> JsResult<JsObject> {
         let id2 = id;
         let f = JsFunction::new(&mut cx, move |mut cx| {
             let (deferred, promise) = cx.promise();
-            let settler = PromiseSettler::new(deferred, cx.channel(), "close");
+            let settler = PromiseSettler::new(deferred, cx.channel());
 
             let tx = {
                 let map = WORKERS
@@ -199,7 +172,7 @@ fn create_worker(mut cx: FunctionContext) -> JsResult<JsObject> {
         let id2 = id;
         let f = JsFunction::new(&mut cx, move |mut cx| {
             let (deferred, promise) = cx.promise();
-            let settler = PromiseSettler::new(deferred, cx.channel(), "memory");
+            let settler = PromiseSettler::new(deferred, cx.channel());
 
             let tx = {
                 let map = WORKERS
@@ -230,7 +203,7 @@ fn create_worker(mut cx: FunctionContext) -> JsResult<JsObject> {
             let bridged = crate::bridge::neon_codec::from_neon_value(&mut cx, js)?;
 
             let (deferred, promise) = cx.promise();
-            let settler = PromiseSettler::new(deferred, cx.channel(), "setGlobal");
+            let settler = PromiseSettler::new(deferred, cx.channel());
 
             let tx_and_value = {
                 let mut map = WORKERS
@@ -293,7 +266,7 @@ fn create_worker(mut cx: FunctionContext) -> JsResult<JsObject> {
             let options = parse_eval_options(&mut cx, 1);
 
             let (deferred, promise) = cx.promise();
-            let settler = PromiseSettler::new(deferred, cx.channel(), "eval");
+            let settler = PromiseSettler::new(deferred, cx.channel());
 
             let tx = {
                 let map = WORKERS
@@ -429,7 +402,6 @@ fn create_worker(mut cx: FunctionContext) -> JsResult<JsObject> {
 
 #[neon::main]
 fn main(mut cx: ModuleContext) -> NeonResult<()> {
-    dw_log!("START WORKER");
     cx.export_function("DenoWorker", create_worker)?;
     Ok(())
 }

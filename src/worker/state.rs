@@ -67,26 +67,42 @@ pub struct WorkerCreateOptions {
 
 impl WorkerCreateOptions {
     pub fn from_neon<'a>(cx: &mut FunctionContext<'a>, idx: i32) -> Result<Self, Throw> {
-        let mut out = Self { channel_size: 64, ..Default::default() };
-        if (idx as usize) >= cx.len() { return Ok(out); }
+        let mut out = Self {
+            channel_size: 64,
+            ..Default::default()
+        };
+        if (idx as usize) >= cx.len() {
+            return Ok(out);
+        }
         let raw = cx.argument::<JsValue>(idx as usize)?;
 
-        let obj = match raw.downcast::<JsObject, _>(cx) { Ok(v) => v, Err(_) => return Ok(out) };
-   
+        let obj = match raw.downcast::<JsObject, _>(cx) {
+            Ok(v) => v,
+            Err(_) => return Ok(out),
+        };
+
         if let Ok(v) = obj.get::<JsValue, _, _>(cx, "channelSize") {
             if let Ok(n) = v.downcast::<JsNumber, _>(cx) {
                 let s = n.value(cx);
-                if s.is_finite() && s >= 1.0 { out.channel_size = s as usize; }
+                if s.is_finite() && s >= 1.0 {
+                    out.channel_size = s as usize;
+                }
             }
         }
         if let Ok(v) = obj.get::<JsValue, _, _>(cx, "maxEvalMs") {
-            if let Ok(n) = v.downcast::<JsNumber, _>(cx) { out.runtime_options.max_eval_ms = Some(n.value(cx) as u64); }
+            if let Ok(n) = v.downcast::<JsNumber, _>(cx) {
+                out.runtime_options.max_eval_ms = Some(n.value(cx) as u64);
+            }
         }
         if let Ok(v) = obj.get::<JsValue, _, _>(cx, "maxMemoryBytes") {
-            if let Ok(n) = v.downcast::<JsNumber, _>(cx) { out.runtime_options.max_memory_bytes = Some(n.value(cx) as u64); }
+            if let Ok(n) = v.downcast::<JsNumber, _>(cx) {
+                out.runtime_options.max_memory_bytes = Some(n.value(cx) as u64);
+            }
         }
         if let Ok(v) = obj.get::<JsValue, _, _>(cx, "maxStackSizeBytes") {
-            if let Ok(n) = v.downcast::<JsNumber, _>(cx) { out.runtime_options.max_stack_size_bytes = Some(n.value(cx) as u64); }
+            if let Ok(n) = v.downcast::<JsNumber, _>(cx) {
+                out.runtime_options.max_stack_size_bytes = Some(n.value(cx) as u64);
+            }
         }
         Ok(out)
     }

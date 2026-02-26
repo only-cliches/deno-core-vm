@@ -23,7 +23,10 @@ pub enum JsValueBridge {
         code: Option<String>,
     },
 
-    HostFunction { id: usize, is_async: bool },
+    HostFunction {
+        id: usize,
+        is_async: bool,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -79,7 +82,8 @@ impl EvalOptions {
             if let Ok(arr) = v.downcast::<JsArray, _>(cx) {
                 for i in 0..arr.len(cx) {
                     let item = arr.get::<JsValue, _, _>(cx, i)?;
-                    out.args.push(crate::bridge::neon_codec::from_neon_value(cx, item)?);
+                    out.args
+                        .push(crate::bridge::neon_codec::from_neon_value(cx, item)?);
                 }
             }
         }

@@ -29,7 +29,10 @@ pub fn op_host_call_sync(
     use std::time::Duration;
 
     let ctx = state.borrow::<WorkerOpContext>().clone();
-    let bridged_args = args.into_iter().map(JsValueBridge::Json).collect::<Vec<_>>();
+    let bridged_args = args
+        .into_iter()
+        .map(JsValueBridge::Json)
+        .collect::<Vec<_>>();
 
     let (tx, rx) = mpsc::channel::<Result<JsValueBridge, JsValueBridge>>();
 
@@ -47,8 +50,12 @@ pub fn op_host_call_sync(
         .map_err(|_| io::Error::other("sync host call timed out"))?;
 
     match reply {
-        Ok(v) => Ok(serde_json::json!({ "ok": true, "value": to_json_reply(v) })),
-        Err(e) => Ok(serde_json::json!({ "ok": false, "error": to_json_reply(e) })),
+        Ok(v) => {
+            Ok(serde_json::json!({ "ok": true, "value": crate::bridge::wire::to_wire_json(&v) }))
+        }
+        Err(e) => {
+            Ok(serde_json::json!({ "ok": false, "error": crate::bridge::wire::to_wire_json(&e) }))
+        }
     }
 }
 
@@ -76,38 +83,11 @@ pub async fn op_host_call_async(
     let reply = rx.await.map_err(|_| io::Error::other("reply dropped"))?;
 
     match reply {
-        Ok(v) => Ok(serde_json::json!({ "ok": true, "value": to_json_reply(v) })),
-        Err(e) => Ok(serde_json::json!({ "ok": false, "error": to_json_reply(e) })),
-    }
-}
-
-fn to_json_reply(v: JsValueBridge) -> serde_json::Value {
-    match v {
-        JsValueBridge::Undefined => serde_json::Value::Null,
-        JsValueBridge::Null => serde_json::Value::Null,
-        JsValueBridge::Bool(b) => serde_json::json!(b),
-        JsValueBridge::Number(n) => serde_json::json!(n),
-        JsValueBridge::String(s) => serde_json::json!(s),
-        JsValueBridge::DateMs(ms) => serde_json::json!({ "__date": ms }),
-        JsValueBridge::Bytes(b) => serde_json::json!({ "__bytes": b }),
-        JsValueBridge::Json(v) => v,
-        JsValueBridge::V8Serialized(b) => serde_json::json!({ "__v8": b }),
-        JsValueBridge::Error {
-            name,
-            message,
-            stack,
-            code,
-        } => serde_json::json!({
-            "name": name,
-            "message": message,
-            "stack": stack,
-            "code": code,
-            "__denojs_worker_type": "error"
-        }),
-        JsValueBridge::HostFunction { id, is_async } => serde_json::json!({
-            "__denojs_worker_type": "function",
-            "id": id,
-            "async": is_async
-        }),
+        Ok(v) => {
+            Ok(serde_json::json!({ "ok": true, "value": crate::bridge::wire::to_wire_json(&v) }))
+        }
+        Err(e) => {
+            Ok(serde_json::json!({ "ok": false, "error": crate::bridge::wire::to_wire_json(&e) }))
+        }
     }
 }
