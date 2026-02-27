@@ -22,6 +22,7 @@ use deno_core::{ModuleLoader, ModuleSource, ModuleType, resolve_url};
 use deno_error::JsErrorBox;
 use std::collections::HashMap;
 use std::sync::Mutex;
+use deno_core::url::Url;
 
 #[derive(Clone)]
 pub struct WorkerOpContext {
@@ -30,7 +31,41 @@ pub struct WorkerOpContext {
     pub node_tx: mpsc::Sender<NodeMsg>,
 }
 
-use deno_core::url::Url;
+
+const BARE_VIRTUAL_SCHEME: &str = "denojs-worker";
+const BARE_VIRTUAL_HOST: &str = "bare";
+
+fn bare_virtual_url_for(specifier: &str) -> Url {
+    // Stable, valid absolute URL for "bare" specifiers like "virtual-mod".
+    // Example: denojs-worker://bare/?specifier=virtual-mod
+    let mut u = Url::parse(&format!("{BARE_VIRTUAL_SCHEME}://{BARE_VIRTUAL_HOST}/"))
+        .expect("bare virtual base url");
+    u.query_pairs_mut().append_pair("specifier", specifier);
+    u
+}
+
+fn decode_bare_virtual_specifier(u: &Url) -> Option<String> {
+    if u.scheme() != BARE_VIRTUAL_SCHEME {
+        return None;
+    }
+    if u.host_str() != Some(BARE_VIRTUAL_HOST) {
+        return None;
+    }
+    u.query_pairs()
+        .find(|(k, _)| k == "specifier")
+        .map(|(_, v)| v.to_string())
+}
+
+fn is_bare_virtual_url(u: &Url) -> bool {
+    decode_bare_virtual_specifier(u).is_some()
+}
+
+fn maybe_decode_bare_virtual_referrer(referrer: &str) -> String {
+    Url::parse(referrer)
+        .ok()
+        .and_then(|u| decode_bare_virtual_specifier(&u))
+        .unwrap_or_else(|| referrer.to_string())
+}
 
 fn cwd_dir_url_string() -> Option<String> {
     let cwd = std::env::current_dir().ok()?;
@@ -153,8 +188,17 @@ impl ModuleLoader for DynamicModuleLoader {
         referrer: &str,
         _kind: deno_core::ResolutionKind,
     ) -> Result<deno_core::url::Url, JsErrorBox> {
-        deno_core::resolve_import(specifier, referrer)
-            .map_err(|e| JsErrorBox::generic(e.to_string()))
+        match deno_core::resolve_import(specifier, referrer) {
+            Ok(u) => Ok(u),
+            Err(e) => {
+                // Allow bare specifiers only when imports is in Callback mode,
+                // so the Node callback can provide a virtual module source.
+                match self.imports_policy {
+                    crate::worker::state::ImportsPolicy::Callback => Ok(bare_virtual_url_for(specifier)),
+                    _ => Err(JsErrorBox::generic(e.to_string())),
+                }
+            }
+        }
     }
 
     fn load(
@@ -163,17 +207,22 @@ impl ModuleLoader for DynamicModuleLoader {
         maybe_referrer: Option<&deno_core::ModuleLoadReferrer>,
         options: deno_core::ModuleLoadOptions,
     ) -> deno_core::ModuleLoadResponse {
-        let spec = module_specifier.as_str().to_string();
+        let spec_url = module_specifier.as_str().to_string();
 
         // Best-effort referrer string for callback
-        let referrer = maybe_referrer
+        let referrer_url = maybe_referrer
             .map(|r| r.specifier.as_str().to_string())
             .unwrap_or_default();
+
+        // If this was a synthetic "bare virtual" URL, pass the original bare specifier
+        // to the Node callback (and decode the referrer too if it was synthetic).
+        let cb_specifier = decode_bare_virtual_specifier(module_specifier).unwrap_or_else(|| spec_url.clone());
+        let cb_referrer = maybe_decode_bare_virtual_referrer(&referrer_url);
 
         // 1) Serve in-memory eval modules first (one-shot)
         let maybe_code = {
             let mut guard = self.reg.modules.lock().expect("modules lock");
-            guard.remove(&spec)
+            guard.remove(&spec_url)
         };
 
         if let Some(code) = maybe_code {
@@ -190,7 +239,7 @@ impl ModuleLoader for DynamicModuleLoader {
         match self.imports_policy {
             crate::worker::state::ImportsPolicy::DenyAll => {
                 return deno_core::ModuleLoadResponse::Sync(Err(JsErrorBox::generic(format!(
-                    "Import blocked (imports disabled): {spec}"
+                    "Import blocked (imports disabled): {cb_specifier}"
                 ))));
             }
 
@@ -214,8 +263,8 @@ impl ModuleLoader for DynamicModuleLoader {
 
             if node_tx
                 .send(NodeMsg::ImportRequest {
-                    specifier: spec.clone(),
-                    referrer,
+                    specifier: cb_specifier.clone(),
+                    referrer: cb_referrer.clone(),
                     reply: tx,
                 })
                 .await
@@ -225,11 +274,17 @@ impl ModuleLoader for DynamicModuleLoader {
             }
 
             match rx.await.unwrap_or(ImportDecision::Block) {
-                ImportDecision::Block => {
-                    Err(JsErrorBox::generic(format!("Import blocked: {spec}")))
-                }
+                ImportDecision::Block => Err(JsErrorBox::generic(format!("Import blocked: {}", cb_specifier))),
 
                 ImportDecision::AllowDisk => {
+                    // FsModuleLoader cannot load our synthetic bare URLs.
+                    if is_bare_virtual_url(&module_specifier) {
+                        return Err(JsErrorBox::generic(format!(
+                            "Import allowed for disk, but bare specifier has no disk resolution: {}",
+                            cb_specifier
+                        )));
+                    }
+
                     match fs.load(&module_specifier, maybe_referrer_owned.as_ref(), options) {
                         deno_core::ModuleLoadResponse::Sync(r) => r,
                         deno_core::ModuleLoadResponse::Async(fut) => fut.await,

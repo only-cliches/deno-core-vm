@@ -397,4 +397,109 @@ describe("deno_worker: imports/module loader combinations", () => {
         },
         20_000
     );
+    it(
+        "imports:sync callback returning string intercepts bare specifier static import",
+        async () => {
+            dw = new DenoWorker({
+                imports: (specifier: string) => {
+                    if (specifier === "virtual-mod") return `export default 22;`;
+                    return true; // pass through
+                },
+            } as any);
+
+            const src = `
+            import x from "virtual-mod";
+            moduleReturn(x);
+        `;
+
+            await expect(dw.evalModule(src)).resolves.toBe(22);
+        },
+        20_000
+    );
+
+    it(
+        "imports:sync callback returning string intercepts bare specifier dynamic import()",
+        async () => {
+            dw = new DenoWorker({
+                imports: (specifier: string) => {
+                    if (specifier === "virtual-mod-dyn") return `export default 22;`;
+                    return true;
+                },
+            } as any);
+
+            const src = `
+            const m = await import("virtual-mod-dyn");
+            moduleReturn(m.default);
+        `;
+
+            await expect(dw.evalModule(src)).resolves.toBe(22);
+        },
+        20_000
+    );
+
+    it(
+        "imports:async callback returning string intercepts bare specifier static import",
+        async () => {
+            dw = new DenoWorker({
+                imports: async (specifier: string) => {
+                    if (specifier === "virtual-mod-async") return `export default 22;`;
+                    return true;
+                },
+            } as any);
+
+            const src = `
+            import x from "virtual-mod-async";
+            moduleReturn(x);
+        `;
+
+            await expect(dw.evalModule(src)).resolves.toBe(22);
+        },
+        20_000
+    );
+
+    it(
+        "imports:async callback returning string intercepts bare specifier dynamic import()",
+        async () => {
+            dw = new DenoWorker({
+                imports: async (specifier: string) => {
+                    if (specifier === "virtual-mod-async-dyn") return `export default 22;`;
+                    return true;
+                },
+            } as any);
+
+            const src = `
+            const m = await import("virtual-mod-async-dyn");
+            moduleReturn(m.default);
+        `;
+
+            await expect(dw.evalModule(src)).resolves.toBe(22);
+        },
+        20_000
+    );
+
+    it(
+        "imports:callback receives original bare specifier (not synthetic URL)",
+        async () => {
+            const seen: Array<{ specifier: string; referrer: string }> = [];
+
+            dw = new DenoWorker({
+                imports: (specifier: string, referrer: string) => {
+                    seen.push({ specifier, referrer });
+                    if (specifier === "virtual-mod-seen") return `export default 1;`;
+                    return false;
+                },
+            } as any);
+
+            const src = `
+            import x from "virtual-mod-seen";
+            moduleReturn(x);
+        `;
+
+            await expect(dw.evalModule(src)).resolves.toBe(1);
+            expect(seen.length).toBeGreaterThanOrEqual(1);
+            expect(seen[0].specifier).toBe("virtual-mod-seen");
+            expect(typeof seen[0].referrer).toBe("string");
+        },
+        20_000
+    );
 });
