@@ -45,7 +45,16 @@ async function main() {
   rsFiles.sort((a, b) => a.localeCompare(b));
 
   const lines = [];
-  lines.push("# Rust Files Dump");
+  
+  lines.push("# Rules ");
+  lines.push("- The goal of this project is to build a Deno powered VM that runs from NodeJS.");
+  lines.push("- Always return complete code snippets with context so I know where to put them.");
+  lines.push("- If more than 50% of a file needs to be replaced, just provide the whole file. ");
+  lines.push("- Unless otherwise stated: prioritize secure, modular, maintainable code. ");
+  lines.push("- If you see the same issue/bug come up more than twice, try a different approach to the problem.");
+  lines.push("- If there is an ambiguity in a request, ask clarifying questions before generating code. ");
+  lines.push("- If you believe there is a better approach/solution than the one I suggest, let me know. ");
+  lines.push("- Do not explain why something works unless I ask.");
   lines.push("");
   lines.push(`Generated from \`src\` under \`${cwd}\``);
   lines.push("");
