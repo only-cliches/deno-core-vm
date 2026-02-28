@@ -44,12 +44,43 @@ pub struct SandboxFs {
 }
 
 impl SandboxFs {
-   pub fn new(cwd: PathBuf) -> Self {
+    pub fn new(cwd: PathBuf) -> Self {
         Self {
             inner: RealFs::default(),
             cwd: Arc::new(cwd),
         }
     }
+}
+
+pub fn normalize_startup_url(cwd: &Path, raw: Option<&str>) -> Option<Url> {
+    let raw = raw.map(|s| s.trim()).filter(|s| !s.is_empty())?;
+
+    let cwd_abs = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+
+    let candidate_path: PathBuf = if raw.starts_with("file://") {
+        let u = Url::parse(raw).ok()?;
+        u.to_file_path().ok()?
+    } else {
+        let p = Path::new(raw);
+        if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            cwd_abs.join(p)
+        }
+    };
+
+    let file_abs = std::fs::canonicalize(&candidate_path).ok()?;
+
+    // Enforce sandbox: startup must be within cwd
+    if !file_abs.starts_with(&cwd_abs) {
+        return None;
+    }
+
+    if !file_abs.is_file() {
+        return None;
+    }
+
+    Url::from_file_path(file_abs).ok()
 }
 
 impl FileSystem for SandboxFs {

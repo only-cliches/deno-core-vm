@@ -14,7 +14,11 @@ pub fn dispatch_node_msg(worker_id: usize, msg: NodeMsg) {
             if let Some(w) = map.get(&worker_id) {
                 (
                     w.channel.clone(),
-                    Some((w.callbacks.clone(), w.host_functions.clone(), w.last_stats.clone())),
+                    Some((
+                        w.callbacks.clone(),
+                        w.host_functions.clone(),
+                        w.last_stats.clone(),
+                    )),
                 )
             } else {
                 return;
@@ -98,6 +102,13 @@ pub fn dispatch_node_msg(worker_id: usize, msg: NodeMsg) {
                 NodeMsg::ImportRequest { specifier, referrer, reply } => {
                     use crate::worker::messages::ImportDecision;
 
+                    if std::env::var("DENOJS_WORKER_DEBUG_IMPORTS").is_ok() {
+                        println!(
+                            "[denojs-worker][imports] NodeMsg::ImportRequest specifier={} referrer={}",
+                            specifier, referrer
+                        );
+                    }
+
                     struct ImportState {
                         reply: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<ImportDecision>>>,
                         hooks: std::sync::Mutex<Option<(Root<JsFunction>, Root<JsFunction>)>>,
@@ -116,17 +127,116 @@ pub fn dispatch_node_msg(worker_id: usize, msg: NodeMsg) {
                         }
                     }
 
-                    fn interpret_value<'a>(cx: &mut TaskContext<'a>, v: Handle<'a, JsValue>) -> Option<ImportDecision> {
-                        if let Ok(s) = v.downcast::<JsString, _>(cx) {
-                            return Some(ImportDecision::Source(s.value(cx)));
+                    fn interpret_value<'a>(
+                        cx: &mut TaskContext<'a>,
+                        v: Handle<'a, JsValue>,
+                    ) -> Option<crate::worker::messages::ImportDecision> {
+                        use crate::worker::messages::ImportDecision;
+
+                        let debug = std::env::var("DENOJS_WORKER_DEBUG_IMPORTS")
+                            .ok()
+                            .map(|s| {
+                                let s = s.trim().to_ascii_lowercase();
+                                s == "1" || s == "true" || s == "yes" || s == "on"
+                            })
+                            .unwrap_or(false);
+
+                        let log = |msg: String| {
+                            if debug {
+                                println!("[denojs-worker][imports] {}", msg);
+                            }
+                        };
+
+                        // If it's a Promise, defer to the Promise handling path.
+                        if v.is_a::<neon::types::JsPromise, _>(cx) {
+                            log("interpret_value: got JsPromise => defer".to_string());
+                            return None;
                         }
+
+                        // String means JS source (legacy behavior)
+                        if let Ok(s) = v.downcast::<JsString, _>(cx) {
+                            let code = s.value(cx);
+                            log(format!(
+                                "interpret_value: got JsString => SourceTyped ext=js bytes={}",
+                                code.len()
+                            ));
+                            return Some(ImportDecision::SourceTyped {
+                                ext: "js".into(),
+                                code,
+                            });
+                        }
+
+                        // Boolean means allow/block disk resolution
                         if let Ok(b) = v.downcast::<JsBoolean, _>(cx) {
-                            return Some(if b.value(cx) {
+                            let allowed = b.value(cx);
+                            log(format!(
+                                "interpret_value: got JsBoolean={} => {}",
+                                allowed,
+                                if allowed { "AllowDisk" } else { "Block" }
+                            ));
+                            return Some(if allowed {
                                 ImportDecision::AllowDisk
                             } else {
                                 ImportDecision::Block
                             });
                         }
+
+                        // Object forms:
+                        // - { js: "..." } | { ts: "..." } | { tsx: "..." } | { jsx: "..." }
+                        // - { resolve: "..." }
+                        let Ok(obj) = v.downcast::<JsObject, _>(cx) else {
+                            if debug {
+                                log("interpret_value: unsupported (not string/bool/object) => None".to_string());
+                            }
+                            return None;
+                        };
+
+                        // { resolve: string }
+                        if let Ok(rv) = obj.get_value(cx, "resolve") {
+                            if let Ok(rs) = rv.downcast::<JsString, _>(cx) {
+                                let s = rs.value(cx);
+                                let trimmed = s.trim().to_string();
+                                if trimmed.is_empty() {
+                                    log("interpret_value: object { resolve: \"\" } => Block".to_string());
+                                    return Some(ImportDecision::Block);
+                                }
+                                log(format!(
+                                    "interpret_value: object {{ resolve: ... }} => Resolve({})",
+                                    trimmed
+                                ));
+                                return Some(ImportDecision::Resolve(trimmed));
+                            } else if debug && !rv.is_a::<JsUndefined, _>(cx) && !rv.is_a::<JsNull, _>(cx) {
+                                log("interpret_value: object has 'resolve' but it's not a string (ignored)".to_string());
+                            }
+                        }
+
+                        // { js|ts|tsx|jsx: string }
+                        for ext in ["js", "ts", "tsx", "jsx"] {
+                            if let Ok(vv) = obj.get_value(cx, ext) {
+                                if let Ok(ss) = vv.downcast::<JsString, _>(cx) {
+                                    let code = ss.value(cx);
+                                    log(format!(
+                                        "interpret_value: object {{ {}: <string> }} => SourceTyped ext={} bytes={}",
+                                        ext,
+                                        ext,
+                                        code.len()
+                                    ));
+                                    return Some(ImportDecision::SourceTyped {
+                                        ext: ext.to_string(),
+                                        code,
+                                    });
+                                } else if debug && !vv.is_a::<JsUndefined, _>(cx) && !vv.is_a::<JsNull, _>(cx) {
+                                    log(format!(
+                                        "interpret_value: object has key '{}' but value is not a string (ignored)",
+                                        ext
+                                    ));
+                                }
+                            }
+                        }
+
+                        // Important: do not default-block here, because Promises are objects.
+                        // Unknown objects will be blocked by the caller if they are not Promises.
+                        log("interpret_value: object shape not recognized => defer".to_string());
                         None
                     }
 
@@ -152,6 +262,7 @@ pub fn dispatch_node_msg(worker_id: usize, msg: NodeMsg) {
                             return Ok(());
                         }
                     };
+
 
                     if let Some(d) = interpret_value(cx, returned) {
                         state.send_once(d);
@@ -617,30 +728,33 @@ pub async fn handle_deno_msg(
         DenoMsg::PostMessage { value } => {
             let payload = serde_json::to_string(&crate::bridge::wire::to_wire_json(&value))
                 .unwrap_or_else(|_| "null".into());
-            let script = format!("globalThis.__dispatchNodeMessage(globalThis.__hydrate({payload}))");
+            let script =
+                format!("globalThis.__dispatchNodeMessage(globalThis.__hydrate({payload}))");
 
             let _ = worker.js_runtime.execute_script("<postMessage>", script);
             false
         }
 
-        DenoMsg::Pump { deferred } => {
-            let res = worker.run_event_loop(false).await;
+        // DenoMsg::Pump { deferred } => {
+        //     let res = worker.run_event_loop(false).await;
 
-            match res {
-                Ok(()) => deferred.resolve_with_value_via_channel(JsValueBridge::Undefined),
-                Err(e) => deferred.reject_with_error(e.to_string()),
-            }
+        //     match res {
+        //         Ok(()) => deferred.resolve_with_value_via_channel(JsValueBridge::Undefined),
+        //         Err(e) => deferred.reject_with_error(e.to_string()),
+        //     }
 
-            false
-        }
-
-        DenoMsg::SetGlobal { key, value, deferred } => {
+        //     false
+        // }
+        DenoMsg::SetGlobal {
+            key,
+            value,
+            deferred,
+        } => {
             let json = serde_json::to_string(&crate::bridge::wire::to_wire_json(&value))
                 .unwrap_or_else(|_| "null".into());
             let key_json = serde_json::to_string(&key).unwrap_or_else(|_| "\"\"".into());
-            let script = format!(
-                "globalThis.__globals[{key_json}] = {json}; globalThis.__applyGlobals();"
-            );
+            let script =
+                format!("globalThis.__globals[{key_json}] = {json}; globalThis.__applyGlobals();");
 
             let res = worker.js_runtime.execute_script("<setGlobal>", script);
 
@@ -686,7 +800,12 @@ pub async fn handle_deno_msg(
             false
         }
 
-        DenoMsg::Eval { source, options, deferred, sync_reply } => {
+        DenoMsg::Eval {
+            source,
+            options,
+            deferred,
+            sync_reply,
+        } => {
             let reply = eval_in_runtime(worker, limits, &source, options).await;
 
             if let Some(tx) = sync_reply {

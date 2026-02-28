@@ -141,7 +141,7 @@ async fn eval_module(worker: &mut MainWorker, source: &str) -> Result<JsValueBri
     };
 
     let spec = reg.next_specifier();
-    reg.put(&spec, source);
+    reg.put_ephemeral(&spec, source);
 
     let url = resolve_url(&spec).map_err(|e| JsValueBridge::Error {
         name: "ModuleError".into(),

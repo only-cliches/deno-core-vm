@@ -43,8 +43,7 @@ fn try_send_deno_msg_or_reject(tx: &tokio::sync::mpsc::Sender<DenoMsg>, msg: Den
 
             DenoMsg::Close { deferred }
             | DenoMsg::Memory { deferred }
-            | DenoMsg::SetGlobal { deferred, .. }
-            | DenoMsg::Pump { deferred } => {
+            | DenoMsg::SetGlobal { deferred, .. } => {
                 deferred.reject_with_error("Runtime is closed or request queue is full");
             }
 
@@ -52,7 +51,6 @@ fn try_send_deno_msg_or_reject(tx: &tokio::sync::mpsc::Sender<DenoMsg>, msg: Den
         },
     }
 }
-
 fn create_worker(mut cx: FunctionContext) -> JsResult<JsObject> {
     let opts = worker::state::WorkerCreateOptions::from_neon(&mut cx, 0).unwrap_or_default();
 
@@ -90,9 +88,22 @@ fn create_worker(mut cx: FunctionContext) -> JsResult<JsObject> {
         }
     }
 
+    fn strict_channel() -> bool {
+        std::env::var("DENOJS_WORKER_STRICT_CHANNEL")
+            .ok()
+            .map(|v| {
+                let v = v.trim().to_ascii_lowercase();
+                v == "1" || v == "true" || v == "yes" || v == "on"
+            })
+            .unwrap_or(false)
+    }
+
     let api = cx.empty_object();
 
-    // postMessage(msg)
+    // postMessage(msg) -> boolean
+    // - true: enqueued to worker
+    // - false: dropped due to full/closed channel
+    // If DENOJS_WORKER_STRICT_CHANNEL is set, throw instead of returning false.
     {
         let id2 = id;
         let f = JsFunction::new(&mut cx, move |mut cx| {
@@ -106,11 +117,22 @@ fn create_worker(mut cx: FunctionContext) -> JsResult<JsObject> {
                 map.get(&id2).map(|w| w.deno_tx.clone())
             };
 
-            if let Some(tx) = tx {
-                let _ = tx.try_send(DenoMsg::PostMessage { value: msg });
-                Ok(cx.undefined())
-            } else {
-                cx.throw_error("Runtime is closed")
+            let Some(tx) = tx else {
+                if strict_channel() {
+                    return cx.throw_error("Runtime is closed (postMessage)");
+                }
+                return Ok(cx.boolean(false));
+            };
+
+            match tx.try_send(DenoMsg::PostMessage { value: msg }) {
+                Ok(()) => Ok(cx.boolean(true)),
+                Err(_) => {
+                    if strict_channel() {
+                        cx.throw_error("postMessage dropped: worker queue full or closed")
+                    } else {
+                        Ok(cx.boolean(false))
+                    }
+                }
             }
         })?;
         api.set(&mut cx, "postMessage", f)?;
@@ -212,8 +234,6 @@ fn create_worker(mut cx: FunctionContext) -> JsResult<JsObject> {
         api.set(&mut cx, "memory", f)?;
     }
 
-    // src/lib.rs (inside create_worker)
-
     // setGlobal(key, value): Promise<void>
     {
         let id2 = id;
@@ -237,10 +257,8 @@ fn create_worker(mut cx: FunctionContext) -> JsResult<JsObject> {
                     cx: &mut FunctionContext<'a>,
                     func: Handle<'a, JsFunction>,
                 ) -> bool {
-                    // Prefer Jest's underlying implementation if present.
                     let candidate: Handle<'a, JsFunction> = func;
 
-                    // 1) Object.prototype.toString.call(fn) === "[object AsyncFunction]"
                     let tag_is_async = (|| -> Option<bool> {
                         let object_ctor: Handle<JsFunction> = cx.global("Object").ok()?;
                         let proto_val = object_ctor.get_value(cx, "prototype").ok()?;
@@ -263,7 +281,6 @@ fn create_worker(mut cx: FunctionContext) -> JsResult<JsObject> {
                         return true;
                     }
 
-                    // 2) constructor.name === "AsyncFunction"
                     (|| -> Option<bool> {
                         let obj = candidate.upcast::<JsObject>();
                         let ctor_val = obj.get_value(cx, "constructor").ok()?;
@@ -378,7 +395,6 @@ fn create_worker(mut cx: FunctionContext) -> JsResult<JsObject> {
                 .blocking_recv()
                 .map_err(|e| cx.throw_error::<_, ()>(e.to_string()).unwrap_err())?;
 
-            // Update lastExecutionStats for evalSync
             {
                 if let Ok(mut map) = WORKERS.lock() {
                     if let Some(w) = map.get_mut(&id2) {
@@ -398,7 +414,7 @@ fn create_worker(mut cx: FunctionContext) -> JsResult<JsObject> {
         api.set(&mut cx, "evalSync", f)?;
     }
 
-    // lastExecutionStats getter (best-effort, never abort worker construction)
+    // lastExecutionStats getter (unchanged)
     {
         let id2 = id;
 
@@ -425,7 +441,6 @@ fn create_worker(mut cx: FunctionContext) -> JsResult<JsObject> {
             }
         })?;
 
-        // Best-effort: if globals are polluted, just skip defining the property.
         let object_ctor: Option<Handle<JsFunction>> = cx.global("Object").ok();
         if let Some(object_ctor) = object_ctor {
             let object_obj: Handle<JsObject> = object_ctor.upcast();

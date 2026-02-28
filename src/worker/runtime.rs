@@ -11,11 +11,12 @@ use deno_resolver::npm::{DenoInNpmPackageChecker, NpmResolver};
 use sys_traits::impls::RealSys;
 
 use crate::worker::dispatch::{dispatch_node_msg, handle_deno_msg};
-use crate::worker::filesystem::{SandboxFs, dir_url_from_path, normalize_cwd, sandboxed_path_list};
+use crate::worker::filesystem::{
+    SandboxFs, dir_url_from_path, normalize_cwd, normalize_startup_url, sandboxed_path_list,
+};
 use crate::worker::messages::{DenoMsg, NodeMsg};
 use crate::worker::ops::{
-    op_denojs_worker_host_call_async,
-    op_denojs_worker_host_call_sync,
+    op_denojs_worker_host_call_async, op_denojs_worker_host_call_sync,
     op_denojs_worker_post_message,
 };
 use crate::worker::state::RuntimeLimits;
@@ -189,12 +190,41 @@ fn permissions_from_limits(limits: &RuntimeLimits, root: &Path) -> PermissionsCo
         }
     }
 
-    // If imports are enabled (AllowDisk or Callback) and the user did not explicitly
-    // configure read permissions, allow filesystem reads so module loading works.
-    if opts.allow_read.is_none() {
-        if !matches!(limits.imports, crate::worker::state::ImportsPolicy::DenyAll) {
-            // Empty list means "allow all" in Deno permissions.
+    // Defaults when imports are enabled (AllowDisk or Callback):
+    // - allow_read: required for disk module loading (file://, relative imports). Empty vec means "allow all".
+    // - allow_import: required for non-file specifiers (custom schemes, data:, http(s): if used).
+    //
+    // If the user explicitly set permissions.read or permissions.import, we do not override.
+    let imports_enabled = !matches!(limits.imports, crate::worker::state::ImportsPolicy::DenyAll);
+
+    if imports_enabled {
+        if opts.allow_read.is_none() {
+            // Match prior behavior expected by tests: imports imply disk reads are permitted.
             opts.allow_read = Some(vec![]);
+        }
+
+        if opts.allow_import.is_none() {
+            // Match prior behavior: allow module graph loads for non-file specifiers.
+            opts.allow_import = Some(vec![]);
+        }
+    }
+
+    // Node compatibility often implies node: specifiers and potentially node_modules.
+    // Keep allow_import enabled if nodeCompat, but do not widen allow_read if user configured it.
+    if limits.node_compat {
+        if opts.allow_import.is_none() {
+            opts.allow_import = Some(vec![]);
+        }
+    }
+
+    // Startup module might be file-based. If user didn't specify read perms and imports are disabled,
+    // minimally enable read+import so startup can load.
+    if limits.startup.is_some() && !imports_enabled {
+        if opts.allow_read.is_none() {
+            opts.allow_read = Some(vec![]);
+        }
+        if opts.allow_import.is_none() {
+            opts.allow_import = Some(vec![]);
         }
     }
 
@@ -227,6 +257,7 @@ pub fn spawn_worker_thread(
             };
 
             let cwd_path = normalize_cwd(limits.cwd.as_deref());
+            let startup_url = normalize_startup_url(&cwd_path, limits.startup.as_deref());
             let base_url = dir_url_from_path(&cwd_path);
             let module_reg = crate::worker::modules::ModuleRegistry::new(base_url.clone());
 
@@ -295,6 +326,26 @@ pub fn spawn_worker_thread(
                     }
                 }
                 return;
+            }
+
+            if let Some(url) = startup_url.as_ref() {
+                if worker.execute_side_module(url).await.is_err() {
+                    if let Ok(map) = crate::WORKERS.lock() {
+                        if let Some(w) = map.get(&worker_id) {
+                            w.closed.store(true, Ordering::SeqCst);
+                        }
+                    }
+                    return;
+                }
+
+                if worker.run_event_loop(false).await.is_err() {
+                    if let Ok(map) = crate::WORKERS.lock() {
+                        if let Some(w) = map.get(&worker_id) {
+                            w.closed.store(true, Ordering::SeqCst);
+                        }
+                    }
+                    return;
+                }
             }
 
             // Node pump runs on a dedicated OS thread

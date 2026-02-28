@@ -48,7 +48,7 @@ async function main() {
   
   lines.push("# Rules ");
   lines.push("- The goal of this project is to build a Deno powered VM that runs from NodeJS.");
-  lines.push("- Always return complete code snippets with context so I know where to put them.");
+  lines.push("- Always return complete 'fn' or 'impl' level code snippets, nothing smaller.");
   lines.push("- If more than 50% of a file needs to be replaced, just provide the whole file. ");
   lines.push("- Unless otherwise stated: prioritize secure, modular, maintainable code. ");
   lines.push("- If you see the same issue/bug come up more than twice, try a different approach to the problem.");

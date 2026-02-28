@@ -12,7 +12,16 @@ pub struct ExecStats {
 pub enum ImportDecision {
     Block,
     AllowDisk,
-    Source(String),
+
+    /// Virtual module source. `ext` controls how the runtime should parse it.
+    /// Supported: "js", "ts", "tsx"
+    SourceTyped {
+        ext: String,
+        code: String,
+    },
+
+    /// Rewrite the specifier and then resolve/load it (node then deno).
+    Resolve(String),
 }
 
 #[derive(Debug, Clone)]
@@ -48,9 +57,9 @@ pub enum DenoMsg {
     Close {
         deferred: PromiseSettler,
     },
-    Pump {
-        deferred: PromiseSettler,
-    },
+    // Pump {
+    //     deferred: PromiseSettler,
+    // },
 }
 
 pub enum ResolvePayload {

@@ -1,12 +1,12 @@
-use neon::prelude::*;
-use neon::result::Throw;
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-use tokio::sync::mpsc;
 use crate::bridge::neon_codec::from_neon_value;
 use crate::bridge::types::JsValueBridge;
 use crate::worker::messages::{DenoMsg, ExecStats, NodeMsg};
+use neon::prelude::*;
+use neon::result::Throw;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use tokio::sync::mpsc;
 
 use crate::bridge::promise::PromiseSettler; // can keep for local Node-side settlement only
 
@@ -59,12 +59,10 @@ pub struct RuntimeLimits {
     pub max_stack_size_bytes: Option<u64>,
     pub max_eval_ms: Option<u64>,
     pub imports: ImportsPolicy,
-    // New: per-worker cwd/sandbox root (path or file:// dir URL)
     pub cwd: Option<String>,
-    // New: node compatibility flag
     pub node_compat: bool,
-    // New: permissions config as JSON (parsed from Node options)
     pub permissions: Option<serde_json::Value>,
+    pub startup: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -76,7 +74,7 @@ pub struct WorkerCreateOptions {
 impl WorkerCreateOptions {
     pub fn from_neon<'a>(cx: &mut FunctionContext<'a>, idx: i32) -> Result<Self, Throw> {
         let mut out = Self {
-            channel_size: 64,
+            channel_size: 512,
             ..Default::default()
         };
         if (idx as usize) >= cx.len() {
@@ -110,6 +108,31 @@ impl WorkerCreateOptions {
             }
         }
         out.runtime_options.cwd = cwd_opt;
+
+        // startup (and legacy alias: index)
+        let mut startup_opt: Option<String> = None;
+
+        if let Ok(v) = obj.get::<JsValue, _, _>(cx, "startup") {
+            if let Ok(s) = v.downcast::<JsString, _>(cx) {
+                let raw = s.value(cx);
+                if !raw.trim().is_empty() {
+                    startup_opt = Some(raw);
+                }
+            }
+        }
+
+        if startup_opt.is_none() {
+            if let Ok(v) = obj.get::<JsValue, _, _>(cx, "index") {
+                if let Ok(s) = v.downcast::<JsString, _>(cx) {
+                    let raw = s.value(cx);
+                    if !raw.trim().is_empty() {
+                        startup_opt = Some(raw);
+                    }
+                }
+            }
+        }
+
+        out.runtime_options.startup = startup_opt;
 
         if let Ok(v) = obj.get::<JsValue, _, _>(cx, "nodeCompat") {
             if let Ok(b) = v.downcast::<JsBoolean, _>(cx) {
