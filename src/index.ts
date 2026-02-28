@@ -5,16 +5,65 @@ const native = require("../index.node");
 
 export type DenoWorkerEvent = "message" | "close";
 export type DenoWorkerMessageHandler = (msg: any) => void;
+
 export type ImportsCallbackResult = boolean | string;
-export type ImportsCallback = (specifier: string, referrer: string) => ImportsCallbackResult | Promise<ImportsCallbackResult>;
+/**
+ * `referrer` is best-effort and may be empty for some loads.
+ * Kept optional so user callbacks can be `(specifier) => ...`.
+ */
+export type ImportsCallback = (
+    specifier: string,
+    referrer?: string
+) => ImportsCallbackResult | Promise<ImportsCallbackResult>;
+
+export type DenoPermissionValue = boolean | string[];
+export type DenoPermissions = {
+    read?: DenoPermissionValue;
+    write?: DenoPermissionValue;
+    net?: DenoPermissionValue;
+    env?: DenoPermissionValue;
+    run?: DenoPermissionValue;
+    ffi?: DenoPermissionValue;
+    sys?: DenoPermissionValue;
+    import?: DenoPermissionValue;
+    hrtime?: boolean;
+};
 
 export type DenoWorkerOptions = {
     maxEvalMs?: number;
     maxMemoryBytes?: number;
     maxStackSizeBytes?: number;
     channelSize?: number;
+
+    /**
+     * Controls ES module loading:
+     * - false: deny all imports
+     * - true: allow disk imports
+     * - function: imports callback (virtual modules, allow/deny, pass-through)
+     */
     imports?: boolean | ImportsCallback;
-    moduleRoot?: string;
+
+    /**
+     * Per-worker sandbox root used for:
+     * - module resolution base (relative imports)
+     * - file system "cwd" (Deno.cwd and relative FS ops via sandbox fs wrapper)
+     *
+     * Accepts a path or a file:// directory URL.
+     * Defaults to process.cwd().
+     */
+    cwd?: string;
+
+    /**
+     * Deno permissions configuration.
+     * Defaults to Deno "none" and non-interactive.
+     */
+    permissions?: DenoPermissions;
+
+    /**
+     * Enables Node compatibility behavior in the runtime.
+     * Also implies a minimal sandboxed FS read grant to `cwd` when permissions.read is not explicitly provided.
+     */
+    nodeCompat?: boolean;
 };
 
 export type EvalOptions = {
@@ -55,7 +104,7 @@ export type V8HeapSpaceStatistics = {
 export type DenoWorkerMemory = {
     heapStatistics: V8HeapStatistics;
     heapSpaceStatistics: V8HeapSpaceStatistics[];
-}
+};
 
 type NativeWorker = {
     postMessage(msg: any): void;
@@ -64,15 +113,14 @@ type NativeWorker = {
 
     close(): Promise<void>;
     memory(): Promise<any>;
+    pump(): Promise<void>;
     setGlobal(key: string, value: any): Promise<void>;
 
     eval(src: string, options?: EvalOptions): Promise<any>;
     evalSync(src: string, options?: EvalOptions): any;
 
-    // Defined via Object.defineProperty in Rust. May be null/undefined until first eval settles.
     lastExecutionStats: ExecStats;
 };
-
 
 function normalizeEvalOptions(options?: EvalOptions): EvalOptions | undefined {
     if (!options) return undefined;
@@ -80,16 +128,14 @@ function normalizeEvalOptions(options?: EvalOptions): EvalOptions | undefined {
     if (typeof options.filename === "string") out.filename = options.filename;
     if (options.type === "module") out.type = "module";
     if ("args" in options) out.args = Array.isArray(options.args) ? options.args : [];
-    if (typeof options.maxEvalMs === "number" && Number.isFinite(options.maxEvalMs) && options.maxEvalMs > 0) out.maxEvalMs = options.maxEvalMs;
+    if (typeof options.maxEvalMs === "number" && Number.isFinite(options.maxEvalMs) && options.maxEvalMs > 0)
+        out.maxEvalMs = options.maxEvalMs;
     return out;
 }
 
-
 function coerceMemoryPayload(raw: unknown): DenoWorkerMemory {
-
     const hs = (raw as any).heapStatistics;
     const hss = (raw as any).heapSpaceStatistics;
-
     return { heapStatistics: hs, heapSpaceStatistics: hss };
 }
 
@@ -127,6 +173,10 @@ export class DenoWorker {
 
     async close(): Promise<void> {
         await this.native.close();
+    }
+    
+    async pump(): Promise<void> {
+        await this.native.pump();
     }
 
     async memory(): Promise<DenoWorkerMemory> {

@@ -102,3 +102,33 @@ impl EvalOptions {
         Ok(out)
     }
 }
+
+impl JsValueBridge {
+
+    pub fn js_error_to_bridge(e: Box<deno_core::error::JsError>) -> Self {
+        Self::Error {
+            name: "Error".into(),
+            message: e.to_string(),
+            stack: None,
+            code: None,
+        }
+    }
+
+    pub fn any_error_to_bridge(e: deno_core::error::AnyError) -> Self {
+        Self::Error {
+            name: "Error".into(),
+            message: e.to_string(),
+            stack: None,
+            code: None,
+        }
+    }
+
+    pub fn simple_err(msg: String) -> Self {
+        Self::Error {
+            name: "Error".into(),
+            message: msg,
+            stack: None,
+            code: None,
+        }
+    }
+}

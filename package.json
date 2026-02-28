@@ -5,7 +5,7 @@
   "main": "index.js",
   "types": "index.d.ts",
   "scripts": {
-    "build": "cargo-cp-artifact -nc index.node -- cargo build --message-format=json-render-diagnostics && tsc --project tsconfig.idx.json",
+    "build": "cargo-cp-artifact -nc index.node -- cargo build --message-format=json-render-diagnostics",
     "build-debug": "npm run build -- && tsc --project tsconfig.idx.json",
     "build-release": "npm run build -- --release && tsc --project tsconfig.idx.json",
     "install": "npm run build-release",

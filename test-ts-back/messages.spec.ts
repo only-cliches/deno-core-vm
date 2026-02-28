@@ -16,7 +16,7 @@ describe("deno_worker: messaging", () => {
 
     dw.on("message", (msg: any) => messages.push(msg));
 
-    await dw.eval(`postMessage({ hello: "from worker" })`);
+    await dw.eval(`hostPostMessage({ hello: "from worker" })`);
     await sleep(50);
 
     expect(messages).toContainEqual({ hello: "from worker" });

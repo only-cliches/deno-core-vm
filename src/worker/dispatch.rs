@@ -1,28 +1,12 @@
-use cpu_time::ProcessTime;
 use deno_runtime::deno_core::v8;
-use deno_runtime::deno_core::{self, JsRuntime, RuntimeOptions, extension};
+use deno_runtime::worker::MainWorker;
 use neon::prelude::*;
-use std::thread;
-use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
-use crate::bridge::neon_codec::from_neon_value;
-use crate::bridge::types::{EvalOptions, JsValueBridge};
-use crate::bridge::v8_codec;
+use crate::bridge::types::JsValueBridge;
+use crate::worker::eval::eval_in_runtime;
 use crate::worker::messages::{DenoMsg, EvalReply, ExecStats, NodeMsg, ResolvePayload};
-use crate::worker::ops::{op_host_call_async, op_host_call_sync, op_post_message};
-use crate::worker::runtime::eval_in_runtime;
 use crate::worker::state::RuntimeLimits;
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, AtomicUsize, Ordering},
-};
-
-use deno_core::{ModuleLoader, ModuleSource, ModuleType, resolve_url};
-use deno_error::JsErrorBox;
-use std::collections::HashMap;
-use std::sync::Mutex;
-
 
 pub fn dispatch_node_msg(worker_id: usize, msg: NodeMsg) {
     let (channel, handle_snapshot) = match crate::WORKERS.lock() {
@@ -30,11 +14,7 @@ pub fn dispatch_node_msg(worker_id: usize, msg: NodeMsg) {
             if let Some(w) = map.get(&worker_id) {
                 (
                     w.channel.clone(),
-                    Some((
-                        w.callbacks.clone(),
-                        w.host_functions.clone(),
-                        w.last_stats.clone(),
-                    )),
+                    Some((w.callbacks.clone(), w.host_functions.clone(), w.last_stats.clone())),
                 )
             } else {
                 return;
@@ -48,40 +28,52 @@ pub fn dispatch_node_msg(worker_id: usize, msg: NodeMsg) {
     };
 
     let _ = channel.send(move |mut cx| {
-        // let mk_err = |name: &str, message: String| JsValueBridge::Error {
-        //     name: name.into(),
-        //     message,
-        //     stack: None,
-        //     code: None,
-        // };
-
-        fn swallow_js_exn<'a, F, T>(
-            cx: &mut TaskContext<'a>,
-            _label: &'static str,
-            f: F,
-        ) -> Option<T>
+        fn swallow_js_exn<'a, F, T>(cx: &mut TaskContext<'a>, f: F) -> Option<T>
         where
             F: FnOnce(&mut TaskContext<'a>) -> NeonResult<T>,
         {
             cx.try_catch(f).ok()
         }
 
-        // fn send_once(
-        //     slot: &std::sync::Arc<
-        //         std::sync::Mutex<
-        //             Option<tokio::sync::oneshot::Sender<Result<JsValueBridge, JsValueBridge>>>,
-        //         >,
-        //     >,
-        //     value: Result<JsValueBridge, JsValueBridge>,
-        // ) {
-        //     let tx_opt = slot.lock().ok().and_then(|mut g| g.take());
-        //     if let Some(tx) = tx_opt {
-        //         let _ = tx.send(value);
-        //     }
-        // }
+        fn thrown_to_bridge<'a>(
+            cx: &mut TaskContext<'a>,
+            thrown: Handle<'a, JsValue>,
+        ) -> JsValueBridge {
+            match crate::bridge::neon_codec::from_neon_value(cx, thrown) {
+                Ok(JsValueBridge::Error {
+                    name,
+                    message,
+                    stack,
+                    code,
+                }) => JsValueBridge::Error {
+                    name: if name.is_empty() { "HostFunctionError".into() } else { name },
+                    message,
+                    stack,
+                    code,
+                },
+                Ok(JsValueBridge::String(s)) => JsValueBridge::Error {
+                    name: "HostFunctionError".into(),
+                    message: s,
+                    stack: None,
+                    code: None,
+                },
+                Ok(other) => JsValueBridge::Error {
+                    name: "HostFunctionError".into(),
+                    message: format!("{:?}", other),
+                    stack: None,
+                    code: None,
+                },
+                Err(e) => JsValueBridge::Error {
+                    name: "HostFunctionError".into(),
+                    message: e.to_string(),
+                    stack: None,
+                    code: None,
+                },
+            }
+        }
 
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let outer = cx.try_catch(|cx| match msg {
+            let _outer = cx.try_catch(|cx| match msg {
                 NodeMsg::Resolve { settler, payload } => {
                     if let ResolvePayload::Result { stats, .. } = &payload {
                         if let Ok(mut g) = last_stats.lock() {
@@ -90,9 +82,7 @@ pub fn dispatch_node_msg(worker_id: usize, msg: NodeMsg) {
                     }
 
                     match payload {
-                        ResolvePayload::Void => {
-                            settler.resolve_with_value_in_cx(cx, &JsValueBridge::Null)
-                        }
+                        ResolvePayload::Void => settler.resolve_with_value_in_cx(cx, &JsValueBridge::Null),
                         ResolvePayload::Json(json) => {
                             let s = serde_json::to_string(&json).unwrap_or_else(|_| "null".into());
                             settler.resolve_with_json_in_cx(cx, &s);
@@ -141,7 +131,6 @@ pub fn dispatch_node_msg(worker_id: usize, msg: NodeMsg) {
                     }
 
                     let Some(cb_root) = callbacks.imports.as_ref() else {
-                        // Callback mode but no callback set: safest is block.
                         let _ = reply.send(ImportDecision::Block);
                         return Ok(());
                     };
@@ -164,13 +153,11 @@ pub fn dispatch_node_msg(worker_id: usize, msg: NodeMsg) {
                         }
                     };
 
-                    // Sync return (string | boolean)
                     if let Some(d) = interpret_value(cx, returned) {
                         state.send_once(d);
                         return Ok(());
                     }
 
-                    // Promise return
                     if returned.is_a::<neon::types::JsPromise, _>(cx) {
                         let promise_obj: Handle<JsObject> = match returned.downcast::<JsObject, _>(cx) {
                             Ok(o) => o,
@@ -192,11 +179,9 @@ pub fn dispatch_node_msg(worker_id: usize, msg: NodeMsg) {
                         let st_ok = state.clone();
                         let on_fulfilled = JsFunction::new(cx, move |mut cx| {
                             let v = cx.argument::<JsValue>(0)?;
-
                             let decision = interpret_value(&mut cx, v).unwrap_or(ImportDecision::Block);
                             st_ok.send_once(decision);
                             st_ok.clear_hooks();
-
                             Ok(cx.undefined())
                         })?;
 
@@ -207,7 +192,6 @@ pub fn dispatch_node_msg(worker_id: usize, msg: NodeMsg) {
                             Ok(cx.undefined())
                         })?;
 
-                        // Root hooks so V8 cannot GC them before the promise settles.
                         {
                             let f_root = on_fulfilled.root(cx);
                             let r_root = on_rejected.root(cx);
@@ -245,7 +229,6 @@ pub fn dispatch_node_msg(worker_id: usize, msg: NodeMsg) {
                         return Ok(());
                     }
 
-                    // Any other return type: block
                     state.send_once(ImportDecision::Block);
                     Ok(())
                 }
@@ -260,7 +243,7 @@ pub fn dispatch_node_msg(worker_id: usize, msg: NodeMsg) {
                         .unwrap_or_else(|_| cx.undefined().upcast());
 
                     let this = cx.undefined();
-                    let _ = swallow_js_exn(cx, "EmitMessage:cb.call", |cx| {
+                    let _ = swallow_js_exn(cx, |cx| {
                         cb.call(cx, this, &[arg])?;
                         Ok(())
                     });
@@ -272,7 +255,7 @@ pub fn dispatch_node_msg(worker_id: usize, msg: NodeMsg) {
                     if let Some(cb_root) = callbacks.on_close.as_ref() {
                         let cb = cb_root.to_inner(cx);
                         let this = cx.undefined();
-                        let _ = swallow_js_exn(cx, "EmitClose:cb.call", |cx| {
+                        let _ = swallow_js_exn(cx, |cx| {
                             cb.call(cx, this, &[])?;
                             Ok(())
                         });
@@ -285,11 +268,7 @@ pub fn dispatch_node_msg(worker_id: usize, msg: NodeMsg) {
                     Ok(())
                 }
 
-                NodeMsg::InvokeHostFunctionSync {
-                    func_id,
-                    args,
-                    reply,
-                } => {
+                NodeMsg::InvokeHostFunctionSync { func_id, args, reply } => {
                     let send = |v: Result<JsValueBridge, JsValueBridge>| {
                         let _ = reply.send(v);
                     };
@@ -321,42 +300,22 @@ pub fn dispatch_node_msg(worker_id: usize, msg: NodeMsg) {
 
                     let v = match called {
                         Ok(v) => v,
-                        Err(e) => {
-                            let msg = if let Ok(JsValueBridge::String(str)) = from_neon_value(cx, e)
-                            {
-                                str
-                            } else {
-                                String::from("")
-                            };
-                            send(Err(JsValueBridge::Error {
-                                name: "HostFunctionError".into(),
-                                message: msg,
-                                stack: None,
-                                code: None,
-                            }));
+                        Err(thrown) => {
+                            send(Err(thrown_to_bridge(cx, thrown)));
                             return Ok(());
                         }
                     };
 
                     if v.is_a::<neon::types::JsPromise, _>(cx) {
                         // Suppress unhandled rejection warnings.
-                        // This sync path intentionally refuses to await Promises, but we still need to
-                        // attach a rejection handler so Node/Jest does not treat it as unhandled.
                         if let Ok(promise_obj) = v.downcast::<JsObject, _>(cx) {
-                            // Create a no-op rejection handler and root it so V8 cannot GC it
-                            // before the microtask queue runs.
                             let noop_reject = JsFunction::new(cx, |mut cx| Ok(cx.undefined()))?;
                             let rooted = noop_reject.root(cx);
                             std::mem::forget(rooted);
 
-                            // Prefer .catch(noop) if available, else .then(undefined, noop)
                             if let Ok(catch_fn) = promise_obj.get::<JsFunction, _, _>(cx, "catch") {
                                 let _ = cx.try_catch(|cx| {
-                                    let _ = catch_fn.call(
-                                        cx,
-                                        promise_obj,
-                                        &[noop_reject.upcast::<JsValue>()],
-                                    )?;
+                                    let _ = catch_fn.call(cx, promise_obj, &[noop_reject.upcast::<JsValue>()])?;
                                     Ok(())
                                 });
                             } else if let Ok(then_fn) = promise_obj.get::<JsFunction, _, _>(cx, "then") {
@@ -370,7 +329,8 @@ pub fn dispatch_node_msg(worker_id: usize, msg: NodeMsg) {
 
                         send(Err(JsValueBridge::Error {
                             name: "HostFunctionError".into(),
-                            message: "Sync host function returned a Promise; use async host function instead".into(),
+                            message: "Sync host function returned a Promise; use async host function instead"
+                                .into(),
                             stack: None,
                             code: None,
                         }));
@@ -389,6 +349,7 @@ pub fn dispatch_node_msg(worker_id: usize, msg: NodeMsg) {
 
                     Ok(())
                 }
+
                 NodeMsg::InvokeHostFunctionAsync { func_id, args, reply } => {
                     struct AsyncState {
                         reply: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<Result<JsValueBridge, JsValueBridge>>>>,
@@ -405,7 +366,6 @@ pub fn dispatch_node_msg(worker_id: usize, msg: NodeMsg) {
 
                         fn clear_hooks(&self) {
                             let _ = self.hooks.lock().ok().and_then(|mut g| g.take());
-                            // Dropping Roots here (on the Node thread) releases the GC roots.
                         }
                     }
 
@@ -440,13 +400,9 @@ pub fn dispatch_node_msg(worker_id: usize, msg: NodeMsg) {
 
                     let returned = match cx.try_catch(|cx| func.call(cx, this, js_argv.as_slice())) {
                         Ok(v) => v,
-                        Err(_) => {
-                            state.send_once(Err(JsValueBridge::Error {
-                                name: "HostFunctionError".into(),
-                                message: "Host function threw".into(),
-                                stack: None,
-                                code: None,
-                            }));
+                        Err(thrown) => {
+                            state.send_once(Err(thrown_to_bridge(cx, thrown)));
+                            state.clear_hooks();
                             return Ok(());
                         }
                     };
@@ -479,18 +435,19 @@ pub fn dispatch_node_msg(worker_id: usize, msg: NodeMsg) {
                         }
                     };
 
-                    let then_fn: Handle<JsFunction> = match cx.try_catch(|cx| promise_obj.get::<JsFunction, _, _>(cx, "then")) {
-                        Ok(f) => f,
-                        Err(_) => {
-                            state.send_once(Err(JsValueBridge::Error {
-                                name: "HostFunctionError".into(),
-                                message: "Promise.then lookup failed".into(),
-                                stack: None,
-                                code: None,
-                            }));
-                            return Ok(());
-                        }
-                    };
+                    let then_fn: Handle<JsFunction> =
+                        match cx.try_catch(|cx| promise_obj.get::<JsFunction, _, _>(cx, "then")) {
+                            Ok(f) => f,
+                            Err(_) => {
+                                state.send_once(Err(JsValueBridge::Error {
+                                    name: "HostFunctionError".into(),
+                                    message: "Promise.then lookup failed".into(),
+                                    stack: None,
+                                    code: None,
+                                }));
+                                return Ok(());
+                            }
+                        };
 
                     let state_ok = state.clone();
                     let on_fulfilled = JsFunction::new(cx, move |mut cx| {
@@ -526,7 +483,6 @@ pub fn dispatch_node_msg(worker_id: usize, msg: NodeMsg) {
                         Ok(cx.undefined())
                     })?;
 
-                    // Root the callbacks so V8 cannot GC them before the Promise settles.
                     {
                         let f_root = on_fulfilled.root(cx);
                         let r_root = on_rejected.root(cx);
@@ -548,7 +504,6 @@ pub fn dispatch_node_msg(worker_id: usize, msg: NodeMsg) {
                             on_fulfilled_handle.upcast::<JsValue>(),
                             on_rejected_handle.upcast::<JsValue>(),
                         ];
-
                         let _ = then_fn.call(cx, promise_obj, args.as_slice())?;
                         Ok(())
                     });
@@ -567,17 +522,15 @@ pub fn dispatch_node_msg(worker_id: usize, msg: NodeMsg) {
                 }
             });
 
-            let _ = outer;
+            let _ = _outer;
         }));
 
         Ok(())
     });
 }
 
-
-
 pub async fn handle_deno_msg(
-    runtime: &mut JsRuntime,
+    worker: &mut MainWorker,
     worker_id: usize,
     limits: &RuntimeLimits,
     msg: DenoMsg,
@@ -611,9 +564,7 @@ pub async fn handle_deno_msg(
                             return true;
                         }
                     }
-                    Err(_) => {
-                        return true;
-                    }
+                    Err(_) => return true,
                 };
 
                 let wid = worker_id;
@@ -637,9 +588,7 @@ pub async fn handle_deno_msg(
 
         DenoMsg::Memory { deferred } => {
             let mem = {
-                let isolate = runtime.v8_isolate();
-
-                // v8 145: no-arg getter returns the struct.
+                let isolate = worker.js_runtime.v8_isolate();
                 let hs = isolate.get_heap_statistics();
 
                 serde_json::json!({
@@ -668,25 +617,32 @@ pub async fn handle_deno_msg(
         DenoMsg::PostMessage { value } => {
             let payload = serde_json::to_string(&crate::bridge::wire::to_wire_json(&value))
                 .unwrap_or_else(|_| "null".into());
-            let script =
-                format!("globalThis.__dispatchNodeMessage(globalThis.__hydrate({payload}))");
+            let script = format!("globalThis.__dispatchNodeMessage(globalThis.__hydrate({payload}))");
 
-            let _ = runtime.execute_script("<postMessage>", script);
+            let _ = worker.js_runtime.execute_script("<postMessage>", script);
             false
         }
 
-        DenoMsg::SetGlobal {
-            key,
-            value,
-            deferred,
-        } => {
+        DenoMsg::Pump { deferred } => {
+            let res = worker.run_event_loop(false).await;
+
+            match res {
+                Ok(()) => deferred.resolve_with_value_via_channel(JsValueBridge::Undefined),
+                Err(e) => deferred.reject_with_error(e.to_string()),
+            }
+
+            false
+        }
+
+        DenoMsg::SetGlobal { key, value, deferred } => {
             let json = serde_json::to_string(&crate::bridge::wire::to_wire_json(&value))
                 .unwrap_or_else(|_| "null".into());
             let key_json = serde_json::to_string(&key).unwrap_or_else(|_| "\"\"".into());
-            let script =
-                format!("globalThis.__globals[{key_json}] = {json}; globalThis.__applyGlobals();");
+            let script = format!(
+                "globalThis.__globals[{key_json}] = {json}; globalThis.__applyGlobals();"
+            );
 
-            let res = runtime.execute_script("<setGlobal>", script);
+            let res = worker.js_runtime.execute_script("<setGlobal>", script);
 
             if let Some(tx) = get_node_tx(worker_id) {
                 match res {
@@ -730,13 +686,8 @@ pub async fn handle_deno_msg(
             false
         }
 
-        DenoMsg::Eval {
-            source,
-            options,
-            deferred,
-            sync_reply,
-        } => {
-            let reply = eval_in_runtime(runtime, limits, &source, options).await;
+        DenoMsg::Eval { source, options, deferred, sync_reply } => {
+            let reply = eval_in_runtime(worker, limits, &source, options).await;
 
             if let Some(tx) = sync_reply {
                 let _ = tx.send(reply);
@@ -778,11 +729,8 @@ pub async fn handle_deno_msg(
 
 async fn send_node_msg_or_reject(node_tx: &mpsc::Sender<NodeMsg>, msg: NodeMsg) {
     if let Err(send_err) = node_tx.send(msg).await {
-        match send_err.0 {
-            NodeMsg::Resolve { settler, .. } => {
-                settler.reject_with_error("Node thread is unavailable");
-            }
-            _ => {}
+        if let NodeMsg::Resolve { settler, .. } = send_err.0 {
+            settler.reject_with_error("Node thread is unavailable");
         }
     }
 }
@@ -794,7 +742,6 @@ pub fn get_node_tx(worker_id: usize) -> Option<mpsc::Sender<NodeMsg>> {
         .get(&worker_id)
         .map(|w| w.node_tx.clone())
 }
-
 
 fn heap_stats_to_json(stats: &v8::HeapStatistics) -> serde_json::Value {
     serde_json::json!({

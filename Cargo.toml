@@ -27,10 +27,13 @@ deno_snapshots = "=0.49.0"
 deno_error = "=0.7.1"
 deno_fs = { version="=0.144.0", features = ["sync_fs"]  }
 deno_resolver = { version="=0.65.0", features = ["sync"]  }
+deno_permissions = "=0.93.0"
+deno_io = "=0.144.0"
 
 serde = "1.0.228"
 urlencoding = "2.1.3"
 sys_traits = { version="=0.1.24"  }
+
 
 
 

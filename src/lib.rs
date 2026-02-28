@@ -30,8 +30,6 @@ fn mk_err(message: impl Into<String>) -> JsValueBridge {
         code: None,
     }
 }
-
-// Stage 1+2 architecture: fail-closed helper that always settles any deferred carried by `msg`.
 fn try_send_deno_msg_or_reject(tx: &tokio::sync::mpsc::Sender<DenoMsg>, msg: DenoMsg) {
     match tx.try_send(msg) {
         Ok(()) => {}
@@ -45,11 +43,11 @@ fn try_send_deno_msg_or_reject(tx: &tokio::sync::mpsc::Sender<DenoMsg>, msg: Den
 
             DenoMsg::Close { deferred }
             | DenoMsg::Memory { deferred }
-            | DenoMsg::SetGlobal { deferred, .. } => {
+            | DenoMsg::SetGlobal { deferred, .. }
+            | DenoMsg::Pump { deferred } => {
                 deferred.reject_with_error("Runtime is closed or request queue is full");
             }
 
-            // No deferred to settle for these
             DenoMsg::Eval { deferred: None, .. } | DenoMsg::PostMessage { .. } => {}
         },
     }

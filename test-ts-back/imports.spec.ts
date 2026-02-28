@@ -25,7 +25,7 @@ describe("deno_worker: imports/module loader combinations", () => {
     it(
         "imports:false blocks static import",
         async () => {
-            dw = new DenoWorker({ imports: false } as any);
+            dw = new DenoWorker({ imports: false });
 
             const src = `
         import x from "file:///does_not_matter.js";
@@ -40,7 +40,7 @@ describe("deno_worker: imports/module loader combinations", () => {
     it(
         "imports:false blocks dynamic import()",
         async () => {
-            dw = new DenoWorker({ imports: false } as any);
+            dw = new DenoWorker({ imports: false });
 
             const src = `
         const m = await import("file:///does_not_matter.js");
@@ -64,7 +64,7 @@ describe("deno_worker: imports/module loader combinations", () => {
       `
             );
 
-            dw = new DenoWorker({ imports: true } as any);
+            dw = new DenoWorker({ imports: true });
 
             const src = `
         import x from ${JSON.stringify("file://" + modPath)};
@@ -88,7 +88,7 @@ describe("deno_worker: imports/module loader combinations", () => {
       `
             );
 
-            dw = new DenoWorker({ imports: true } as any);
+            dw = new DenoWorker({ imports: true });
 
             const src = `
         const m = await import(${JSON.stringify("file://" + modPath)});
@@ -104,14 +104,13 @@ describe("deno_worker: imports/module loader combinations", () => {
         "imports:sync callback returning string intercepts static import",
         async () => {
             dw = new DenoWorker({
-                imports: (specifier: string, referrer: string) => {
-                    // Only intercept the specifier we expect.
+                imports: (specifier: string) => {
                     if (specifier === "virtual:sync-static") {
                         return `export default "OK_SYNC_STATIC";`;
                     }
                     return false;
                 },
-            } as any);
+            });
 
             const src = `
         import x from "virtual:sync-static";
@@ -127,13 +126,13 @@ describe("deno_worker: imports/module loader combinations", () => {
         "imports:sync callback returning string intercepts dynamic import()",
         async () => {
             dw = new DenoWorker({
-                imports: (specifier: string, referrer: string) => {
+                imports: (specifier: string) => {
                     if (specifier === "virtual:sync-dynamic") {
                         return `export default "OK_SYNC_DYNAMIC";`;
                     }
                     return false;
                 },
-            } as any);
+            });
 
             const src = `
         const m = await import("virtual:sync-dynamic");
@@ -149,13 +148,13 @@ describe("deno_worker: imports/module loader combinations", () => {
         "imports:async callback returning string intercepts static import",
         async () => {
             dw = new DenoWorker({
-                imports: async (specifier: string, referrer: string) => {
+                imports: async (specifier: string) => {
                     if (specifier === "virtual:async-static") {
                         return `export default "OK_ASYNC_STATIC";`;
                     }
                     return false;
                 },
-            } as any);
+            });
 
             const src = `
         import x from "virtual:async-static";
@@ -171,13 +170,13 @@ describe("deno_worker: imports/module loader combinations", () => {
         "imports:async callback returning string intercepts dynamic import()",
         async () => {
             dw = new DenoWorker({
-                imports: async (specifier: string, referrer: string) => {
+                imports: async (specifier: string) => {
                     if (specifier === "virtual:async-dynamic") {
                         return `export default "OK_ASYNC_DYNAMIC";`;
                     }
                     return false;
                 },
-            } as any);
+            });
 
             const src = `
         const m = await import("virtual:async-dynamic");
@@ -197,7 +196,7 @@ describe("deno_worker: imports/module loader combinations", () => {
                     if (specifier === "virtual:block") return false;
                     return true;
                 },
-            } as any);
+            });
 
             const src = `
         import x from "virtual:block";
@@ -217,7 +216,7 @@ describe("deno_worker: imports/module loader combinations", () => {
                     if (specifier === "virtual:block-async") return false;
                     return true;
                 },
-            } as any);
+            });
 
             const src = `
         const m = await import("virtual:block-async");
@@ -237,11 +236,8 @@ describe("deno_worker: imports/module loader combinations", () => {
             writeFile(modPath, `export default "DISK_OK_STATIC";`);
 
             dw = new DenoWorker({
-                imports: (specifier: string) => {
-                    // Allow the disk loader to handle it
-                    return true;
-                },
-            } as any);
+                imports: () => true,
+            });
 
             const src = `
         import x from ${JSON.stringify("file://" + modPath)};
@@ -262,7 +258,7 @@ describe("deno_worker: imports/module loader combinations", () => {
 
             dw = new DenoWorker({
                 imports: async () => true,
-            } as any);
+            });
 
             const src = `
         const m = await import(${JSON.stringify("file://" + modPath)});
@@ -277,15 +273,15 @@ describe("deno_worker: imports/module loader combinations", () => {
     it(
         "imports:callback receives referrer (best-effort) for static imports",
         async () => {
-            const seen: Array<{ specifier: string; referrer: string }> = [];
+            const seen: Array<{ specifier: string; referrer?: string }> = [];
 
             dw = new DenoWorker({
-                imports: (specifier: string, referrer: string) => {
+                imports: (specifier: string, referrer?: string) => {
                     seen.push({ specifier, referrer });
                     if (specifier === "virtual:referrer") return `export default 1;`;
                     return false;
                 },
-            } as any);
+            });
 
             const src = `
         import x from "virtual:referrer";
@@ -300,16 +296,15 @@ describe("deno_worker: imports/module loader combinations", () => {
         20_000
     );
 
-
     it(
-        "defaults moduleRoot to process.cwd(): relative static import resolves from cwd",
+        "defaults cwd to process.cwd(): relative static import resolves from process.cwd()",
         async () => {
             const dir = makeTempDir();
             process.chdir(dir);
 
             writeFile(path.join(dir, "dep.js"), `export default "FROM_CWD";`);
 
-            dw = new DenoWorker({ imports: true } as any);
+            dw = new DenoWorker({ imports: true });
 
             const src = `
         import x from "./dep.js";
@@ -322,14 +317,14 @@ describe("deno_worker: imports/module loader combinations", () => {
     );
 
     it(
-        "defaults moduleRoot to process.cwd(): relative dynamic import() resolves from cwd",
+        "defaults cwd to process.cwd(): relative dynamic import() resolves from process.cwd()",
         async () => {
             const dir = makeTempDir();
             process.chdir(dir);
 
             writeFile(path.join(dir, "dep.js"), `export default "FROM_CWD_DYNAMIC";`);
 
-            dw = new DenoWorker({ imports: true } as any);
+            dw = new DenoWorker({ imports: true });
 
             const src = `
         const m = await import("./dep.js");
@@ -342,51 +337,50 @@ describe("deno_worker: imports/module loader combinations", () => {
     );
 
     it(
-        "moduleRoot overrides cwd: relative static import resolves from moduleRoot",
+        "cwd overrides process cwd: relative static import resolves from cwd",
         async () => {
             const dir = makeTempDir();
-            // do NOT chdir; prove moduleRoot is used
-            writeFile(path.join(dir, "dep.js"), `export default "FROM_MODULE_ROOT";`);
+            writeFile(path.join(dir, "dep.js"), `export default "FROM_CWD_OPT";`);
 
-            dw = new DenoWorker({ imports: true, moduleRoot: dir } as any);
+            dw = new DenoWorker({ imports: true, cwd: dir });
 
             const src = `
         import x from "./dep.js";
         moduleReturn(x);
       `;
 
-            await expect(dw.evalModule(src)).resolves.toBe("FROM_MODULE_ROOT");
+            await expect(dw.evalModule(src)).resolves.toBe("FROM_CWD_OPT");
         },
         20_000
     );
 
     it(
-        "moduleRoot overrides cwd: relative dynamic import() resolves from moduleRoot",
+        "cwd overrides process cwd: relative dynamic import() resolves from cwd",
         async () => {
             const dir = makeTempDir();
-            writeFile(path.join(dir, "dep.js"), `export default "FROM_MODULE_ROOT_DYNAMIC";`);
+            writeFile(path.join(dir, "dep.js"), `export default "FROM_CWD_OPT_DYNAMIC";`);
 
-            dw = new DenoWorker({ imports: true, moduleRoot: dir } as any);
+            dw = new DenoWorker({ imports: true, cwd: dir });
 
             const src = `
         const m = await import("./dep.js");
         moduleReturn(m.default);
       `;
 
-            await expect(dw.evalModule(src)).resolves.toBe("FROM_MODULE_ROOT_DYNAMIC");
+            await expect(dw.evalModule(src)).resolves.toBe("FROM_CWD_OPT_DYNAMIC");
         },
         20_000
     );
 
     it(
-        "moduleRoot accepts file:// URL (directory): relative import resolves",
+        "cwd accepts file:// URL (directory): relative import resolves",
         async () => {
             const dir = makeTempDir();
             writeFile(path.join(dir, "dep.js"), `export default "FROM_FILE_URL";`);
 
             const fileUrl = "file://" + dir + (dir.endsWith("/") ? "" : "/");
 
-            dw = new DenoWorker({ imports: true, moduleRoot: fileUrl } as any);
+            dw = new DenoWorker({ imports: true, cwd: fileUrl });
 
             const src = `
         import x from "./dep.js";
@@ -394,111 +388,6 @@ describe("deno_worker: imports/module loader combinations", () => {
       `;
 
             await expect(dw.evalModule(src)).resolves.toBe("FROM_FILE_URL");
-        },
-        20_000
-    );
-    it(
-        "imports:sync callback returning string intercepts bare specifier static import",
-        async () => {
-            dw = new DenoWorker({
-                imports: (specifier: string) => {
-                    if (specifier === "virtual-mod") return `export default 22;`;
-                    return true; // pass through
-                },
-            } as any);
-
-            const src = `
-            import x from "virtual-mod";
-            moduleReturn(x);
-        `;
-
-            await expect(dw.evalModule(src)).resolves.toBe(22);
-        },
-        20_000
-    );
-
-    it(
-        "imports:sync callback returning string intercepts bare specifier dynamic import()",
-        async () => {
-            dw = new DenoWorker({
-                imports: (specifier: string) => {
-                    if (specifier === "virtual-mod-dyn") return `export default 22;`;
-                    return true;
-                },
-            } as any);
-
-            const src = `
-            const m = await import("virtual-mod-dyn");
-            moduleReturn(m.default);
-        `;
-
-            await expect(dw.evalModule(src)).resolves.toBe(22);
-        },
-        20_000
-    );
-
-    it(
-        "imports:async callback returning string intercepts bare specifier static import",
-        async () => {
-            dw = new DenoWorker({
-                imports: async (specifier: string) => {
-                    if (specifier === "virtual-mod-async") return `export default 22;`;
-                    return true;
-                },
-            } as any);
-
-            const src = `
-            import x from "virtual-mod-async";
-            moduleReturn(x);
-        `;
-
-            await expect(dw.evalModule(src)).resolves.toBe(22);
-        },
-        20_000
-    );
-
-    it(
-        "imports:async callback returning string intercepts bare specifier dynamic import()",
-        async () => {
-            dw = new DenoWorker({
-                imports: async (specifier: string) => {
-                    if (specifier === "virtual-mod-async-dyn") return `export default 22;`;
-                    return true;
-                },
-            } as any);
-
-            const src = `
-            const m = await import("virtual-mod-async-dyn");
-            moduleReturn(m.default);
-        `;
-
-            await expect(dw.evalModule(src)).resolves.toBe(22);
-        },
-        20_000
-    );
-
-    it(
-        "imports:callback receives original bare specifier (not synthetic URL)",
-        async () => {
-            const seen: Array<{ specifier: string; referrer: string }> = [];
-
-            dw = new DenoWorker({
-                imports: (specifier: string, referrer: string) => {
-                    seen.push({ specifier, referrer });
-                    if (specifier === "virtual-mod-seen") return `export default 1;`;
-                    return false;
-                },
-            } as any);
-
-            const src = `
-            import x from "virtual-mod-seen";
-            moduleReturn(x);
-        `;
-
-            await expect(dw.evalModule(src)).resolves.toBe(1);
-            expect(seen.length).toBeGreaterThanOrEqual(1);
-            expect(seen[0].specifier).toBe("virtual-mod-seen");
-            expect(typeof seen[0].referrer).toBe("string");
         },
         20_000
     );

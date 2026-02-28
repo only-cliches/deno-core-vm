@@ -48,6 +48,9 @@ pub enum DenoMsg {
     Close {
         deferred: PromiseSettler,
     },
+    Pump {
+        deferred: PromiseSettler,
+    },
 }
 
 pub enum ResolvePayload {

@@ -205,10 +205,15 @@ pub fn to_neon_value<'a, C: Context<'a>>(
             stack,
             code,
         } => {
-            let err = cx.error(message)?;
-            let obj = err.upcast::<JsObject>();
+            // Never assume the global Error constructor is sane (Jest can patch it).
+            let obj: Handle<JsObject> = cx
+                .try_catch(|cx| {
+                    let err = cx.error(message)?;
+                    Ok(err.upcast::<JsObject>())
+                })
+                .unwrap_or_else(|_| cx.empty_object());
 
-            // Force message/name to be enumerable so Jest toMatchObject sees them.
+            // Force message/name to be enumerable so Jest matchers see them.
             if let (Ok(object_ctor), Ok(define_prop)) = (
                 cx.global::<JsFunction>("Object"),
                 cx.global::<JsObject>("Object")
@@ -216,7 +221,7 @@ pub fn to_neon_value<'a, C: Context<'a>>(
             ) {
                 let define = define_prop;
 
-                let define_enum_str = |cx: &mut C, key: &str, val: Handle<JsValue>| {
+                let define_enum = |cx: &mut C, key: &str, val: Handle<JsValue>| {
                     let desc = cx.empty_object();
                     let true_bool = cx.boolean(true);
                     let key = cx.string(key).upcast();
@@ -229,31 +234,31 @@ pub fn to_neon_value<'a, C: Context<'a>>(
 
                 let msg = cx.string(message).upcast();
                 let name = cx.string(name).upcast();
-                define_enum_str(cx, "message", msg);
-                define_enum_str(cx, "name", name);
+                
+                define_enum(cx, "message", msg);
+                define_enum(cx, "name", name);
 
                 if let Some(stack) = stack {
-                    let msg = cx.string(stack).upcast();
-                    define_enum_str(cx, "stack", msg);
+                    let stack = cx.string(stack).upcast();
+                    define_enum(cx, "stack", stack);
                 }
                 if let Some(code) = code {
-                    let msg = cx.string(code).upcast();
-                    define_enum_str(cx, "code", msg);
+                    let code = cx.string(code).upcast();
+                    define_enum(cx, "code", code);
                 }
             } else {
-                // Fallback: keep prior behavior if defineProperty lookup fails
                 let msg = cx.string(message);
                 let name = cx.string(name);
                 let _ = obj.set(cx, "message", msg);
                 let _ = obj.set(cx, "name", name);
                 if let Some(stack) = stack {
-                    let st = cx.string(stack);
-                    let _ = obj.set(cx, "stack", st);
-                };
+                    let stack = cx.string(stack);
+                    let _ = obj.set(cx, "stack", stack);
+                }
                 if let Some(code) = code {
-                    let cod = cx.string(code);
-                    let _ = obj.set(cx, "code", cod);
-                };
+                    let code = cx.string(code);
+                    let _ = obj.set(cx, "code", code);
+                }
             }
 
             Ok(obj.upcast())
