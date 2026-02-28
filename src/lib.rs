@@ -212,6 +212,8 @@ fn create_worker(mut cx: FunctionContext) -> JsResult<JsObject> {
         api.set(&mut cx, "memory", f)?;
     }
 
+    // src/lib.rs (inside create_worker)
+
     // setGlobal(key, value): Promise<void>
     {
         let id2 = id;
@@ -231,17 +233,50 @@ fn create_worker(mut cx: FunctionContext) -> JsResult<JsObject> {
                     .get_mut(&id2)
                     .ok_or_else(|| cx.throw_error::<_, ()>("Runtime is closed").unwrap_err())?;
 
-                let value = if let Ok(func) = js.downcast::<JsFunction, _>(&mut cx) {
-                    // Detect AsyncFunction by constructor.name
-                    let is_async = (|| -> Option<bool> {
-                        let func_obj = func.upcast::<JsObject>();
-                        let ctor = func_obj.get_value(&mut cx, "constructor").ok()?;
-                        let ctor_obj = ctor.downcast::<JsObject, _>(&mut cx).ok()?;
-                        let name = ctor_obj.get_value(&mut cx, "name").ok()?;
-                        let name_s = name.downcast::<JsString, _>(&mut cx).ok()?.value(&mut cx);
-                        Some(name_s == "AsyncFunction")
+                fn is_async_like<'a>(
+                    cx: &mut FunctionContext<'a>,
+                    func: Handle<'a, JsFunction>,
+                ) -> bool {
+                    // Prefer Jest's underlying implementation if present.
+                    let candidate: Handle<'a, JsFunction> = func;
+
+                    // 1) Object.prototype.toString.call(fn) === "[object AsyncFunction]"
+                    let tag_is_async = (|| -> Option<bool> {
+                        let object_ctor: Handle<JsFunction> = cx.global("Object").ok()?;
+                        let proto_val = object_ctor.get_value(cx, "prototype").ok()?;
+                        let proto = proto_val.downcast::<JsObject, _>(cx).ok()?;
+                        let to_string_val = proto.get_value(cx, "toString").ok()?;
+                        let to_string = to_string_val.downcast::<JsFunction, _>(cx).ok()?;
+
+                        let s = to_string
+                            .call_with(cx)
+                            .this(candidate)
+                            .apply::<JsString, _>(cx)
+                            .ok()?
+                            .value(cx);
+
+                        Some(s == "[object AsyncFunction]")
                     })()
                     .unwrap_or(false);
+
+                    if tag_is_async {
+                        return true;
+                    }
+
+                    // 2) constructor.name === "AsyncFunction"
+                    (|| -> Option<bool> {
+                        let obj = candidate.upcast::<JsObject>();
+                        let ctor_val = obj.get_value(cx, "constructor").ok()?;
+                        let ctor_obj = ctor_val.downcast::<JsObject, _>(cx).ok()?;
+                        let name_val = ctor_obj.get_value(cx, "name").ok()?;
+                        let name = name_val.downcast::<JsString, _>(cx).ok()?.value(cx);
+                        Some(name == "AsyncFunction")
+                    })()
+                    .unwrap_or(false)
+                }
+
+                let value = if let Ok(func) = js.downcast::<JsFunction, _>(&mut cx) {
+                    let is_async = is_async_like(&mut cx, func);
 
                     let callback_id = worker.register_global_fn(func.root(&mut cx));
                     JsValueBridge::HostFunction {

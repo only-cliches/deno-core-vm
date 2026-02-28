@@ -315,9 +315,24 @@ globalThis.__hydrate = function (v) {
     return e;
   }
 
+  // src/worker/bootstrap.js
+  // Replace ONLY this block inside globalThis.__hydrate(...) where it handles __denojs_worker_type === "function"
+
   if (v.__denojs_worker_type === "function" && typeof v.id === "number") {
     const id = v.id;
     const isAsync = !!v.async;
+
+    // If we accidentally treat an async host function as sync, Node will reject with:`
+    // "Sync host function returned a Promise; use async host function instead"
+    // In that case, retry via the async op.
+    function isSyncReturnedPromiseError(err) {
+      try {
+        const msg = err && typeof err.message === "string" ? err.message : String(err);
+        return msg.includes("Sync host function returned a Promise");
+      } catch {
+        return false;
+      }
+    }
 
     if (isAsync) {
       return async (...args) => {
@@ -328,7 +343,14 @@ globalThis.__hydrate = function (v) {
 
     return (...args) => {
       const payloadArgs = dehydrateArgs(args);
-      return hostCallSync(id, payloadArgs);
+      try {
+        return hostCallSync(id, payloadArgs);
+      } catch (e) {
+        if (isSyncReturnedPromiseError(e)) {
+          return hostCallAsync(id, payloadArgs);
+        }
+        throw e;
+      }
     };
   }
 
@@ -349,4 +371,4 @@ globalThis.moduleReturn = (v) => {
   globalThis.__moduleReturn = v;
 };
 
-export {};
+export { };
