@@ -47,7 +47,6 @@ const OP_HOST_CALL_ASYNC = "op_denojs_worker_host_call_async";
 const OP_POST_MESSAGE = "op_denojs_worker_post_message";
 
 // Capture stable references at bootstrap time.
-// Some runtimes mutate opsTable entries later (for example, changing a function entry to a numeric id).
 const CAP_HOST_CALL_SYNC = getOpEntry(OP_HOST_CALL_SYNC);
 const CAP_HOST_CALL_ASYNC = getOpEntry(OP_HOST_CALL_ASYNC);
 const CAP_POST_MESSAGE = getOpEntry(OP_POST_MESSAGE);
@@ -156,7 +155,6 @@ function dehydrateArgs(args) {
 function hostPostMessageImpl(msg) {
   try {
     const payload = dehydrateAny(msg);
-    // Best-effort. Mirrors WebWorker-style postMessage behavior.
     callCapturedRaw(CAP_POST_MESSAGE, OP_POST_MESSAGE, payload);
   } catch {
     // ignore
@@ -315,16 +313,10 @@ globalThis.__hydrate = function (v) {
     return e;
   }
 
-  // src/worker/bootstrap.js
-  // Replace ONLY this block inside globalThis.__hydrate(...) where it handles __denojs_worker_type === "function"
-
   if (v.__denojs_worker_type === "function" && typeof v.id === "number") {
     const id = v.id;
     const isAsync = !!v.async;
 
-    // If we accidentally treat an async host function as sync, Node will reject with:`
-    // "Sync host function returned a Promise; use async host function instead"
-    // In that case, retry via the async op.
     function isSyncReturnedPromiseError(err) {
       try {
         const msg = err && typeof err.message === "string" ? err.message : String(err);
@@ -359,11 +351,152 @@ globalThis.__hydrate = function (v) {
   return out;
 };
 
+// --------------------
+// Console routing
+// --------------------
+
+function safeDefine(obj, key, val) {
+  try {
+    Object.defineProperty(obj, key, {
+      value: val,
+      writable: true,
+      configurable: true,
+      enumerable: true,
+    });
+  } catch {
+    try {
+      obj[key] = val;
+    } catch {
+      // ignore
+    }
+  }
+}
+
+function ensureConsoleObj() {
+  const c = globalThis.console;
+  if (c && typeof c === "object") return c;
+  const out = {};
+  try {
+    Object.defineProperty(globalThis, "console", {
+      value: out,
+      writable: true,
+      configurable: true,
+      enumerable: true,
+    });
+  } catch {
+    try {
+      globalThis.console = out;
+    } catch {
+      // ignore
+    }
+  }
+  return out;
+}
+
+function captureConsoleOriginals() {
+  const c = ensureConsoleObj();
+  if (!globalThis.__denojs_worker_console_originals) {
+    globalThis.__denojs_worker_console_originals = { methods: Object.create(null) };
+  }
+  const orig = globalThis.__denojs_worker_console_originals;
+  if (!orig.methods) orig.methods = Object.create(null);
+
+  const methods = ["log", "info", "warn", "error", "debug", "trace"];
+  for (const m of methods) {
+    if (!(m in orig.methods) && typeof c[m] === "function") {
+      orig.methods[m] = c[m];
+    }
+  }
+}
+
+function restoreConsoleMethod(method) {
+  const c = ensureConsoleObj();
+  const orig = globalThis.__denojs_worker_console_originals;
+  const fn = orig && orig.methods ? orig.methods[method] : undefined;
+  if (typeof fn === "function") {
+    safeDefine(c, method, fn);
+  }
+}
+
+function makeNoop() {
+  return function () {};
+}
+
+function makeConsoleWrapper(fn) {
+  return function (...args) {
+    try {
+      const out = fn(...args);
+      if (isThenable(out)) {
+        out.then(
+          () => {},
+          () => {}
+        );
+      }
+    } catch {
+      // ignore
+    }
+  };
+}
+
+globalThis.__applyConsoleConfig = () => {
+  captureConsoleOriginals();
+
+  const c = ensureConsoleObj();
+  const cfg = globalThis.__denojs_worker_console;
+
+  const methods = ["log", "info", "warn", "error", "debug", "trace"];
+
+  // cfg === false => dev/null everything
+  if (cfg === false) {
+    const noop = makeNoop();
+    for (const m of methods) safeDefine(c, m, noop);
+    return;
+  }
+
+  // cfg missing or non-object => restore defaults
+  if (!cfg || typeof cfg !== "object") {
+    for (const m of methods) restoreConsoleMethod(m);
+    return;
+  }
+
+  for (const m of methods) {
+    if (!(m in cfg) || cfg[m] == null) {
+      restoreConsoleMethod(m);
+      continue;
+    }
+
+    const v = cfg[m];
+
+    if (v === false) {
+      safeDefine(c, m, makeNoop());
+      continue;
+    }
+
+    if (typeof v === "function") {
+      safeDefine(c, m, makeConsoleWrapper(v));
+      continue;
+    }
+
+    restoreConsoleMethod(m);
+  }
+};
+
+// --------------------
 // Globals application support
+// --------------------
+
 globalThis.__globals = Object.create(null);
 globalThis.__applyGlobals = () => {
   for (const [k, v] of Object.entries(globalThis.__globals)) {
     globalThis[k] = globalThis.__hydrate(v);
+  }
+
+  try {
+    if (typeof globalThis.__applyConsoleConfig === "function") {
+      globalThis.__applyConsoleConfig();
+    }
+  } catch {
+    // ignore
   }
 };
 

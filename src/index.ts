@@ -9,9 +9,6 @@ export type DenoWorkerMessageHandler = (msg: any) => void;
 export type ImportsCallbackResult =
   | boolean
   | { js: string }
-  | { ts: string }
-  | { tsx: string }
-  | { jsx: string }
   | { resolve: string };
 
 export type ImportsCallback = (
@@ -32,6 +29,14 @@ export type DenoPermissions = {
   hrtime?: boolean;
 };
 
+export type DenoConsoleMethod = "log" | "info" | "warn" | "error" | "debug" | "trace";
+export type DenoConsoleHandler = false | undefined | ((...args: any[]) => any);
+export type DenoWorkerConsoleOption =
+  | undefined
+  | false
+  | Console
+  | Partial<Record<DenoConsoleMethod, DenoConsoleHandler>>;
+
 export type DenoWorkerOptions = {
   maxEvalMs?: number;
   maxMemoryBytes?: number;
@@ -48,6 +53,8 @@ export type DenoWorkerOptions = {
   permissions?: DenoPermissions;
 
   nodeCompat?: boolean;
+
+  console?: DenoWorkerConsoleOption;
 };
 
 export type EvalOptions = {
@@ -127,11 +134,55 @@ function coerceMemoryPayload(raw: unknown): DenoWorkerMemory {
   return { heapStatistics: hs, heapSpaceStatistics: hss };
 }
 
+function normalizeConsoleOption(x: unknown): unknown {
+  if (x === undefined) return undefined;
+  if (x === false) return false;
+
+  // Route to Node console (best behavior and preserves binding)
+  if (x === console) {
+    return { __denojs_worker_console_mode: "node" };
+  }
+
+  // Per-method config
+  if (x && typeof x === "object") {
+    const o: any = x as any;
+
+    // Allow explicit marker passthrough
+    if (typeof o.__denojs_worker_console_mode === "string") return o;
+
+    const out: any = {};
+    const methods: DenoConsoleMethod[] = ["log", "info", "warn", "error", "debug", "trace"];
+
+    for (const m of methods) {
+      if (!(m in o)) continue;
+
+      const v = o[m];
+      if (v === undefined) {
+        // Preserve explicit undefined if user set it.
+        out[m] = undefined;
+      } else if (v === false) {
+        out[m] = false;
+      } else if (typeof v === "function") {
+        out[m] = v;
+      }
+    }
+
+    return out;
+  }
+
+  // Unsupported values treated as default
+  return undefined;
+}
+
 function normalizeWorkerOptions(options?: DenoWorkerOptions): DenoWorkerOptions {
   const o: DenoWorkerOptions = { ...(options ?? {}) };
+
   const s = typeof o.startup === "string" ? o.startup : undefined;
   const i = typeof o.index === "string" ? o.index : undefined;
   if (!s && i) o.startup = i;
+
+  o.console = normalizeConsoleOption(o.console) as any;
+
   return o;
 }
 

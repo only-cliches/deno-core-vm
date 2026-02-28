@@ -1,37 +1,14 @@
-use cpu_time::ProcessTime;
-use deno_core::error::CoreError;
-use deno_core::{FastString, extension};
 use deno_error::JsErrorBox;
-use deno_runtime::BootstrapOptions;
-use deno_runtime::deno_core::{self, ModuleLoader, ModuleSource, ModuleType, resolve_url, v8};
-use deno_runtime::permissions::RuntimePermissionDescriptorParser;
-use deno_runtime::worker::{MainWorker, WorkerOptions, WorkerServiceOptions};
+use deno_runtime::deno_core::{self, ModuleLoader, ModuleSource, ModuleType};
 
-use deno_permissions::PermissionDescriptorParser;
-
-use deno_fs::{FileSystem, FsFileType, OpenOptions, RealFs};
-use deno_io::fs::FsResult;
-use deno_permissions::{CheckedPath, CheckedPathBuf};
-use deno_resolver::npm::{DenoInNpmPackageChecker, NpmResolver};
-use sys_traits::impls::RealSys;
-
-use crate::bridge::types::{EvalOptions, JsValueBridge};
-use crate::bridge::v8_codec;
-use crate::worker::dispatch::{dispatch_node_msg, handle_deno_msg};
-use crate::worker::messages::{DenoMsg, EvalReply, ExecStats, NodeMsg};
-use crate::worker::state::RuntimeLimits;
-
-use deno_permissions::{Permissions, PermissionsContainer, PermissionsOptions};
+use crate::worker::messages::NodeMsg;
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-use std::rc::Rc;
+use std::path::PathBuf;
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicBool, AtomicUsize, Ordering},
+    atomic::{AtomicUsize, Ordering},
 };
-use std::thread;
-use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
 
@@ -262,7 +239,7 @@ impl DynamicModuleLoader {
         // Relative or absolute path without extension: try Node-style extensions.
         if specifier.starts_with("./") || specifier.starts_with("../") || specifier.starts_with('/')
         {
-            let mut p = if specifier.starts_with('/') {
+            let p = if specifier.starts_with('/') {
                 PathBuf::from(specifier)
             } else {
                 base_dir.join(specifier)
@@ -440,7 +417,7 @@ impl ModuleLoader for DynamicModuleLoader {
         )))
     }
 
-    
+
     fn load(
         &self,
         module_specifier: &Url,

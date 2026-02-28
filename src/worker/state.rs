@@ -63,6 +63,9 @@ pub struct RuntimeLimits {
     pub node_compat: bool,
     pub permissions: Option<serde_json::Value>,
     pub startup: Option<String>,
+
+    // Wire JSON applied to globalThis.__globals["__denojs_worker_console"] before startup runs.
+    pub console: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Default)]

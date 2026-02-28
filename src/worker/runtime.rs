@@ -1,10 +1,8 @@
-// src/worker/runtime.rs
 use deno_core::extension;
 use deno_runtime::BootstrapOptions;
 use deno_runtime::deno_core::{self, resolve_url};
 use deno_runtime::permissions::RuntimePermissionDescriptorParser;
 use deno_runtime::worker::{MainWorker, WorkerOptions, WorkerServiceOptions};
-
 use deno_permissions::PermissionDescriptorParser;
 use deno_permissions::{Permissions, PermissionsContainer, PermissionsOptions};
 use deno_resolver::npm::{DenoInNpmPackageChecker, NpmResolver};
@@ -20,15 +18,13 @@ use crate::worker::ops::{
     op_denojs_worker_post_message,
 };
 use crate::worker::state::RuntimeLimits;
-
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::rc::Rc;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
 use std::thread;
-
 use tokio::sync::mpsc;
 
 #[derive(Clone)]
@@ -190,35 +186,24 @@ fn permissions_from_limits(limits: &RuntimeLimits, root: &Path) -> PermissionsCo
         }
     }
 
-    // Defaults when imports are enabled (AllowDisk or Callback):
-    // - allow_read: required for disk module loading (file://, relative imports). Empty vec means "allow all".
-    // - allow_import: required for non-file specifiers (custom schemes, data:, http(s): if used).
-    //
-    // If the user explicitly set permissions.read or permissions.import, we do not override.
     let imports_enabled = !matches!(limits.imports, crate::worker::state::ImportsPolicy::DenyAll);
 
     if imports_enabled {
         if opts.allow_read.is_none() {
-            // Match prior behavior expected by tests: imports imply disk reads are permitted.
             opts.allow_read = Some(vec![]);
         }
 
         if opts.allow_import.is_none() {
-            // Match prior behavior: allow module graph loads for non-file specifiers.
             opts.allow_import = Some(vec![]);
         }
     }
 
-    // Node compatibility often implies node: specifiers and potentially node_modules.
-    // Keep allow_import enabled if nodeCompat, but do not widen allow_read if user configured it.
     if limits.node_compat {
         if opts.allow_import.is_none() {
             opts.allow_import = Some(vec![]);
         }
     }
 
-    // Startup module might be file-based. If user didn't specify read perms and imports are disabled,
-    // minimally enable read+import so startup can load.
     if limits.startup.is_some() && !imports_enabled {
         if opts.allow_read.is_none() {
             opts.allow_read = Some(vec![]);
@@ -319,6 +304,7 @@ pub fn spawn_worker_thread(
                 s.put(module_reg.clone());
             }
 
+            // Run bootstrap extension module
             if worker.run_event_loop(false).await.is_err() {
                 if let Ok(map) = crate::WORKERS.lock() {
                     if let Some(w) = map.get(&worker_id) {
@@ -326,6 +312,15 @@ pub fn spawn_worker_thread(
                     }
                 }
                 return;
+            }
+
+            // Apply console config before any startup module runs.
+            if let Some(cfg) = limits.console.as_ref() {
+                let cfg_json = serde_json::to_string(cfg).unwrap_or_else(|_| "null".into());
+                let script = format!(
+                    "globalThis.__globals[\"__denojs_worker_console\"] = {cfg_json}; globalThis.__applyGlobals();"
+                );
+                let _ = worker.js_runtime.execute_script("<consoleConfig>", script);
             }
 
             if let Some(url) = startup_url.as_ref() {
