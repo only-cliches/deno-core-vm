@@ -1,7 +1,7 @@
 // src/__tests__/eval_module.spec.ts
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
-const { DenoWorker } = require("../index");
+import { DenoWorker } from "../src/index";
 
 describe("evalModule: module namespace API", () => {
   jest.setTimeout(60_000);

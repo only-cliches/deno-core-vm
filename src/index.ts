@@ -31,6 +31,7 @@ function wireNum(tag: string): WireJson {
 
 function dehydrateForWire(value: any): WireJson {
 	const seen = typeof WeakSet !== "undefined" ? new WeakSet<object>() : null;
+	const CYCLE = Symbol("denojs_worker_cycle");
 
 	function inner(x: any, depth: number): WireJson {
 		if (x === undefined) return wireUndef();
@@ -56,7 +57,15 @@ function dehydrateForWire(value: any): WireJson {
 
 		if (t === "function" || t === "symbol") return wireUndef();
 
-		if (Array.isArray(x)) return x.map((it) => inner(it, depth + 1));
+		if (t === "object" && seen) {
+			if (seen.has(x)) return CYCLE as any;
+			seen.add(x);
+		}
+
+		if (Array.isArray(x)) {
+			const out = x.map((it) => inner(it, depth + 1));
+			return out.some((it) => it === CYCLE) ? wireUndef() : out;
+		}
 
 		if (typeof Date !== "undefined" && x instanceof Date) {
 			return { __date: x.getTime() };
@@ -95,7 +104,7 @@ function dehydrateForWire(value: any): WireJson {
 			try {
 				const u8 = new Uint8Array(x.buffer, byteOffset, byteLength);
 				const bytes = Array.from(u8);
-				return { __buffer: { kind, bytes, byteOffset, length } };
+				return { __buffer: { kind, bytes, byteOffset: 0, length } };
 			} catch {
 				return wireUndef();
 			}
@@ -136,20 +145,20 @@ function dehydrateForWire(value: any): WireJson {
 		}
 
 		if (t === "object") {
-			if (seen) {
-				if (seen.has(x)) return wireUndef();
-				seen.add(x);
-			}
-
 			const out: any = {};
-			for (const [k, v] of Object.entries(x)) out[k] = inner(v, depth + 1);
+			for (const [k, v] of Object.entries(x)) {
+				const vv = inner(v, depth + 1);
+				if (vv === CYCLE) return wireUndef();
+				out[k] = vv;
+			}
 			return out;
 		}
 
 		return wireUndef();
 	}
 
-	return inner(value, 0);
+	const out = inner(value, 0);
+	return out === CYCLE ? wireUndef() : out;
 }
 
 function dehydrateArgs(args: any[] | undefined): any[] {
@@ -199,7 +208,14 @@ function cloneViewToRealm(x: any): any {
 }
 
 function bufferViewFromWire(obj: any): any {
-	const b = obj && obj.__buffer ? obj.__buffer : null;
+	const b =
+		obj && typeof obj === "object"
+			? obj.__buffer && typeof obj.__buffer === "object"
+				? obj.__buffer
+				: typeof obj.kind === "string" && "bytes" in obj
+					? obj
+					: null
+			: null;
 	if (!b || typeof b !== "object") return undefined;
 
 	const kind = typeof b.kind === "string" ? b.kind : "Uint8Array";
@@ -270,6 +286,14 @@ function hydrateFromWire(v: any): any {
 				// ignore
 			}
 		}
+		if (tag === "[object ArrayBuffer]") {
+			try {
+				const src = new Uint8Array(x as ArrayBuffer);
+				return new Uint8Array(src).buffer;
+			} catch {
+				return x;
+			}
+		}
 		if (tag === "[object Map]" && typeof (x as any).entries === "function") {
 			const m = new Map<any, any>();
 			for (const [k, v2] of (x as any).entries()) m.set(inner(k), inner(v2));
@@ -279,6 +303,29 @@ function hydrateFromWire(v: any): any {
 			const s = new Set<any>();
 			for (const v2 of (x as any).values()) s.add(inner(v2));
 			return s;
+		}
+		if (tag === "[object URL]" && typeof (x as any).href === "string") {
+			try {
+				return new URL(String((x as any).href));
+			} catch {
+				return x;
+			}
+		}
+		if (tag === "[object URLSearchParams]") {
+			try {
+				return new URLSearchParams(String((x as any).toString?.() ?? ""));
+			} catch {
+				return x;
+			}
+		}
+		if (tag === "[object Error]") {
+			const msg = typeof (x as any).message === "string" ? (x as any).message : String((x as any).message ?? "");
+			const e = new Error(msg);
+			if (typeof (x as any).name === "string") (e as any).name = (x as any).name;
+			if (typeof (x as any).stack === "string") (e as any).stack = (x as any).stack;
+			if ("code" in x && (x as any).code != null) (e as any).code = (x as any).code;
+			if ("cause" in x && (x as any).cause != null) (e as any).cause = inner((x as any).cause);
+			return e;
 		}
 		if (typeof ArrayBuffer !== "undefined" && typeof ArrayBuffer.isView === "function" && ArrayBuffer.isView(x)) {
 			return cloneViewToRealm(x);
@@ -615,8 +662,23 @@ function normalizeWorkerOptions(options?: DenoWorkerOptions): DenoWorkerWorkerOp
 // Alias to preserve existing exported name
 type DenoWorkerWorkerOptions = DenoWorkerOptions;
 
-function isModuleFnTag(x: any): x is { __denojs_worker_type: "module_fn"; spec: string; name: string } {
-	return x && typeof x === "object" && x.__denojs_worker_type === "module_fn" && typeof x.spec === "string" && typeof x.name === "string";
+function getModuleFnTag(x: any): { spec: string; name: string } | null {
+	if (!x || typeof x !== "object") return null;
+	const specRaw = (x as any).spec;
+	const nameRaw = (x as any).name;
+	const tag = (x as any).__denojs_worker_type;
+	if (specRaw == null || nameRaw == null) return null;
+
+	const spec = String(specRaw);
+	const name = String(nameRaw);
+	if (!spec.startsWith("denojs+")) return null;
+
+	if (tag === "module_fn") return { spec, name };
+	const keys = Object.keys(x);
+	if (keys.length <= 3 && keys.every((k) => k === "__denojs_worker_type" || k === "spec" || k === "name")) {
+		return { spec, name };
+	}
+	return null;
 }
 
 function wrapModuleNamespace<T extends Record<string, any>>(dw: DenoWorker, ns: any): T {
@@ -624,11 +686,27 @@ function wrapModuleNamespace<T extends Record<string, any>>(dw: DenoWorker, ns: 
 
 	const proto = Object.getPrototypeOf(ns);
 	const out: any = proto === null ? Object.create(null) : {};
+	const moduleSpec = typeof (ns as any).__denojs_worker_module_spec === "string" ? (ns as any).__denojs_worker_module_spec : undefined;
+	const moduleFnKeys = new Set(
+		Array.isArray((ns as any).__denojs_worker_module_fns)
+			? (ns as any).__denojs_worker_module_fns.filter((x: any) => typeof x === "string")
+			: [],
+	);
 
 	for (const [k, v] of Object.entries(ns)) {
-		if (isModuleFnTag(v)) {
-			const specJson = JSON.stringify(v.spec);
-			const nameJson = JSON.stringify(v.name);
+		if (k === "__denojs_worker_module_spec" || k === "__denojs_worker_module_fns") continue;
+		const modFn = getModuleFnTag(v);
+		const shouldWrap = !!modFn || moduleFnKeys.has(k);
+		if (shouldWrap) {
+			const spec = modFn?.spec ?? moduleSpec;
+			const name = modFn?.name ?? k;
+			if (typeof spec !== "string") {
+				out[k] = hydrateFromWire(v);
+				continue;
+			}
+
+			const specJson = JSON.stringify(spec);
+			const nameJson = JSON.stringify(name);
 
 			out[k] = (...args: any[]) => {
 				return dw.evalSync(`(...args) => import(${specJson}).then(m => m[${nameJson}](...args))`, { args });
@@ -643,6 +721,8 @@ function wrapModuleNamespace<T extends Record<string, any>>(dw: DenoWorker, ns: 
 
 export class DenoWorker {
 	private readonly native: NativeWorker;
+	private closePromise: Promise<void> | null = null;
+	private closed = false;
 
 	constructor(options?: DenoWorkerOptions) {
 		this.native = (native as any).DenoWorker(normalizeWorkerOptions(options)) as NativeWorker;
@@ -675,7 +755,13 @@ export class DenoWorker {
 	}
 
 	isClosed(): boolean {
-		return this.native.isClosed();
+		if (this.closed) return true;
+		const nativeClosed = this.native.isClosed();
+		if (nativeClosed) {
+			this.closed = true;
+			return true;
+		}
+		return this.closePromise !== null;
 	}
 
 	get lastExecutionStats(): ExecStats {
@@ -692,7 +778,20 @@ export class DenoWorker {
 	}
 
 	async close(): Promise<void> {
-		await this.native.close();
+		if (this.closed) return;
+		if (this.closePromise) return this.closePromise;
+
+		this.closePromise = this.native
+			.close()
+			.then(() => {
+				this.closed = true;
+			})
+			.catch((e: any) => {
+				this.closePromise = null;
+				throw hydrateFromWire(e);
+			});
+
+		await this.closePromise;
 	}
 
 	async memory(): Promise<DenoWorkerMemory> {
@@ -702,7 +801,8 @@ export class DenoWorker {
 
 	async setGlobal(key: string, value: any): Promise<void> {
 		try {
-			await this.native.setGlobal(key, dehydrateForWire(value));
+			const payload = value === undefined ? null : typeof value === "function" ? value : dehydrateForWire(value);
+			await this.native.setGlobal(key, payload);
 		} catch (e) {
 			throw hydrateFromWire(e);
 		}

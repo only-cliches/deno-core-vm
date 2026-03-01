@@ -45,7 +45,7 @@ fn object_to_string_tag<'a, C: Context<'a>>(cx: &mut C, v: Handle<'a, JsValue>) 
     Some(out.value(cx))
 }
 
-fn reflect_construct<'a, C: Context<'a>>(
+pub(crate) fn reflect_construct<'a, C: Context<'a>>(
     cx: &mut C,
     ctor: Handle<'a, JsFunction>,
     args: &[Handle<'a, JsValue>],
@@ -765,6 +765,27 @@ fn json_to_neon<'a, C: Context<'a>>(
                     .or_else(|_| Ok(cx.undefined().upcast()));
             }
 
+            if let Some(ms) = map
+                .get("__denojs_worker_console_date")
+                .and_then(|x| x.as_f64())
+            {
+                return cx
+                    .date(ms)
+                    .map(|d| d.upcast())
+                    .or_else(|_| Ok(cx.undefined().upcast()));
+            }
+
+            if let Some(ms) = map
+                .get("__denojs_worker_console_nested_date")
+                .and_then(|x| x.as_f64())
+            {
+                let o = cx.empty_object();
+                let key = cx.string("__date");
+                let vv = cx.number(ms);
+                let _ = o.set(cx, key, vv);
+                return Ok(o.upcast());
+            }
+
             if let Some(s) = map.get("__bigint").and_then(|x| x.as_str()) {
                 let ctor = match cx.global::<JsFunction>("BigInt") {
                     Ok(f) => f,
@@ -981,10 +1002,12 @@ pub fn to_neon_value<'a, C: Context<'a>>(
         JsValueBridge::Bool(v) => Ok(cx.boolean(*v).upcast()),
         JsValueBridge::Number(v) => Ok(cx.number(*v).upcast()),
         JsValueBridge::String(v) => Ok(cx.string(v).upcast()),
-        JsValueBridge::DateMs(ms) => cx
-            .date(*ms)
-            .map(|d| d.upcast())
-            .or_else(|_| Ok(cx.undefined().upcast())),
+        JsValueBridge::DateMs(ms) => {
+            match JsDate::new(cx, *ms) {
+                Ok(d) => Ok(d.upcast()),
+                Err(_) => Ok(cx.undefined().upcast()),
+            }
+        }
 
         JsValueBridge::BigInt(s) => {
             let ctor = cx.global::<JsFunction>("BigInt").ok();

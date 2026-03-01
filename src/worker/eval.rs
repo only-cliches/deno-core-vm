@@ -304,23 +304,27 @@ function moduleReturn(v) {{
   }}
   const m = await import(spec);
   const o = Object.create(null);
+  const moduleFnKeys = [];
+  o.__denojs_worker_module_spec = spec;
+  const dehydrate = typeof globalThis.__dehydrate === "function" ? globalThis.__dehydrate : (x) => x;
 
   for (const k of Object.keys(m)) {{
     const v = m[k];
     if (typeof v === "function") {{
       o[k] = {{ __denojs_worker_type: "module_fn", spec, name: k }};
+      moduleFnKeys.push(k);
     }} else {{
-      o[k] = v;
+      o[k] = dehydrate(v);
     }}
   }}
 
   if ("default" in m) {{
-    const v = m.default;
-    if (typeof v === "function") {{
-      o.default = {{ __denojs_worker_type: "module_fn", spec, name: "default" }};
-    }} else {{
-      o.default = v;
-    }}
+    o.default = {{ __denojs_worker_type: "module_fn", spec, name: "default" }};
+    if (!moduleFnKeys.includes("default")) moduleFnKeys.push("default");
+  }}
+
+  if (moduleFnKeys.length) {{
+    o.__denojs_worker_module_fns = moduleFnKeys;
   }}
 
   return o;

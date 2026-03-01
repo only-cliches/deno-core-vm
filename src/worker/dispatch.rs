@@ -531,19 +531,16 @@ pub fn dispatch_node_msg(worker_id: usize, msg: NodeMsg) {
                         return Ok(());
                     }
 
-                    let (promise_obj, then_fn) = match thenable {
-                        Some((o, f)) => (o, f),
-                        None => {
-                            state.send_once(Err(JsValueBridge::Error {
-                                name: "HostFunctionError".into(),
-                                message: "Async host function returned a non-thenable".into(),
-                                stack: None,
-                                code: None,
-                                cause: None,
-                            }));
-                            return Ok(());
-                        }
-                    };
+                    if thenable.is_none() {
+                        state.send_once(Err(JsValueBridge::Error {
+                            name: "HostFunctionError".into(),
+                            message: "Async host function returned a non-thenable".into(),
+                            stack: None,
+                            code: None,
+                            cause: None,
+                        }));
+                        return Ok(());
+                    }
 
                     let promise_obj: Handle<JsObject> = match returned.downcast::<JsObject, _>(cx) {
                         Ok(o) => o,

@@ -1,7 +1,4 @@
-// src/__tests__/bridge_types.spec.ts
-/* eslint-disable @typescript-eslint/no-explicit-any */
-
-const { DenoWorker } = require("../index");
+import { DenoWorker } from "../src/index";
 
 function u8of(x: any): Uint8Array {
   if (x instanceof Uint8Array) return x;

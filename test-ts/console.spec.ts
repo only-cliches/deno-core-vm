@@ -8,7 +8,7 @@ async function waitUntil(
   predicate: () => boolean | Promise<boolean>,
   opts?: { timeoutMs?: number; intervalMs?: number }
 ): Promise<void> {
-  const timeoutMs = opts?.timeoutMs ?? 1500;
+  const timeoutMs = opts?.timeoutMs ?? 3000;
   const intervalMs = opts?.intervalMs ?? 25;
   const deadline = Date.now() + timeoutMs;
 

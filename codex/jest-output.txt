@@ -1,0 +1,15 @@
+PASS test-ts/inspect_env.spec.ts
+  inspect + envFile
+    ✓ inspect option starts inspector server (basic connect) (56 ms)
+    ✓ inspect: host=localhost binds to 127.0.0.1 (30 ms)
+    ✓ env option injects values at startup (no Node process env bridging) (29 ms)
+    ✓ envFile true loads .env from cwd upward (29 ms)
+    ✓ envFile string loads from explicit path (30 ms)
+    ✓ envFile: parses export prefix, quotes, and inline comments (35 ms)
+    ✓ envFile does not bypass env permissions (30 ms)
+
+Test Suites: 1 passed, 1 total
+Tests:       7 passed, 7 total
+Snapshots:   0 total
+Time:        1.055 s
+Ran all test suites matching /test-ts\/inspect_env.spec.ts/i.

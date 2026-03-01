@@ -21,7 +21,7 @@
     "skipLibCheck": true,                        /* Skip type checking all .d.ts files. */
 
     /* Emit */
-    "outDir": ".",                          /* Specify an output folder for all emitted files. */
+    "outDir": "dist",                          /* Specify an output folder for all emitted files. */
     "sourceMap": true,                           /* Create source map files for emitted JavaScript files. */
     "declaration": true,                         /* Generate .d.ts files from TypeScript and JavaScript files in your project. */
     /* Types */

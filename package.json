@@ -1,6 +1,6 @@
 {
   "name": "deno-core-vm",
-  "version": "0.1.0",
+  "version": "0.8.0",
   "description": "Run a Deno Core worker from NodeJS",
   "main": "index.js",
   "types": "index.d.ts",

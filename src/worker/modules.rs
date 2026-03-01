@@ -41,15 +41,13 @@ struct ModuleEntry {
 pub struct ModuleRegistry {
     modules: Arc<Mutex<HashMap<String, ModuleEntry>>>,
     counter: Arc<AtomicUsize>,
-    base_url: Url,
 }
 
 impl ModuleRegistry {
-    pub fn new(base_url: Url) -> Self {
+    pub fn new(_base_url: Url) -> Self {
         Self {
             modules: Arc::new(Mutex::new(HashMap::new())),
             counter: Arc::new(AtomicUsize::new(0)),
-            base_url,
         }
     }
 
@@ -60,14 +58,6 @@ impl ModuleRegistry {
             _ => "js",
         };
         format!("denojs-worker://virtual/__vm_{n}.{ext}")
-    }
-
-    pub fn next_specifier(&self) -> String {
-        let n = self.counter.fetch_add(1, Ordering::Relaxed) + 1;
-        let name = format!("__denojs_worker_module_{}.js", n);
-        let mut u = self.base_url.clone();
-        u.set_path(&format!("{}{}", u.path(), name));
-        u.to_string()
     }
 
     pub fn has(&self, specifier: &str) -> bool {

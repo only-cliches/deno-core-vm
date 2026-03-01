@@ -282,9 +282,12 @@ function dehydrateConsoleAny(v) {
 
     if (Array.isArray(x)) return x.map((it) => inner(it, depth + 1));
 
-    // Console rule: keep Date as a marker object that should NOT be rehydrated by Rust json_to_neon
+    // Console rule: top-level Date arg should round-trip to a Date in Node callback;
+    // nested Date values stay as plain marker objects.
     if (typeof Date !== "undefined" && x instanceof Date) {
-      return { __denojs_worker_console_date: x.getTime() };
+      return depth === 0
+        ? { __denojs_worker_console_date: x.getTime() }
+        : { __denojs_worker_console_nested_date: x.getTime() };
     }
 
     // Console rule: turn ArrayBuffer views into a marker that Rust will convert to Buffer
@@ -701,9 +704,6 @@ globalThis.__hydrate = function (v) {
     const id = v.id;
     const isAsync = !!v.async;
 
-    safeObjSet(fn, "__denojs_worker_host_id", id);
-    safeObjSet(fn, "__denojs_worker_host_async", isAsync);
-
     function isSyncReturnedPromiseError(err) {
       try {
         const msg = err && typeof err.message === "string" ? err.message : String(err);
@@ -713,24 +713,29 @@ globalThis.__hydrate = function (v) {
       }
     }
 
+    let fn;
     if (isAsync) {
-      return async (...args) => {
+      fn = async (...args) => {
         const payloadArgs = dehydrateArgs(args);
         return await hostCallAsync(id, payloadArgs);
       };
+    } else {
+      fn = (...args) => {
+        const payloadArgs = dehydrateArgs(args);
+        try {
+          return hostCallSync(id, payloadArgs);
+        } catch (e) {
+          if (isSyncReturnedPromiseError(e)) {
+            return hostCallAsync(id, payloadArgs);
+          }
+          throw e;
+        }
+      };
     }
 
-    return (...args) => {
-      const payloadArgs = dehydrateArgs(args);
-      try {
-        return hostCallSync(id, payloadArgs);
-      } catch (e) {
-        if (isSyncReturnedPromiseError(e)) {
-          return hostCallAsync(id, payloadArgs);
-        }
-        throw e;
-      }
-    };
+    safeObjSet(fn, "__denojs_worker_host_id", id);
+    safeObjSet(fn, "__denojs_worker_host_async", isAsync);
+    return fn;
   }
 
   const out = {};

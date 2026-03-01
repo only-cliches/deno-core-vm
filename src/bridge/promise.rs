@@ -1,4 +1,5 @@
 use neon::prelude::*;
+use std::sync::Arc;
 
 use crate::bridge::types::JsValueBridge;
 
@@ -48,6 +49,7 @@ impl Drop for DeferredGuard {
 pub struct PromiseSettler {
     deferred: Option<neon::types::Deferred>,
     channel: Channel,
+    date_ctor: Option<Arc<Root<JsFunction>>>,
 }
 
 impl PromiseSettler {
@@ -55,7 +57,13 @@ impl PromiseSettler {
         Self {
             deferred: Some(deferred),
             channel,
+            date_ctor: None,
         }
+    }
+
+    pub fn with_date_ctor(mut self, ctor: Root<JsFunction>) -> Self {
+        self.date_ctor = Some(Arc::new(ctor));
+        self
     }
 
     fn take_deferred(&mut self) -> Option<neon::types::Deferred> {
@@ -100,13 +108,25 @@ impl PromiseSettler {
         let Some(deferred) = self.take_deferred() else {
             return;
         };
+        let date_ctor = self.date_ctor.clone();
 
         self.try_send_task(deferred, move |cx, deferred| {
-            // IMPORTANT: run conversion inside try_catch so a Throw does not leave
-            // a pending exception in this Channel callback.
-            let v: Handle<JsValue> = cx
-                .try_catch(|cx| crate::bridge::neon_codec::to_neon_value(cx, &value))
-                .unwrap_or_else(|_| cx.undefined().upcast());
+            let v: Handle<JsValue> = match (&value, date_ctor.as_ref()) {
+                (JsValueBridge::DateMs(ms), Some(date_ctor)) => cx
+                    .try_catch(|cx| {
+                        let ctor = date_ctor.to_inner(cx);
+                        let arg = cx.number(*ms).upcast::<JsValue>();
+                        crate::bridge::neon_codec::reflect_construct(cx, ctor, &[arg])
+                    })
+                    .ok()
+                    .unwrap_or_else(|| {
+                        cx.try_catch(|cx| crate::bridge::neon_codec::to_neon_value(cx, &value))
+                            .unwrap_or_else(|_| cx.undefined().upcast())
+                    }),
+                _ => cx
+                    .try_catch(|cx| crate::bridge::neon_codec::to_neon_value(cx, &value))
+                    .unwrap_or_else(|_| cx.undefined().upcast()),
+            };
 
             deferred.resolve(cx, v);
         });
@@ -145,7 +165,16 @@ impl PromiseSettler {
             return;
         };
 
-        let v = safe_to_neon(cx, value);
+        let v = match (value, self.date_ctor.as_ref()) {
+            (JsValueBridge::DateMs(ms), Some(date_ctor)) => cx
+                .try_catch(|cx| {
+                    let ctor = date_ctor.to_inner(cx);
+                    let arg = cx.number(*ms).upcast::<JsValue>();
+                    crate::bridge::neon_codec::reflect_construct(cx, ctor, &[arg])
+                })
+                .unwrap_or_else(|_| safe_to_neon(cx, value)),
+            _ => safe_to_neon(cx, value),
+        };
         deferred.resolve(cx, v);
     }
 

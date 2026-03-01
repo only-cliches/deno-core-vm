@@ -13,7 +13,6 @@ use crate::bridge::promise::PromiseSettler;
 use crate::bridge::types::{EvalOptions, JsValueBridge};
 use crate::worker::messages::{DenoMsg, EvalReply};
 use crate::worker::state::WorkerHandle;
-use deno_runtime::worker::WorkerServiceOptions;
 
 lazy_static! {
     pub static ref WORKERS: Mutex<HashMap<usize, WorkerHandle>> = Mutex::new(HashMap::new());
@@ -71,14 +70,6 @@ fn host_fn_tag(id: usize, is_async: bool) -> serde_json::Value {
         "__denojs_worker_type": "function",
         "id": id,
         "async": is_async
-    })
-}
-
-fn host_fn_tag_async(id: usize) -> serde_json::Value {
-    json!({
-        "__denojs_worker_type": "function",
-        "id": id,
-        "async": true
     })
 }
 
@@ -527,7 +518,10 @@ fn create_worker(mut cx: FunctionContext) -> JsResult<JsObject> {
             let options = parse_eval_options(&mut cx, 1);
 
             let (deferred, promise) = cx.promise();
-            let settler = PromiseSettler::new(deferred, cx.channel());
+            let mut settler = PromiseSettler::new(deferred, cx.channel());
+            if let Ok(date_ctor) = cx.global::<JsFunction>("Date") {
+                settler = settler.with_date_ctor(date_ctor.root(&mut cx));
+            }
 
             let tx = {
                 let map = WORKERS

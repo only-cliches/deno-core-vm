@@ -1,5 +1,5 @@
 // src/bridge/v8_codec.rs
-use deno_runtime::deno_core::{self, serde_v8, v8};
+use deno_runtime::deno_core::{serde_v8, v8};
 use deno_runtime::deno_core::v8::{ValueDeserializerHelper, ValueSerializerHelper};
 
 use crate::bridge::types::JsValueBridge;
@@ -7,6 +7,46 @@ use crate::bridge::wire;
 
 fn mk_err(msg: impl Into<String>) -> String {
     msg.into()
+}
+
+fn try_json_stringify<'s, 'p>(
+    ps: &mut v8::PinScope<'s, 'p>,
+    value: v8::Local<'s, v8::Value>,
+) -> Option<serde_json::Value> {
+    let ctx = ps.get_current_context();
+    let global = ctx.global(ps);
+
+    let json_key = v8::String::new(ps, "JSON")?;
+    let json_any = global.get(ps, json_key.into())?;
+    let json_obj = json_any.to_object(ps)?;
+
+    let stringify_key = v8::String::new(ps, "stringify")?;
+    let stringify_any = json_obj.get(ps, stringify_key.into())?;
+    let stringify = v8::Local::<v8::Function>::try_from(stringify_any).ok()?;
+
+    let recv: v8::Local<v8::Value> = json_obj.into();
+    let out = stringify.call(ps, recv, &[value])?;
+    if out.is_undefined() {
+        return None;
+    }
+
+    let s = out.to_string(ps)?.to_rust_string_lossy(ps);
+    serde_json::from_str::<serde_json::Value>(&s).ok()
+}
+
+fn try_global_dehydrate<'s, 'p>(
+    ps: &mut v8::PinScope<'s, 'p>,
+    value: v8::Local<'s, v8::Value>,
+) -> Option<serde_json::Value> {
+    let ctx = ps.get_current_context();
+    let global = ctx.global(ps);
+
+    let key = v8::String::new(ps, "__dehydrate")?;
+    let fn_any = global.get(ps, key.into())?;
+    let dehydrate_fn = v8::Local::<v8::Function>::try_from(fn_any).ok()?;
+    let recv: v8::Local<v8::Value> = global.into();
+    let out = dehydrate_fn.call(ps, recv, &[value])?;
+    serde_v8::from_v8::<serde_json::Value>(ps, out).ok()
 }
 
 fn get_string_prop<'s, 'p>(
@@ -52,7 +92,27 @@ fn to_v8_via_wire<'s, 'p>(
     value: &JsValueBridge,
 ) -> Result<v8::Local<'s, v8::Value>, String> {
     let j = wire::to_wire_json(value);
-    let wire_val = serde_v8::to_v8(ps, j).map_err(|e| e.to_string())?;
+    let json_text = serde_json::to_string(&j).map_err(|e| e.to_string())?;
+    let ctx = ps.get_current_context();
+    let global = ctx.global(ps);
+    let json_key = v8::String::new(ps, "JSON").ok_or_else(|| mk_err("alloc JSON key failed"))?;
+    let json_any = global
+        .get(ps, json_key.into())
+        .ok_or_else(|| mk_err("JSON global missing"))?;
+    let json_obj =
+        v8::Local::<v8::Object>::try_from(json_any).map_err(|_| mk_err("JSON is not object"))?;
+
+    let parse_key = v8::String::new(ps, "parse").ok_or_else(|| mk_err("alloc parse key failed"))?;
+    let parse_any = json_obj
+        .get(ps, parse_key.into())
+        .ok_or_else(|| mk_err("JSON.parse missing"))?;
+    let parse_fn = v8::Local::<v8::Function>::try_from(parse_any)
+        .map_err(|_| mk_err("JSON.parse is not function"))?;
+
+    let arg = v8::String::new(ps, &json_text).ok_or_else(|| mk_err("alloc JSON payload failed"))?;
+    let wire_val = parse_fn
+        .call(ps, json_obj.into(), &[arg.into()])
+        .ok_or_else(|| mk_err("JSON.parse failed"))?;
     Ok(hydrate_via_global(ps, wire_val))
 }
 
@@ -221,6 +281,22 @@ pub fn from_v8<'s, 'p>(
 
     if value.is_big_int() {
         let bi = value.cast::<v8::BigInt>();
+        let (i, i_lossless) = bi.i64_value();
+        if i_lossless {
+            let n = i as f64;
+            if n.is_finite() && (n as i64) == i {
+                return Ok(JsValueBridge::Number(n));
+            }
+        }
+
+        let (u, u_lossless) = bi.u64_value();
+        if u_lossless {
+            let n = u as f64;
+            if n.is_finite() && (n as u64) == u {
+                return Ok(JsValueBridge::Number(n));
+            }
+        }
+
         let s = big_int_to_string_checked(ps, bi)?;
         return Ok(JsValueBridge::BigInt(s));
     }
@@ -246,6 +322,27 @@ pub fn from_v8<'s, 'p>(
             bytes: slice.to_vec(),
             byte_offset: 0,
             length: len,
+        });
+    }
+
+    // DataView
+    if value.is_data_view() {
+        let dv = value.cast::<v8::DataView>();
+        let ab = dv.buffer(ps).ok_or_else(|| mk_err("dataview buffer missing"))?;
+        let byte_offset = dv.byte_offset();
+        let byte_len = dv.byte_length();
+
+        let bs = ab.get_backing_store();
+        let data = bs.data().ok_or_else(|| mk_err("backing store missing"))?;
+        let ptr = data.as_ptr() as *const u8;
+
+        let slice = unsafe { std::slice::from_raw_parts(ptr.add(byte_offset), byte_len) };
+
+        return Ok(JsValueBridge::BufferView {
+            kind: "DataView".into(),
+            bytes: slice.to_vec(),
+            byte_offset,
+            length: byte_len,
         });
     }
 
@@ -286,6 +383,48 @@ pub fn from_v8<'s, 'p>(
             byte_offset,
             length,
         });
+    }
+
+    if value.is_map() {
+        let m = value.cast::<v8::Map>();
+        let arr = m.as_array(ps);
+        let len = arr.length();
+        let mut out = Vec::with_capacity((len / 2) as usize);
+
+        let mut i = 0u32;
+        while i + 1 < len {
+            let k = arr
+                .get_index(ps, i)
+                .unwrap_or_else(|| v8::undefined(ps).into());
+            let v = arr
+                .get_index(ps, i + 1)
+                .unwrap_or_else(|| v8::undefined(ps).into());
+
+            let kk = from_v8(ps, k).unwrap_or(JsValueBridge::Undefined);
+            let vv = from_v8(ps, v).unwrap_or(JsValueBridge::Undefined);
+            out.push((kk, vv));
+            i += 2;
+        }
+
+        return Ok(JsValueBridge::Map(out));
+    }
+
+    if value.is_set() {
+        let s = value.cast::<v8::Set>();
+        let arr = s.as_array(ps);
+        let len = arr.length();
+        let mut out = Vec::with_capacity(len as usize);
+
+        let mut i = 0u32;
+        while i < len {
+            let v = arr
+                .get_index(ps, i)
+                .unwrap_or_else(|| v8::undefined(ps).into());
+            out.push(from_v8(ps, v).unwrap_or(JsValueBridge::Undefined));
+            i += 1;
+        }
+
+        return Ok(JsValueBridge::Set(out));
     }
 
     // Native Error
@@ -360,6 +499,14 @@ pub fn from_v8<'s, 'p>(
     // Try serde_v8 -> wire decode for plain JSON and tagged objects.
     if value.is_object() || value.is_array() {
         if let Ok(j) = serde_v8::from_v8::<serde_json::Value>(ps, value) {
+            return Ok(wire::from_wire_json(j));
+        }
+
+        if let Some(j) = try_global_dehydrate(ps, value) {
+            return Ok(wire::from_wire_json(j));
+        }
+
+        if let Some(j) = try_json_stringify(ps, value) {
             return Ok(wire::from_wire_json(j));
         }
 
