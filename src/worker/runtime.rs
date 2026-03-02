@@ -18,7 +18,9 @@ use crate::worker::messages::{DenoMsg, NodeMsg};
 use crate::worker::ops::{
     op_denojs_worker_env_delete, op_denojs_worker_env_get, op_denojs_worker_env_set,
     op_denojs_worker_env_to_object, op_denojs_worker_host_call_async,
+    op_denojs_worker_host_call_async_bin_mixed,
     op_denojs_worker_host_call_async_bin, op_denojs_worker_host_call_sync,
+    op_denojs_worker_host_call_sync_bin_mixed,
     op_denojs_worker_host_call_sync_bin, op_denojs_worker_post_message,
     op_denojs_worker_post_message_bin,
 };
@@ -48,8 +50,10 @@ extension!(
         op_denojs_worker_post_message_bin,
         op_denojs_worker_host_call_sync,
         op_denojs_worker_host_call_sync_bin,
+        op_denojs_worker_host_call_sync_bin_mixed,
         op_denojs_worker_host_call_async,
         op_denojs_worker_host_call_async_bin,
+        op_denojs_worker_host_call_async_bin_mixed,
         op_denojs_worker_env_get,
         op_denojs_worker_env_set,
         op_denojs_worker_env_delete,
@@ -103,6 +107,8 @@ fn permissions_from_limits(limits: &RuntimeLimits, root: &Path) -> PermissionsCo
     opts.prompt = false;
 
     if let Some(cfg) = &limits.permissions {
+        // Permission arrays are interpreted relative to the worker cwd sandbox.
+        // Boolean true means "sandbox root", not unrestricted host filesystem.
         let canon_root = std::fs::canonicalize(root)
             .unwrap_or_else(|_| root.to_path_buf())
             .to_string_lossy()
@@ -170,7 +176,8 @@ pub fn spawn_worker_thread(
 
         let inspect_cfg = limits.inspect.clone();
 
-        // Minimal inspect listener for test connectivity.
+        // Minimal inspector endpoints for tests/tooling that only need liveness
+        // and target discovery; this is intentionally not a full DevTools proxy.
         let mut inspect_stop: Option<Arc<AtomicBool>> = None;
         let mut inspect_thread: Option<std::thread::JoinHandle<()>> = None;
 
@@ -248,6 +255,8 @@ pub fn spawn_worker_thread(
             }
         }
 
+        // Single-thread runtime keeps worker semantics deterministic and avoids
+        // cross-thread access to non-Send JS runtime internals.
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()

@@ -13,12 +13,15 @@ use crate::bridge::promise::PromiseSettler;
 
 #[derive(Default)]
 pub struct PendingRequests {
+    // Monotonic request id source for pending Promise settlers.
     next_id: AtomicU64,
+    // In-flight request -> settler map. Drained on forced shutdown/restart.
     map: Mutex<HashMap<u64, PromiseSettler>>,
 }
 
 impl PendingRequests {
     pub fn insert(&self, settler: PromiseSettler) -> u64 {
+        // Never return 0 so "missing id" and "first id" are distinguishable in logs.
         let id = self.next_id.fetch_add(1, Ordering::Relaxed).max(1);
         self.map.lock().unwrap().insert(id, settler);
         id
@@ -129,6 +132,7 @@ fn parse_dotenv_text_strict(text: &str) -> Vec<(String, String)> {
 
     let mut out = Vec::new();
 
+    // Intentionally strict/minimal parser: KEY=VALUE with optional quotes/comments.
     for line in text.lines() {
         let mut l = line.trim();
         if l.is_empty() || l.starts_with('#') {
@@ -166,6 +170,7 @@ fn parse_dotenv_text_strict(text: &str) -> Vec<(String, String)> {
 fn resolve_env_path(base_cwd: &Path, raw: &str) -> PathBuf {
     let s = raw.trim();
 
+    // Accept file:// for parity with module/url-heavy config surfaces.
     if s.starts_with("file://") {
         if let Ok(u) = deno_core::url::Url::parse(s) {
             if let Ok(p) = u.to_file_path() {
@@ -183,6 +188,7 @@ fn resolve_env_path(base_cwd: &Path, raw: &str) -> PathBuf {
 }
 
 fn find_dotenv_upwards(start_dir: &Path) -> Option<PathBuf> {
+    // Walk up to filesystem root, first .env wins.
     let mut cur = std::fs::canonicalize(start_dir).unwrap_or_else(|_| start_dir.to_path_buf());
     loop {
         let cand = cur.join(".env");
@@ -250,6 +256,7 @@ fn ensure_env_permission_enabled(
         return permissions;
     }
 
+    // If custom env is configured, force env permission on to keep runtime access coherent.
     let mut out = match permissions {
         Some(serde_json::Value::Object(map)) => map,
         _ => serde_json::Map::new(),
@@ -276,7 +283,7 @@ impl WorkerCreateOptions {
             Err(_) => return Ok(out),
         };
 
-        // cwd
+        // `cwd`.
         if let Ok(v) = obj.get::<JsValue, _, _>(cx, "cwd") {
             if let Ok(s) = v.downcast::<JsString, _>(cx) {
                 let raw = s.value(cx);
@@ -287,7 +294,7 @@ impl WorkerCreateOptions {
             }
         }
 
-        // startup
+        // `startup`.
         if let Ok(v) = obj.get::<JsValue, _, _>(cx, "startup") {
             if let Ok(s) = v.downcast::<JsString, _>(cx) {
                 let raw = s.value(cx);
@@ -298,21 +305,21 @@ impl WorkerCreateOptions {
             }
         }
 
-        // nodeResolve
+        // `nodeResolve`.
         if let Ok(v) = obj.get::<JsValue, _, _>(cx, "nodeResolve") {
             if let Ok(b) = v.downcast::<JsBoolean, _>(cx) {
                 out.runtime_options.node_resolve = b.value(cx);
             }
         }
 
-        // nodeCompat
+        // `nodeCompat`.
         if let Ok(v) = obj.get::<JsValue, _, _>(cx, "nodeCompat") {
             if let Ok(b) = v.downcast::<JsBoolean, _>(cx) {
                 out.runtime_options.node_compat = b.value(cx);
             }
         }
 
-        // permissions
+        // `permissions`.
         if let Ok(v) = obj.get::<JsValue, _, _>(cx, "permissions") {
             if !v.is_a::<JsNull, _>(cx) && !v.is_a::<JsUndefined, _>(cx) {
                 if let Ok(bridged) = from_neon_value(cx, v) {
@@ -323,7 +330,7 @@ impl WorkerCreateOptions {
             }
         }
 
-        // channelSize
+        // `channelSize`.
         if let Ok(v) = obj.get::<JsValue, _, _>(cx, "channelSize") {
             if let Ok(n) = v.downcast::<JsNumber, _>(cx) {
                 let s = n.value(cx);
@@ -333,7 +340,7 @@ impl WorkerCreateOptions {
             }
         }
 
-        // maxEvalMs
+        // `maxEvalMs`.
         if let Ok(v) = obj.get::<JsValue, _, _>(cx, "maxEvalMs") {
             if let Ok(n) = v.downcast::<JsNumber, _>(cx) {
                 let ms = n.value(cx);
@@ -343,7 +350,7 @@ impl WorkerCreateOptions {
             }
         }
 
-        // maxMemoryBytes
+        // `maxMemoryBytes`.
         if let Ok(v) = obj.get::<JsValue, _, _>(cx, "maxMemoryBytes") {
             if let Ok(n) = v.downcast::<JsNumber, _>(cx) {
                 let mb = n.value(cx);
@@ -353,7 +360,7 @@ impl WorkerCreateOptions {
             }
         }
 
-        // maxStackSizeBytes
+        // `maxStackSizeBytes`.
         if let Ok(v) = obj.get::<JsValue, _, _>(cx, "maxStackSizeBytes") {
             if let Ok(n) = v.downcast::<JsNumber, _>(cx) {
                 let sb = n.value(cx);
@@ -363,7 +370,7 @@ impl WorkerCreateOptions {
             }
         }
 
-        // imports: boolean | function
+        // `imports`: boolean | function.
         if let Ok(v) = obj.get::<JsValue, _, _>(cx, "imports") {
             if v.is_a::<JsBoolean, _>(cx) {
                 if let Ok(bv) = v.downcast::<JsBoolean, _>(cx) {
@@ -378,7 +385,7 @@ impl WorkerCreateOptions {
             }
         }
 
-        // base cwd for env/envFile resolution
+        // Base cwd for `env`/`envFile` resolution.
         let base_cwd = out
             .runtime_options
             .cwd
@@ -386,9 +393,9 @@ impl WorkerCreateOptions {
             .map(PathBuf::from)
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
-        // envFile: boolean | string(path)
-        // - true: search .env upward from cwd
-        // - string: load explicit path
+        // `envFile`: boolean | string(path).
+        // - `true`: search `.env` upward from cwd.
+        // - `string`: load explicit path.
         if let Ok(v) = obj.get::<JsValue, _, _>(cx, "envFile") {
             if !(v.is_a::<JsUndefined, _>(cx) || v.is_a::<JsNull, _>(cx)) {
                 if let Ok(b) = v.downcast::<JsBoolean, _>(cx) {
@@ -410,11 +417,11 @@ impl WorkerCreateOptions {
             }
         }
 
-        // env: undefined | string(path) | Record<string,string>
-        // Note: env overrides envFile if both provided.
+        // `env`: undefined | string(path) | Record<string,string>.
+        // Note: `env` overrides `envFile` if both are provided.
         if let Ok(v) = obj.get::<JsValue, _, _>(cx, "env") {
             if v.is_a::<JsUndefined, _>(cx) || v.is_a::<JsNull, _>(cx) {
-                // default behavior
+                // Default behavior.
             } else if let Ok(s) = v.downcast::<JsString, _>(cx) {
                 let raw_path = s.value(cx);
                 let trimmed = raw_path.trim();
@@ -431,10 +438,10 @@ impl WorkerCreateOptions {
             }
         }
 
-        // inspect: boolean | { host?: string; port?: number; break?: boolean }
+        // `inspect`: boolean | { host?: string; port?: number; break?: boolean }.
         if let Ok(v) = obj.get::<JsValue, _, _>(cx, "inspect") {
             if v.is_a::<JsUndefined, _>(cx) || v.is_a::<JsNull, _>(cx) {
-                // none
+                // No inspect config.
             } else if let Ok(b) = v.downcast::<JsBoolean, _>(cx) {
                 if b.value(cx) {
                     out.runtime_options.inspect = Some(InspectConfig {
@@ -481,7 +488,7 @@ impl WorkerCreateOptions {
             }
         }
 
-        // moduleLoader:
+        // `moduleLoader`:
         // {
         //   denoRemote?: boolean;
         //   transpileTs?: boolean;

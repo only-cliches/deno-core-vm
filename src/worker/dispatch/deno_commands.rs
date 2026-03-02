@@ -14,6 +14,7 @@ pub async fn handle_deno_msg(
     limits: &RuntimeLimits,
     msg: DenoMsg,
 ) -> bool {
+    // Return true only for terminal/close path; false keeps event loop running.
     match msg {
         DenoMsg::Close { deferred } => handle_close_msg(worker_id, deferred),
         DenoMsg::Memory { deferred } => handle_memory_msg(worker, worker_id, deferred).await,
@@ -46,6 +47,8 @@ fn handle_close_msg(worker_id: usize, deferred: crate::bridge::promise::PromiseS
         }
     }
 
+    // Prefer routing close through NodeMsg so it runs on Neon callback thread.
+    // Fallback to direct channel callback if node_tx is gone/full.
     let mut try_direct_cleanup = false;
 
     if let Some(tx) = get_node_tx(worker_id) {
@@ -142,6 +145,7 @@ fn handle_post_message_msg(worker: &mut MainWorker, value: JsValueBridge) -> boo
     };
 
     if !dispatched {
+        // Fallback script path if direct V8 invocation fails; keeps semantics stable.
         let payload = serde_json::to_string(&crate::bridge::wire::to_wire_json(&value))
             .unwrap_or_else(|_| "null".into());
         let script = format!("globalThis.__dispatchNodeMessage(globalThis.__hydrate({payload}))");
@@ -218,6 +222,7 @@ async fn handle_eval_msg(
 ) -> bool {
     let reply = eval_in_runtime(worker, limits, &source, options).await;
 
+    // Sync API path short-circuits via oneshot and bypasses Promise settler.
     if let Some(tx) = sync_reply {
         let _ = tx.send(reply);
         return false;
@@ -255,6 +260,7 @@ async fn handle_eval_msg(
 }
 
 async fn send_node_msg_or_reject(node_tx: &mpsc::Sender<NodeMsg>, msg: NodeMsg) {
+    // If node side is gone, reject pending promise instead of dropping silently.
     if let Err(send_err) = node_tx.send(msg).await {
         if let NodeMsg::Resolve { settler, .. } = send_err.0 {
             settler.reject_with_error("Node thread is unavailable");

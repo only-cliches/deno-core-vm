@@ -4,7 +4,9 @@ use tokio::sync::oneshot;
 
 #[derive(Debug, Clone)]
 pub struct ExecStats {
+    /// Process CPU consumed during one eval operation.
     pub cpu_time_ms: f64,
+    /// Wall-clock latency for the same operation.
     pub eval_time_ms: f64,
 }
 
@@ -37,6 +39,7 @@ pub enum EvalReply {
 }
 
 pub enum DenoMsg {
+    /// Execute source in runtime. Exactly one of `deferred` / `sync_reply` is typically set.
     Eval {
         source: String,
         options: EvalOptions,
@@ -72,9 +75,11 @@ pub enum ResolvePayload {
 }
 
 pub enum NodeMsg {
+    /// Emit worker postMessage payload on Node callback thread.
     EmitMessage {
         value: JsValueBridge,
     },
+    /// Runtime is closing; invoke close callback and remove handle.
     EmitClose,
 
     Resolve {
@@ -92,6 +97,7 @@ pub enum NodeMsg {
     InvokeHostFunctionSync {
         func_id: usize,
         args: Vec<JsValueBridge>,
+        // Uses std::mpsc because the caller is a sync op and cannot await.
         reply: std::sync::mpsc::Sender<Result<JsValueBridge, JsValueBridge>>,
     },
 

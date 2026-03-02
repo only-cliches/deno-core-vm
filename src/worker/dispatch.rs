@@ -11,6 +11,8 @@ mod node_imports;
 pub use deno_commands::handle_deno_msg;
 
 pub fn dispatch_node_msg(worker_id: usize, msg: NodeMsg) {
+    // Snapshot callback/function roots under lock, then release the lock before
+    // scheduling onto the Neon channel to avoid lock inversion with callbacks.
     let (channel, handle_snapshot) = match crate::WORKERS.lock() {
         Ok(map) => {
             if let Some(w) = map.get(&worker_id) {
@@ -34,6 +36,7 @@ pub fn dispatch_node_msg(worker_id: usize, msg: NodeMsg) {
     };
 
     let _ = channel.send(move |mut cx| {
+        // Dispatch must not unwind through Neon channel boundary.
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _outer = cx.try_catch(|cx| match msg {
                 NodeMsg::Resolve { settler, payload } => {

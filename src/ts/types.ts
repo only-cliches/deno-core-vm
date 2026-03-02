@@ -542,6 +542,8 @@ export type DenoWorkerRestartOptions = {
 export type NativeWorker = {
 	/** Post a message into runtime `onmessage` handlers. */
 	postMessage(msg: any): boolean;
+	/** Batch post messages; returns accepted count. */
+	postMessages?: (msgs: any[]) => number;
 	/** Register a low-level event listener on native worker bridge. */
 	on(event: string, cb: (...args: any[]) => void): void;
 	/** Return whether runtime is already closed. */

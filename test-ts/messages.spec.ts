@@ -98,4 +98,37 @@ describe("deno_worker: messaging", () => {
 
     await expect(dw.eval("globalThis.received")).resolves.toEqual({ foo: "bar" });
   });
+
+  it("round-trips recursive message graphs", async () => {
+    dw = new DenoWorker();
+    const seen: any[] = [];
+    dw.on("message", (msg: any) => seen.push(msg));
+
+    await dw.eval(`
+      on("message", (msg) => {
+        globalThis.received = msg;
+        postMessage(msg);
+      });
+    `);
+
+    const a: any = { name: "a" };
+    const b: any = { name: "b", a };
+    a.self = a;
+    a.b = b;
+    a.same = b;
+
+    dw.postMessage(a);
+    await sleep(80);
+
+    const recv = await dw.eval("globalThis.received");
+    expect(recv.self).toBe(recv);
+    expect(recv.b.a).toBe(recv);
+    expect(recv.same).toBe(recv.b);
+
+    expect(seen.length).toBeGreaterThan(0);
+    const echoed = seen[seen.length - 1];
+    expect(echoed.self).toBe(echoed);
+    expect(echoed.b.a).toBe(echoed);
+    expect(echoed.same).toBe(echoed.b);
+  });
 });

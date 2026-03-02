@@ -118,6 +118,41 @@ describe("deno_worker: data serialization", () => {
     expect(inputObj.val).toBe(1);
   });
 
+  it("preserves recursive object graphs (Node -> Deno args)", async () => {
+    dw = new DenoWorker();
+
+    const a: any = { name: "a" };
+    const b: any = { name: "b", a };
+    a.self = a;
+    a.b = b;
+    a.same = b;
+
+    const ok = await dw.eval(
+      "(x) => x.self === x && x.b.a === x && x.same === x.b",
+      { args: [a] },
+    );
+    expect(ok).toBe(true);
+  });
+
+  it("preserves recursive object graphs (Deno -> Node result)", async () => {
+    dw = new DenoWorker();
+
+    const out: any = await dw.eval(`
+      (() => {
+        const a = { name: "a" };
+        const b = { name: "b", a };
+        a.self = a;
+        a.b = b;
+        a.same = b;
+        return a;
+      })()
+    `);
+
+    expect(out.self).toBe(out);
+    expect(out.b.a).toBe(out);
+    expect(out.same).toBe(out.b);
+  });
+
   it("property-based: round-trips JSON-serializable values", async () => {
     dw = new DenoWorker();
 

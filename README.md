@@ -16,7 +16,7 @@ Whether you are building a multi-tenant edge-compute platform, executing untrust
 
 ## 🔥 Why Deno Director?
 
-* **Zero-Serialization Friction:** Unlike standard IPC, Deno Director uses a highly optimized native bridge. Pass `Map`, `Set`, `ArrayBuffer`, `Date`, `RegExp`, native `Error` objects, and even **Functions** across the Node/Deno boundary without losing fidelity.
+* **Zero-Serialization Friction:** Unlike standard IPC, Deno Director uses a highly optimized native bridge. Pass `Map`, `Set`, `ArrayBuffer`, `Date`, `RegExp`, native `Error` objects, **recursive values**, and even **Functions** across the Node/Deno boundary without losing fidelity.
 * **Wield Host Functions:** Pass a Node.js function *into* the Deno sandbox. Call it from Deno, and it executes in Node. Synchronously or asynchronously.
 * **Ironclad Sandboxing:** Every worker is a Deno isolate. You have absolute control over `read`, `write`, `net`, `env`, and `ffi` permissions. Lock it down.
 * **Native TypeScript & JSX:** Evaluate `.ts` and `.tsx` files directly. No build step required. Deno Director handles transpilation on the fly.
@@ -48,18 +48,19 @@ import { DenoWorker } from "deno-director";
 const worker = new DenoWorker({
   // Lock it down. Deno cannot read the disk or access the network.
   permissions: { read: false, net: false, env: false },
-  // Enable on-the-fly TS transpilation
-  moduleLoader: { transpileTs: true }
-});
-
-// Pass a Node.js function into the Deno sandbox
-await worker.setGlobal("nodeLogger", (msg: string) => {
-  console.log(`[Node.js received from Deno]: ${msg}`);
 });
 
 // Evaluate TypeScript directly in the sandbox!
 const result = await worker.eval(`
   const x: number = 42;
+  nodeLogger("Calculating universe secrets...");
+  x * 2;
+`);
+
+console.log(result); // 84
+await worker.close();
+const result = await worker.eval(`
+  const x = 42;
   nodeLogger("Calculating universe secrets...");
   x * 2;
 `);

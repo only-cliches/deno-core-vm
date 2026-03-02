@@ -295,9 +295,9 @@ fn should_expand_object<'a>(
         }
     }
 
-    // For plain objects, module namespace objects, and other enumerable property
-    // containers (e.g. Node core module objects), walk keys recursively so nested
-    // functions become host-callable wrappers.
+    // For plain containers (including module namespace-like objects), walk keys
+    // recursively so nested JS functions are converted to host-callable bridge
+    // tags instead of being silently dropped.
     !own_enumerable_string_keys(cx, obj).is_empty()
 }
 
@@ -315,6 +315,8 @@ fn is_special_wire_json_object(v: &serde_json::Value) -> bool {
         return true;
     }
 
+    // These tags represent already-encoded wire payloads and must not be
+    // traversed/expanded again, or type markers can be corrupted.
     const SPECIAL_KEYS: [&str; 11] = [
         "__buffer",
         "__map",
@@ -368,6 +370,7 @@ fn encode_set_global_value<'a>(
     }
 
     if let Ok(func) = value.downcast::<JsFunction, _>(cx) {
+        // Functions become callback IDs that can be invoked from the worker via ops.
         let is_async = is_async_like(cx, func);
         let callback_id = worker.register_global_fn(func.root(cx));
         return Ok(JsValueBridge::HostFunction {
@@ -389,6 +392,7 @@ fn encode_set_global_value<'a>(
     }
 
     if let Ok(obj) = value.downcast::<JsObject, _>(cx) {
+        // Baseline codec already handles rich JS types (Date/Map/Set/Error/TypedArray).
         let baseline = crate::bridge::neon_codec::from_neon_value(cx, value)?;
         if let JsValueBridge::Json(j) = &baseline {
             if is_special_wire_json_object(j) {
@@ -494,6 +498,44 @@ pub fn create_worker(mut cx: FunctionContext) -> JsResult<JsObject> {
             }
         })?;
         api.set(&mut cx, "postMessage", f)?;
+    }
+
+    // postMessages(msgs) -> number (accepted count)
+    {
+        let id2 = id;
+        let f = JsFunction::new(&mut cx, move |mut cx| {
+            let values = cx.argument::<JsValue>(0)?;
+            let arr = match values.downcast::<JsArray, _>(&mut cx) {
+                Ok(a) => a,
+                Err(_) => return Ok(cx.number(0.0)),
+            };
+
+            let tx = deno_tx_for_worker(id2);
+            let Some(tx) = tx else {
+                if strict_channel() {
+                    return cx.throw_error("Runtime is closed (postMessages)");
+                }
+                return Ok(cx.number(0.0));
+            };
+
+            let mut sent: usize = 0;
+            for i in 0..arr.len(&mut cx) {
+                let v = arr.get_value(&mut cx, i)?;
+                let msg = crate::bridge::neon_codec::from_neon_value(&mut cx, v)?;
+                match tx.try_send(DenoMsg::PostMessage { value: msg }) {
+                    Ok(()) => sent += 1,
+                    Err(_) => {
+                        if strict_channel() {
+                            return cx.throw_error("postMessages dropped: worker queue full or closed");
+                        }
+                        break;
+                    }
+                }
+            }
+
+            Ok(cx.number(sent as f64))
+        })?;
+        api.set(&mut cx, "postMessages", f)?;
     }
 
     // on(event, cb)

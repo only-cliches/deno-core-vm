@@ -37,6 +37,21 @@ export class DenoWorker {
 	private startupReady = true;
 	private startupError: unknown = null;
 
+	private isBinaryLikeValue(value: any): boolean {
+		if (typeof Buffer !== "undefined" && Buffer.isBuffer(value)) return true;
+		if (typeof ArrayBuffer !== "undefined" && value instanceof ArrayBuffer) return true;
+		if (typeof Uint8Array !== "undefined" && value instanceof Uint8Array) return true;
+		if (
+			typeof ArrayBuffer !== "undefined" &&
+			typeof ArrayBuffer.isView === "function" &&
+			ArrayBuffer.isView(value)
+		) {
+			// Keep fast-path conservative for setGlobal to preserve typed-array class fidelity.
+			return false;
+		}
+		return false;
+	}
+
 	private serializeGlobalValue(value: any, seen?: WeakSet<object>): any {
 		if (value === undefined) return null;
 		if (value === null) return null;
@@ -75,7 +90,7 @@ export class DenoWorker {
 
 	private async setGlobalInternal(key: string, value: any): Promise<void> {
 		try {
-			const payload = this.serializeGlobalValue(value);
+			const payload = this.isBinaryLikeValue(value) ? value : this.serializeGlobalValue(value);
 			await this.trackInFlight(this.native.setGlobal(key, payload));
 		} catch (e) {
 			throw hydrateFromWire(e);
@@ -341,6 +356,43 @@ export class DenoWorker {
 	}
 
 	/**
+	 * Batch enqueue variant of {@link postMessage}.
+	 *
+	 * Returns the number of messages accepted by the native queue.
+	 * Throws if worker is closed or any message in the batch is dropped.
+	 */
+	postMessages(msgs: any[]): number {
+		if (this.isClosed()) {
+			throw new Error("DenoWorker.postMessages dropped: worker queue full or closed");
+		}
+		if (!Array.isArray(msgs) || msgs.length === 0) return 0;
+
+		const payloads = msgs.map((m) =>
+			typeof Buffer !== "undefined" && Buffer.isBuffer(m) ? m : dehydrateForWire(m),
+		);
+		const sent = (this.native as any).postMessages(payloads) as number;
+		if (sent !== payloads.length) {
+			throw new Error("DenoWorker.postMessages dropped: worker queue full or closed");
+		}
+		return sent;
+	}
+
+	/**
+	 * Best-effort batch enqueue variant.
+	 *
+	 * Returns the number of messages accepted by the native queue.
+	 */
+	tryPostMessages(msgs: any[]): number {
+		if (this.isClosed()) return 0;
+		if (!Array.isArray(msgs) || msgs.length === 0) return 0;
+		const payloads = msgs.map((m) =>
+			typeof Buffer !== "undefined" && Buffer.isBuffer(m) ? m : dehydrateForWire(m),
+		);
+		const sent = (this.native as any).postMessages(payloads);
+		return typeof sent === "number" && Number.isFinite(sent) ? sent : 0;
+	}
+
+	/**
 	 * Best-effort message enqueue variant of {@link postMessage}.
 	 *
 	 * Returns `false` instead of throwing when enqueue fails.
@@ -555,11 +607,11 @@ export class DenoWorker {
 			} else {
 				raw = await this.eval(source, { ...(options ?? {}), type: "module" });
 			}
-		} catch (e) {
-			throw hydrateFromWire(e);
+			} catch (e) {
+				throw hydrateFromWire(e);
+			}
+			return wrapModuleNamespace<T>(this, hydrateFromWire(raw));
 		}
-		return wrapModuleNamespace<T>(this, raw);
 	}
-}
 
 export default DenoWorker;

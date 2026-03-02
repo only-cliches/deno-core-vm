@@ -2,6 +2,7 @@
 use neon::prelude::*;
 use neon::result::Throw;
 use neon::types::JsDate;
+use std::cell::RefCell;
 
 use super::types::JsValueBridge;
 use crate::bridge::tags::{
@@ -10,6 +11,37 @@ use crate::bridge::tags::{
 };
 use crate::worker::messages::EvalReply;
 use neon::types::buffer::TypedArray;
+
+thread_local! {
+    static BYTE_VEC_POOL: RefCell<Vec<Vec<u8>>> = const { RefCell::new(Vec::new()) };
+}
+
+fn rent_byte_vec(min_capacity: usize) -> Vec<u8> {
+    BYTE_VEC_POOL.with(|pool| {
+        let mut pool = pool.borrow_mut();
+        if let Some(i) = pool.iter().position(|v| v.capacity() >= min_capacity) {
+            let mut out = pool.swap_remove(i);
+            out.clear();
+            out
+        } else {
+            Vec::with_capacity(min_capacity)
+        }
+    })
+}
+
+fn give_back_byte_vec(mut v: Vec<u8>) {
+    // Keep pooled buffers bounded; 1 MiB covers common transfer chunks.
+    if v.capacity() > 1024 * 1024 {
+        return;
+    }
+    v.clear();
+    BYTE_VEC_POOL.with(|pool| {
+        let mut pool = pool.borrow_mut();
+        if pool.len() < 16 {
+            pool.push(v);
+        }
+    });
+}
 
 fn get_string_prop<'a, C: Context<'a>>(
     cx: &mut C,
@@ -563,12 +595,37 @@ pub fn from_neon_value<'a, C: Context<'a>>(
                 };
 
                 if is_ab || is_sab || is_view {
-                    let out_any = from_fn
-                        .call_with(cx)
-                        .this(buf_ctor)
-                        .arg(value)
-                        .apply::<JsValue, _>(cx)
-                        .unwrap_or_else(|_| cx.undefined().upcast());
+                    let out_any = if is_view {
+                        if let Ok(obj) = value.downcast::<JsObject, _>(cx) {
+                            let buf_any = obj
+                                .get_value(cx, "buffer")
+                                .unwrap_or_else(|_| cx.undefined().upcast::<JsValue>());
+                            let bo_any = obj
+                                .get_value(cx, "byteOffset")
+                                .unwrap_or_else(|_| cx.number(0.0).upcast::<JsValue>());
+                            let bl_any = obj
+                                .get_value(cx, "byteLength")
+                                .unwrap_or_else(|_| cx.number(0.0).upcast::<JsValue>());
+
+                            from_fn
+                                .call_with(cx)
+                                .this(buf_ctor)
+                                .arg(buf_any)
+                                .arg(bo_any)
+                                .arg(bl_any)
+                                .apply::<JsValue, _>(cx)
+                                .unwrap_or_else(|_| cx.undefined().upcast())
+                        } else {
+                            cx.undefined().upcast()
+                        }
+                    } else {
+                        from_fn
+                            .call_with(cx)
+                            .this(buf_ctor)
+                            .arg(value)
+                            .apply::<JsValue, _>(cx)
+                            .unwrap_or_else(|_| cx.undefined().upcast())
+                    };
 
                     if let Ok(out_buf) = out_any.downcast::<JsBuffer, _>(cx) {
                         let bytes = out_buf.as_slice(cx).to_vec();
@@ -906,16 +963,20 @@ fn json_to_neon<'a, C: Context<'a>>(
                 .get("__denojs_worker_console_buffer")
                 .and_then(|x| x.as_array())
             {
-                let mut bytes = Vec::<u8>::with_capacity(arr.len());
+                let mut bytes = rent_byte_vec(arr.len());
                 for it in arr.iter() {
                     match it.as_u64() {
                         Some(n) if n <= 255 => bytes.push(n as u8),
-                        _ => return Ok(cx.undefined().upcast()),
+                        _ => {
+                            give_back_byte_vec(bytes);
+                            return Ok(cx.undefined().upcast());
+                        }
                     }
                 }
 
                 let mut b = JsBuffer::new(cx, bytes.len())?;
                 b.as_mut_slice(cx).copy_from_slice(&bytes);
+                give_back_byte_vec(bytes);
                 return Ok(b.upcast());
             }
 
@@ -1024,16 +1085,20 @@ fn json_to_neon<'a, C: Context<'a>>(
                 let empty: Vec<serde_json::Value> = Vec::new();
                 let bytes_arr_ref = b.get("bytes").and_then(|x| x.as_array()).unwrap_or(&empty);
 
-                let mut out_bytes = Vec::<u8>::with_capacity(bytes_arr_ref.len());
+                let mut out_bytes = rent_byte_vec(bytes_arr_ref.len());
                 for it in bytes_arr_ref.iter() {
                     match it.as_u64() {
                         Some(n) if n <= 255 => out_bytes.push(n as u8),
-                        _ => return Ok(cx.undefined().upcast()),
+                        _ => {
+                            give_back_byte_vec(out_bytes);
+                            return Ok(cx.undefined().upcast());
+                        }
                     }
                 }
 
                 let out = buffer_view_to_neon(cx, kind, &out_bytes, byte_offset, length)
                     .unwrap_or_else(|_| cx.undefined().upcast());
+                give_back_byte_vec(out_bytes);
                 return Ok(out);
             }
 

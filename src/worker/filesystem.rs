@@ -25,6 +25,7 @@ pub fn normalize_startup_url(cwd: &Path, raw: Option<&str>) -> Option<Url> {
 
     let cwd_abs = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
 
+    // Accept both file:// URLs and relative/absolute filesystem paths.
     let candidate_path: PathBuf = if raw.starts_with("file://") {
         let u = Url::parse(raw).ok()?;
         u.to_file_path().ok()?
@@ -39,7 +40,7 @@ pub fn normalize_startup_url(cwd: &Path, raw: Option<&str>) -> Option<Url> {
 
     let file_abs = std::fs::canonicalize(&candidate_path).ok()?;
 
-    // Enforce sandbox: startup must be within cwd
+    // Enforce sandbox: startup must remain under configured cwd.
     if !file_abs.starts_with(&cwd_abs) {
         return None;
     }
@@ -61,6 +62,7 @@ impl FileSystem for SandboxFs {
     }
 
     fn chdir(&self, _path: &CheckedPath<'_>) -> FsResult<()> {
+        // Keep runtime cwd fixed to sandbox root for deterministic path policy.
         Err(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
             "Deno.chdir is disabled",
@@ -77,6 +79,7 @@ impl FileSystem for SandboxFs {
         path: &CheckedPath<'_>,
         options: OpenOptions,
     ) -> FsResult<std::rc::Rc<dyn deno_io::fs::File>> {
+        // Path safety is enforced by CheckedPath + permission layer; delegate IO.
         self.inner.open_sync(path, options)
     }
 

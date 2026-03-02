@@ -1,6 +1,10 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 type WireJson = any;
+const GRAPH_ID_KEY = "__denojs_worker_graph_id";
+const GRAPH_REF_KEY = "__denojs_worker_graph_ref";
+const GRAPH_KIND_KEY = "__denojs_worker_graph_kind";
+const GRAPH_VALUE_KEY = "__denojs_worker_graph_value";
 
 function wireUndef(): WireJson {
 	return { __undef: true };
@@ -11,8 +15,8 @@ function wireNum(tag: string): WireJson {
 }
 
 export function dehydrateForWire(value: any): WireJson {
-	const seen = typeof WeakSet !== "undefined" ? new WeakSet<object>() : null;
-	const CYCLE = Symbol("denojs_worker_cycle");
+	const seen = typeof WeakMap !== "undefined" ? new WeakMap<object, number>() : null;
+	let nextGraphId = 1;
 
 	function inner(x: any, depth: number): WireJson {
 		if (x === undefined) return wireUndef();
@@ -37,16 +41,6 @@ export function dehydrateForWire(value: any): WireJson {
 		}
 
 		if (t === "function" || t === "symbol") return wireUndef();
-
-		if (t === "object" && seen) {
-			if (seen.has(x)) return CYCLE as any;
-			seen.add(x);
-		}
-
-		if (Array.isArray(x)) {
-			const out = x.map((it) => inner(it, depth + 1));
-			return out.some((it) => it === CYCLE) ? wireUndef() : out;
-		}
 
 		if (typeof Date !== "undefined" && x instanceof Date) {
 			return { __date: x.getTime() };
@@ -123,20 +117,37 @@ export function dehydrateForWire(value: any): WireJson {
 		}
 
 		if (t === "object") {
-			const out: any = {};
-			for (const [k, v] of Object.entries(x)) {
-				const vv = inner(v, depth + 1);
-				if (vv === CYCLE) return wireUndef();
-				out[k] = vv;
+			if (!seen) return wireUndef();
+
+			const existing = seen.get(x);
+			if (typeof existing === "number") {
+				return { [GRAPH_REF_KEY]: existing };
 			}
-			return out;
+
+			const graphId = nextGraphId++;
+			seen.set(x, graphId);
+
+			if (Array.isArray(x)) {
+				return {
+					[GRAPH_ID_KEY]: graphId,
+					[GRAPH_KIND_KEY]: "array",
+					[GRAPH_VALUE_KEY]: x.map((it) => inner(it, depth + 1)),
+				};
+			}
+
+			const out: any = {};
+			for (const [k, v] of Object.entries(x)) out[k] = inner(v, depth + 1);
+			return {
+				[GRAPH_ID_KEY]: graphId,
+				[GRAPH_KIND_KEY]: "object",
+				[GRAPH_VALUE_KEY]: out,
+			};
 		}
 
 		return wireUndef();
 	}
 
-	const out = inner(value, 0);
-	return out === CYCLE ? wireUndef() : out;
+	return inner(value, 0);
 }
 
 export function dehydrateArgs(args: any[] | undefined): any[] {
@@ -240,6 +251,8 @@ function bufferViewFromWire(obj: any): any {
 }
 
 export function hydrateFromWire(v: any): any {
+	const graph = new Map<number, any>();
+
 	function inner(x: any): any {
 		if (x == null) return x;
 
@@ -384,6 +397,65 @@ export function hydrateFromWire(v: any): any {
 			}
 
 			return e;
+		}
+
+		if (
+			typeof (x as any)[GRAPH_REF_KEY] === "number" &&
+			Object.keys(x).length === 1
+		) {
+			return graph.get((x as any)[GRAPH_REF_KEY]);
+		}
+
+		if (
+			typeof (x as any)[GRAPH_ID_KEY] === "number" &&
+			typeof (x as any)[GRAPH_KIND_KEY] === "string" &&
+			GRAPH_VALUE_KEY in (x as any)
+		) {
+			const id = (x as any)[GRAPH_ID_KEY] as number;
+			const kind = (x as any)[GRAPH_KIND_KEY] as string;
+			const raw = (x as any)[GRAPH_VALUE_KEY];
+			if (graph.has(id)) return graph.get(id);
+
+			if (kind === "array") {
+				if (!Array.isArray(raw)) {
+					const v2 = inner(raw);
+					graph.set(id, v2);
+					return v2;
+				}
+				const arr: any[] = [];
+				graph.set(id, arr);
+				for (const item of raw) arr.push(inner(item));
+				return arr;
+			}
+
+			const isPlainObject =
+				!!raw &&
+				typeof raw === "object" &&
+				!Array.isArray(raw) &&
+				Object.prototype.toString.call(raw) === "[object Object]";
+			const rawLooksGraph =
+				!!raw &&
+				typeof raw === "object" &&
+				typeof (raw as any)[GRAPH_ID_KEY] === "number" &&
+				typeof (raw as any)[GRAPH_KIND_KEY] === "string" &&
+				GRAPH_VALUE_KEY in (raw as any);
+
+			if (rawLooksGraph) {
+				const v2 = inner(raw);
+				graph.set(id, v2);
+				return v2;
+			}
+
+			if (kind !== "object" || !isPlainObject) {
+				const v2 = inner(raw);
+				graph.set(id, v2);
+				return v2;
+			}
+
+			const out: any = {};
+			graph.set(id, out);
+			for (const [k, v2] of Object.entries(raw)) out[k] = inner(v2);
+			return out;
 		}
 
 		const out: any = {};

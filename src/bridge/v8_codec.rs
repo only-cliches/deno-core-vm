@@ -46,6 +46,8 @@ fn try_global_dehydrate<'s, 'p>(
     let fn_any = global.get(ps, key.into())?;
     let dehydrate_fn = v8::Local::<v8::Function>::try_from(fn_any).ok()?;
     let recv: v8::Local<v8::Value> = global.into();
+    // __dehydrate is installed by bootstrap.js and is the canonical way to encode
+    // non-JSON JS values (Date/Map/Set/typed arrays/errors/recursive graphs).
     let out = dehydrate_fn.call(ps, recv, &[value])?;
     serde_v8::from_v8::<serde_json::Value>(ps, out).ok()
 }
@@ -85,6 +87,8 @@ fn hydrate_via_global<'s, 'p>(
         return wire_value;
     };
 
+    // Hydration is done in JS so it can construct realm-correct JS types
+    // (Map/Set/URL/TypedArray/Error, etc.) with worker-side semantics.
     h_fn.call(ps, global.into(), &[wire_value])
         .unwrap_or(wire_value)
 }
@@ -95,6 +99,10 @@ fn is_wire_marker_key(k: &str) -> bool {
         "__undef"
             | "__num"
             | "__denojs_worker_num"
+            | "__denojs_worker_graph_id"
+            | "__denojs_worker_graph_ref"
+            | "__denojs_worker_graph_kind"
+            | "__denojs_worker_graph_value"
             | "__date"
             | "__bigint"
             | "__regexp"
@@ -111,6 +119,8 @@ fn json_contains_wire_markers(v: &serde_json::Value) -> bool {
     match v {
         serde_json::Value::Array(arr) => arr.iter().any(json_contains_wire_markers),
         serde_json::Value::Object(obj) => {
+            // Marker detection is recursive so nested wire payloads can still
+            // take the fast "already-encoded" path.
             obj.keys().any(|k| is_wire_marker_key(k))
                 || obj.values().any(json_contains_wire_markers)
         }
@@ -630,13 +640,17 @@ pub fn from_v8<'s, 'p>(
         }
     }
 
-    // Try serde_v8 -> wire decode for plain JSON and tagged objects.
+    // Object/array fallback order matters:
+    // 1) __dehydrate: handles recursive graphs and special JS objects safely.
+    // 2) serde_v8: handles plain JSON-like objects without function calls.
+    // 3) JSON.stringify: permissive last-resort for odd host objects.
+    // 4) V8 structured clone serializer as final binary fallback.
     if value.is_object() || value.is_array() {
-        if let Ok(j) = serde_v8::from_v8::<serde_json::Value>(ps, value) {
+        if let Some(j) = try_global_dehydrate(ps, value) {
             return Ok(wire::from_wire_json(j));
         }
 
-        if let Some(j) = try_global_dehydrate(ps, value) {
+        if let Ok(j) = serde_v8::from_v8::<serde_json::Value>(ps, value) {
             return Ok(wire::from_wire_json(j));
         }
 

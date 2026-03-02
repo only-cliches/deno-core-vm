@@ -8,6 +8,7 @@ pub fn handle_emit_message(
     callbacks: &NodeCallbacks,
     value: JsValueBridge,
 ) -> NeonResult<()> {
+    // No-op when user did not register on("message").
     let Some(cb_root) = callbacks.on_message.as_ref() else {
         return Ok(());
     };
@@ -17,6 +18,7 @@ pub fn handle_emit_message(
         .unwrap_or_else(|_| cx.undefined().upcast());
 
     let this = cx.undefined();
+    // User callback errors are swallowed to keep bridge delivery alive.
     let _ = cx.try_catch(|cx| {
         cb.call(cx, this, &[arg])?;
         Ok(())
@@ -39,6 +41,7 @@ pub fn handle_emit_close(
         });
     }
 
+    // Close event is terminal for this handle; remove from global registry.
     if let Ok(mut map) = crate::WORKERS.lock() {
         let _ = map.remove(&worker_id);
     }

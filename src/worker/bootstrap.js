@@ -79,6 +79,8 @@ const OP_HOST_CALL_SYNC = "op_denojs_worker_host_call_sync";
 const OP_HOST_CALL_ASYNC = "op_denojs_worker_host_call_async";
 const OP_HOST_CALL_SYNC_BIN = "op_denojs_worker_host_call_sync_bin";
 const OP_HOST_CALL_ASYNC_BIN = "op_denojs_worker_host_call_async_bin";
+const OP_HOST_CALL_SYNC_BIN_MIXED = "op_denojs_worker_host_call_sync_bin_mixed";
+const OP_HOST_CALL_ASYNC_BIN_MIXED = "op_denojs_worker_host_call_async_bin_mixed";
 const OP_POST_MESSAGE = "op_denojs_worker_post_message";
 const OP_POST_MESSAGE_BIN = "op_denojs_worker_post_message_bin";
 const OP_ENV_GET = "op_denojs_worker_env_get";
@@ -91,6 +93,8 @@ const CAP_HOST_CALL_SYNC = getOpEntry(OP_HOST_CALL_SYNC);
 const CAP_HOST_CALL_ASYNC = getOpEntry(OP_HOST_CALL_ASYNC);
 const CAP_HOST_CALL_SYNC_BIN = getOpEntry(OP_HOST_CALL_SYNC_BIN);
 const CAP_HOST_CALL_ASYNC_BIN = getOpEntry(OP_HOST_CALL_ASYNC_BIN);
+const CAP_HOST_CALL_SYNC_BIN_MIXED = getOpEntry(OP_HOST_CALL_SYNC_BIN_MIXED);
+const CAP_HOST_CALL_ASYNC_BIN_MIXED = getOpEntry(OP_HOST_CALL_ASYNC_BIN_MIXED);
 const CAP_POST_MESSAGE = getOpEntry(OP_POST_MESSAGE);
 const CAP_POST_MESSAGE_BIN = getOpEntry(OP_POST_MESSAGE_BIN);
 const CAP_ENV_GET = getOpEntry(OP_ENV_GET);
@@ -123,7 +127,12 @@ function wireNum(tag) {
 }
 
 function dehydrateAny(v) {
-  const seen = typeof WeakSet !== "undefined" ? new WeakSet() : null;
+  const seen = typeof WeakMap !== "undefined" ? new WeakMap() : null;
+  let nextGraphId = 1;
+  const GRAPH_ID_KEY = "__denojs_worker_graph_id";
+  const GRAPH_REF_KEY = "__denojs_worker_graph_ref";
+  const GRAPH_KIND_KEY = "__denojs_worker_graph_kind";
+  const GRAPH_VALUE_KEY = "__denojs_worker_graph_value";
 
   function inner(x, depth) {
     if (x === undefined) return wireUndef();
@@ -148,8 +157,6 @@ function dehydrateAny(v) {
     }
 
     if (t === "function" || t === "symbol") return wireUndef();
-
-    if (Array.isArray(x)) return x.map((it) => inner(it, depth + 1));
 
     if (typeof Date !== "undefined" && x instanceof Date) {
       return { __date: x.getTime() };
@@ -241,16 +248,27 @@ function dehydrateAny(v) {
     }
 
     if (t === "object") {
-      if (seen) {
-        if (seen.has(x)) return wireUndef();
-        seen.add(x);
+      if (!seen) return wireUndef();
+      if (seen.has(x)) return { [GRAPH_REF_KEY]: seen.get(x) };
+
+      const id = nextGraphId++;
+      seen.set(x, id);
+
+      if (Array.isArray(x)) {
+        return {
+          [GRAPH_ID_KEY]: id,
+          [GRAPH_KIND_KEY]: "array",
+          [GRAPH_VALUE_KEY]: x.map((it) => inner(it, depth + 1)),
+        };
       }
 
       const out = {};
-      for (const [k, val] of Object.entries(x)) {
-        out[k] = inner(val, depth + 1);
-      }
-      return out;
+      for (const [k, val] of Object.entries(x)) out[k] = inner(val, depth + 1);
+      return {
+        [GRAPH_ID_KEY]: id,
+        [GRAPH_KIND_KEY]: "object",
+        [GRAPH_VALUE_KEY]: out,
+      };
     }
 
     return wireUndef();
@@ -587,19 +605,31 @@ function handleHostReply(res) {
 }
 
 async function hostCallAsync(funcId, payloadArgs, rawArgs) {
-  const maybeBin =
-    Array.isArray(rawArgs) && rawArgs.length === 1
-      ? asUint8ArrayForOp(rawArgs[0])
-      : null;
+  if (Array.isArray(rawArgs) && rawArgs.length >= 1) {
+    const maybeBin = asUint8ArrayForOp(rawArgs[0]);
+    if (maybeBin) {
+      if (rawArgs.length === 1 && CAP_HOST_CALL_ASYNC_BIN && CAP_HOST_CALL_ASYNC_BIN.kind !== "missing") {
+        const res = await callCapturedAwait(
+          CAP_HOST_CALL_ASYNC_BIN,
+          OP_HOST_CALL_ASYNC_BIN,
+          funcId,
+          maybeBin
+        );
+        return handleHostReply(res);
+      }
 
-  if (maybeBin && CAP_HOST_CALL_ASYNC_BIN && CAP_HOST_CALL_ASYNC_BIN.kind !== "missing") {
-    const res = await callCapturedAwait(
-      CAP_HOST_CALL_ASYNC_BIN,
-      OP_HOST_CALL_ASYNC_BIN,
-      funcId,
-      maybeBin
-    );
-    return handleHostReply(res);
+      if (rawArgs.length > 1 && CAP_HOST_CALL_ASYNC_BIN_MIXED && CAP_HOST_CALL_ASYNC_BIN_MIXED.kind !== "missing") {
+        const rest = dehydrateArgs(rawArgs.slice(1));
+        const res = await callCapturedAwait(
+          CAP_HOST_CALL_ASYNC_BIN_MIXED,
+          OP_HOST_CALL_ASYNC_BIN_MIXED,
+          funcId,
+          maybeBin,
+          rest
+        );
+        return handleHostReply(res);
+      }
+    }
   }
 
   const res = await callCapturedAwait(
@@ -612,22 +642,37 @@ async function hostCallAsync(funcId, payloadArgs, rawArgs) {
 }
 
 function hostCallSync(funcId, payloadArgs, rawArgs) {
-  const maybeBin =
-    Array.isArray(rawArgs) && rawArgs.length === 1
-      ? asUint8ArrayForOp(rawArgs[0])
-      : null;
+  if (Array.isArray(rawArgs) && rawArgs.length >= 1) {
+    const maybeBin = asUint8ArrayForOp(rawArgs[0]);
+    if (maybeBin) {
+      if (rawArgs.length === 1 && CAP_HOST_CALL_SYNC_BIN && CAP_HOST_CALL_SYNC_BIN.kind !== "missing") {
+        const out = callCapturedRaw(
+          CAP_HOST_CALL_SYNC_BIN,
+          OP_HOST_CALL_SYNC_BIN,
+          funcId,
+          maybeBin
+        );
+        if (isThenable(out)) {
+          return out.then((res) => handleHostReply(res));
+        }
+        return handleHostReply(out);
+      }
 
-  if (maybeBin && CAP_HOST_CALL_SYNC_BIN && CAP_HOST_CALL_SYNC_BIN.kind !== "missing") {
-    const out = callCapturedRaw(
-      CAP_HOST_CALL_SYNC_BIN,
-      OP_HOST_CALL_SYNC_BIN,
-      funcId,
-      maybeBin
-    );
-    if (isThenable(out)) {
-      return out.then((res) => handleHostReply(res));
+      if (rawArgs.length > 1 && CAP_HOST_CALL_SYNC_BIN_MIXED && CAP_HOST_CALL_SYNC_BIN_MIXED.kind !== "missing") {
+        const rest = dehydrateArgs(rawArgs.slice(1));
+        const out = callCapturedRaw(
+          CAP_HOST_CALL_SYNC_BIN_MIXED,
+          OP_HOST_CALL_SYNC_BIN_MIXED,
+          funcId,
+          maybeBin,
+          rest
+        );
+        if (isThenable(out)) {
+          return out.then((res) => handleHostReply(res));
+        }
+        return handleHostReply(out);
+      }
     }
-    return handleHostReply(out);
   }
 
   const out = callCapturedRaw(CAP_HOST_CALL_SYNC, OP_HOST_CALL_SYNC, funcId, payloadArgs);
@@ -750,105 +795,148 @@ function bufferViewFromWire(obj) {
   }
 }
 
-globalThis.__hydrate = function (v) {
-  if (v == null) return v;
-  if (Array.isArray(v)) return v.map(globalThis.__hydrate);
-  if (typeof v !== "object") return v;
+{
+  const GRAPH_ID_KEY = "__denojs_worker_graph_id";
+  const GRAPH_REF_KEY = "__denojs_worker_graph_ref";
+  const GRAPH_KIND_KEY = "__denojs_worker_graph_kind";
+  const GRAPH_VALUE_KEY = "__denojs_worker_graph_value";
 
-  if (v.__undef === true) return undefined;
+  globalThis.__hydrate = function (v) {
+    const graphMap = new Map();
 
-  if (v.__denojs_worker_num === "-0") return -0;
+    function hydrateInner(vv) {
+      if (vv == null) return vv;
+      if (Array.isArray(vv)) return vv.map(hydrateInner);
+      if (typeof vv !== "object") return vv;
 
-  if (v.__num === "NaN") return NaN;
-  if (v.__num === "Infinity") return Infinity;
-  if (v.__num === "-Infinity") return -Infinity;
-
-  if (v.__date !== undefined) return new Date(v.__date);
-
-  if (v.__bigint !== undefined) {
-    try {
-      return BigInt(String(v.__bigint));
-    } catch {
-      return undefined;
-    }
-  }
-
-  if (v.__regexp && typeof v.__regexp === "object") {
-    try {
-      const src = String(v.__regexp.source ?? "");
-      const flags = String(v.__regexp.flags ?? "");
-      return new RegExp(src, flags);
-    } catch {
-      return undefined;
-    }
-  }
-
-  if (v.__url !== undefined) {
-    try {
-      return new URL(String(v.__url));
-    } catch {
-      return String(v.__url);
-    }
-  }
-
-  if (v.__urlSearchParams !== undefined) {
-    try {
-      return new URLSearchParams(String(v.__urlSearchParams));
-    } catch {
-      return String(v.__urlSearchParams);
-    }
-  }
-
-  if (v.__buffer !== undefined) {
-    const bv = bufferViewFromWire(v);
-    if (bv != null) return bv;
-    return undefined;
-  }
-
-  if (v.__map !== undefined && Array.isArray(v.__map)) {
-    const m = new Map();
-    for (const pair of v.__map) {
-      if (!Array.isArray(pair) || pair.length !== 2) continue;
-      const kk = globalThis.__hydrate(pair[0]);
-      const vv = globalThis.__hydrate(pair[1]);
-      m.set(kk, vv);
-    }
-    return m;
-  }
-
-  if (v.__set !== undefined && Array.isArray(v.__set)) {
-    const s = new Set();
-    for (const item of v.__set) s.add(globalThis.__hydrate(item));
-    return s;
-  }
-
-  if (v.__denojs_worker_type === "error") {
-    const msg = String(v.message ?? "");
-    const e = new Error(msg);
-
-    if (typeof v.name === "string") e.name = v.name;
-
-    safeObjSet(e, "name", typeof v.name === "string" ? v.name : e.name);
-    safeObjSet(e, "message", msg);
-
-    if (typeof v.stack === "string") safeObjSet(e, "stack", v.stack);
-    if ("code" in v && v.code != null) safeObjSet(e, "code", v.code);
-
-    if ("cause" in v && v.cause != null) {
-      try {
-        e.cause = globalThis.__hydrate(v.cause);
-        safeObjSet(e, "cause", e.cause);
-      } catch {
-        // ignore
+      if (
+        typeof vv[GRAPH_REF_KEY] === "number" &&
+        Object.keys(vv).length === 1
+      ) {
+        return graphMap.get(vv[GRAPH_REF_KEY]);
       }
-    }
 
-    return e;
-  }
+      if (
+        typeof vv[GRAPH_ID_KEY] === "number" &&
+        typeof vv[GRAPH_KIND_KEY] === "string" &&
+        GRAPH_VALUE_KEY in vv
+      ) {
+        const id = vv[GRAPH_ID_KEY];
+        const kind = vv[GRAPH_KIND_KEY];
+        const raw = vv[GRAPH_VALUE_KEY];
+        if (graphMap.has(id)) return graphMap.get(id);
 
-  if (v.__denojs_worker_type === "function" && typeof v.id === "number") {
-    const id = v.id;
-    const isAsync = !!v.async;
+        if (kind === "array") {
+          const out = [];
+          graphMap.set(id, out);
+          if (Array.isArray(raw)) {
+            for (const item of raw) out.push(hydrateInner(item));
+          }
+          return out;
+        }
+
+        const out = {};
+        graphMap.set(id, out);
+        if (raw && typeof raw === "object") {
+          for (const [k, val] of Object.entries(raw)) out[k] = hydrateInner(val);
+        }
+        return out;
+      }
+
+      if (vv.__undef === true) return undefined;
+
+      if (vv.__denojs_worker_num === "-0") return -0;
+
+      if (vv.__num === "NaN") return NaN;
+      if (vv.__num === "Infinity") return Infinity;
+      if (vv.__num === "-Infinity") return -Infinity;
+
+      if (vv.__date !== undefined) return new Date(vv.__date);
+
+      if (vv.__bigint !== undefined) {
+        try {
+          return BigInt(String(vv.__bigint));
+        } catch {
+          return undefined;
+        }
+      }
+
+      if (vv.__regexp && typeof vv.__regexp === "object") {
+        try {
+          const src = String(vv.__regexp.source ?? "");
+          const flags = String(vv.__regexp.flags ?? "");
+          return new RegExp(src, flags);
+        } catch {
+          return undefined;
+        }
+      }
+
+      if (vv.__url !== undefined) {
+        try {
+          return new URL(String(vv.__url));
+        } catch {
+          return String(vv.__url);
+        }
+      }
+
+      if (vv.__urlSearchParams !== undefined) {
+        try {
+          return new URLSearchParams(String(vv.__urlSearchParams));
+        } catch {
+          return String(vv.__urlSearchParams);
+        }
+      }
+
+      if (vv.__buffer !== undefined) {
+        const bv = bufferViewFromWire(vv);
+        if (bv != null) return bv;
+        return undefined;
+      }
+
+      if (vv.__map !== undefined && Array.isArray(vv.__map)) {
+        const m = new Map();
+        for (const pair of vv.__map) {
+          if (!Array.isArray(pair) || pair.length !== 2) continue;
+          const kk = hydrateInner(pair[0]);
+          const vv2 = hydrateInner(pair[1]);
+          m.set(kk, vv2);
+        }
+        return m;
+      }
+
+      if (vv.__set !== undefined && Array.isArray(vv.__set)) {
+        const s = new Set();
+        for (const item of vv.__set) s.add(hydrateInner(item));
+        return s;
+      }
+
+      if (vv.__denojs_worker_type === "error") {
+        const msg = String(vv.message ?? "");
+        const e = new Error(msg);
+
+        if (typeof vv.name === "string") e.name = vv.name;
+
+        safeObjSet(e, "name", typeof vv.name === "string" ? vv.name : e.name);
+        safeObjSet(e, "message", msg);
+
+        if (typeof vv.stack === "string") safeObjSet(e, "stack", vv.stack);
+        if ("code" in vv && vv.code != null) safeObjSet(e, "code", vv.code);
+
+        if ("cause" in vv && vv.cause != null) {
+          try {
+            e.cause = hydrateInner(vv.cause);
+            safeObjSet(e, "cause", e.cause);
+          } catch {
+            // ignore
+          }
+        }
+
+        return e;
+      }
+
+      if (vv.__denojs_worker_type === "function" && typeof vv.id === "number") {
+        const id = vv.id;
+        const isAsync = !!vv.async;
 
     function isSyncReturnedPromiseError(err) {
       try {
@@ -859,35 +947,39 @@ globalThis.__hydrate = function (v) {
       }
     }
 
-    let fn;
-    if (isAsync) {
-      fn = async (...args) => {
-        const payloadArgs = dehydrateArgs(args);
-        return await hostCallAsync(id, payloadArgs, args);
-      };
-    } else {
-      fn = (...args) => {
-        const payloadArgs = dehydrateArgs(args);
-        try {
-          return hostCallSync(id, payloadArgs, args);
-        } catch (e) {
-          if (isSyncReturnedPromiseError(e)) {
-            return hostCallAsync(id, payloadArgs, args);
-          }
-          throw e;
+        let fn;
+        if (isAsync) {
+          fn = async (...args) => {
+            const payloadArgs = dehydrateArgs(args);
+            return await hostCallAsync(id, payloadArgs, args);
+          };
+        } else {
+          fn = (...args) => {
+            const payloadArgs = dehydrateArgs(args);
+            try {
+              return hostCallSync(id, payloadArgs, args);
+            } catch (e) {
+              if (isSyncReturnedPromiseError(e)) {
+                return hostCallAsync(id, payloadArgs, args);
+              }
+              throw e;
+            }
+          };
         }
-      };
+
+        safeObjSet(fn, "__denojs_worker_host_id", id);
+        safeObjSet(fn, "__denojs_worker_host_async", isAsync);
+        return fn;
+      }
+
+      const out = {};
+      for (const [k, val] of Object.entries(vv)) out[k] = hydrateInner(val);
+      return out;
     }
 
-    safeObjSet(fn, "__denojs_worker_host_id", id);
-    safeObjSet(fn, "__denojs_worker_host_async", isAsync);
-    return fn;
-  }
-
-  const out = {};
-  for (const [k, val] of Object.entries(v)) out[k] = globalThis.__hydrate(val);
-  return out;
-};
+    return hydrateInner(v);
+  };
+}
 
 // --------------------
 // Console routing

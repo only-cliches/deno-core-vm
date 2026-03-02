@@ -173,6 +173,8 @@ pub async fn eval_in_runtime(
     let cancel = Arc::new(AtomicBool::new(false));
     let effective_max_eval_ms = options.max_eval_ms.or(limits.max_eval_ms);
 
+    // Termination is driven from a side thread because V8 termination needs to
+    // happen even when the runtime is inside CPU-bound JS work.
     let timeout_thread = effective_max_eval_ms.map(|ms| {
         let cancel = cancel.clone();
         let isolate_handle = isolate_handle.clone();
@@ -196,6 +198,9 @@ pub async fn eval_in_runtime(
         let _ = h.join();
     }
 
+    // Defensive double-cancel:
+    // we occasionally observe one pending termination flag survive the first
+    // clear across nested eval/module flows, so clear twice before returning.
     worker.js_runtime.v8_isolate().cancel_terminate_execution();
     worker.js_runtime.v8_isolate().cancel_terminate_execution();
 
@@ -285,7 +290,6 @@ async fn eval_module(
   const o = Object.create(null);
   const moduleFnKeys = [];
   o.__denojs_worker_module_spec = spec;
-  const dehydrate = typeof globalThis.__dehydrate === "function" ? globalThis.__dehydrate : (x) => x;
 
   for (const k of Object.keys(m)) {{
     const v = m[k];
@@ -293,7 +297,10 @@ async fn eval_module(
       o[k] = {{ __denojs_worker_type: "module_fn", spec, name: k }};
       moduleFnKeys.push(k);
     }} else {{
-      o[k] = dehydrate(v);
+      // Keep raw values here; Rust bridge dehydration happens once on the full
+      // result object. Pre-dehydrating each export here can double-wrap graph
+      // tags and break identity/references.
+      o[k] = v;
     }}
   }}
 

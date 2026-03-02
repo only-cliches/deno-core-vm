@@ -10,6 +10,7 @@ struct ImportState {
 
 impl ImportState {
     fn send_once(&self, value: ImportDecision) {
+        // Guard against double-settle when callback misbehaves.
         let tx_opt = self.reply.lock().ok().and_then(|mut g| g.take());
         if let Some(tx) = tx_opt {
             let _ = tx.send(value);
@@ -22,6 +23,7 @@ impl ImportState {
 }
 
 fn interpret_value(cx: &mut TaskContext, v: Handle<JsValue>) -> Option<ImportDecision> {
+    // Promise is handled by async branch in handle_import_request.
     if v.is_a::<neon::types::JsPromise, _>(cx) {
         return None;
     }
@@ -120,6 +122,7 @@ pub fn handle_import_request(
     }
 
     if returned.is_a::<neon::types::JsPromise, _>(cx) {
+        // Async import callback path: attach then/catch and resolve once.
         let promise_obj: Handle<JsObject> = match returned.downcast::<JsObject, _>(cx) {
             Ok(o) => o,
             Err(_) => {

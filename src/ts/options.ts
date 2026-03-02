@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
-import { dehydrateArgs } from "./wire";
+import { dehydrateForWire } from "./wire";
 import type {
 	DenoConsoleMethod,
 	DenoWorkerOptions,
@@ -16,7 +16,23 @@ export function normalizeEvalOptions(options?: EvalOptions): EvalOptions | undef
 	const out: EvalOptions = {};
 	if (typeof options.filename === "string") out.filename = options.filename;
 	if (options.type === "module") out.type = "module";
-	if ("args" in options) out.args = Array.isArray(options.args) ? dehydrateArgs(options.args) : [];
+	if ("args" in options) {
+		out.args = Array.isArray(options.args)
+			? options.args.map((a) => {
+					if (typeof Buffer !== "undefined" && Buffer.isBuffer(a)) return a;
+					if (typeof ArrayBuffer !== "undefined" && a instanceof ArrayBuffer) return a;
+					if (typeof Uint8Array !== "undefined" && a instanceof Uint8Array) return a;
+					if (
+						typeof ArrayBuffer !== "undefined" &&
+						typeof ArrayBuffer.isView === "function" &&
+						ArrayBuffer.isView(a)
+					) {
+						return dehydrateForWire(a);
+					}
+					return dehydrateForWire(a);
+				})
+			: [];
+	}
 	if (typeof options.maxEvalMs === "number" && Number.isFinite(options.maxEvalMs) && options.maxEvalMs > 0) {
 		out.maxEvalMs = options.maxEvalMs;
 	}

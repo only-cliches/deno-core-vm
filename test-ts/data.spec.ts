@@ -20,12 +20,13 @@ describe("DenoWorker data and errors", () => {
     expect(isNegZero).toBe(true);
   });
 
-  test("circular objects and functions as args degrade to undefined (no crash)", async () => {
+  test("circular objects are preserved and functions still degrade to undefined", async () => {
     const a: any = { n: 1 };
     a.self = a;
 
     const r1 = await dw.eval("(x) => x", { args: [a] });
-    expect(r1).toBeUndefined();
+    expect(r1.n).toBe(1);
+    expect(r1.self).toBe(r1);
 
     const fn: any = () => 1;
     const r2 = await dw.eval("(x) => x", { args: [fn] });

@@ -16,6 +16,8 @@ fn env_state_from_state(state: &OpState) -> Option<&EnvRuntimeState> {
 }
 
 fn bytes_to_u8_bridge(bytes: &[u8]) -> JsValueBridge {
+    // Keep byte payloads in BufferView form so downstream bridge paths avoid
+    // JSON array materialization and can preserve binary throughput.
     JsValueBridge::BufferView {
         kind: "Uint8Array".into(),
         bytes: bytes.to_vec(),
@@ -31,6 +33,7 @@ pub fn op_denojs_worker_post_message(state: &mut OpState, #[serde] msg: serde_js
         return false;
     };
 
+    // Input is wire-JSON from bootstrap hostPostMessage wrapper.
     let value: JsValueBridge = crate::bridge::wire::from_wire_json(msg);
     ctx.node_tx.try_send(NodeMsg::EmitMessage { value }).is_ok()
 }
@@ -69,6 +72,7 @@ pub fn op_denojs_worker_host_call_sync(
         .map(crate::bridge::wire::from_wire_json)
         .collect::<Vec<_>>();
 
+    // Sync host calls use std::mpsc because op2 sync handlers cannot await.
     let (tx, rx) = mpsc::channel::<Result<JsValueBridge, JsValueBridge>>();
 
     if ctx
@@ -86,6 +90,7 @@ pub fn op_denojs_worker_host_call_sync(
         });
     }
 
+    // Bounded wait prevents deadlock if Node callback path stalls.
     let reply = match rx.recv_timeout(Duration::from_secs(5)) {
         Ok(v) => v,
         Err(_) => {
@@ -154,6 +159,61 @@ pub fn op_denojs_worker_host_call_sync_bin(
     }
 }
 
+// Worker -> Node: host function call (sync, first arg Uint8Array + JSON rest)
+#[op2]
+#[serde]
+pub fn op_denojs_worker_host_call_sync_bin_mixed(
+    state: &mut OpState,
+    #[smi] func_id: i32,
+    #[buffer] arg0: JsBuffer,
+    #[serde] rest: Vec<serde_json::Value>,
+) -> serde_json::Value {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let Some(ctx) = ctx_from_state(state) else {
+        return serde_json::json!({
+            "ok": false,
+            "error": err_wire("OpStateError", "WorkerOpContext missing in OpState")
+        });
+    };
+
+    let mut bridged_args = Vec::with_capacity(rest.len() + 1);
+    bridged_args.push(bytes_to_u8_bridge(&arg0));
+    bridged_args.extend(rest.into_iter().map(crate::bridge::wire::from_wire_json));
+
+    let (tx, rx) = mpsc::channel::<Result<JsValueBridge, JsValueBridge>>();
+    if ctx
+        .node_tx
+        .try_send(NodeMsg::InvokeHostFunctionSync {
+            func_id: func_id as usize,
+            args: bridged_args,
+            reply: tx,
+        })
+        .is_err()
+    {
+        return serde_json::json!({
+            "ok": false,
+            "error": err_wire("HostFunctionError", "Node channel full or closed")
+        });
+    }
+
+    let reply = match rx.recv_timeout(Duration::from_secs(5)) {
+        Ok(v) => v,
+        Err(_) => {
+            return serde_json::json!({
+                "ok": false,
+                "error": err_wire("HostFunctionError", "Sync host call timed out")
+            });
+        }
+    };
+
+    match reply {
+        Ok(v) => serde_json::json!({ "ok": true, "value": ok_wire(v) }),
+        Err(e) => serde_json::json!({ "ok": false, "error": ok_wire(e) }),
+    }
+}
+
 // Worker -> Node: host function call (async)
 #[op2(async(lazy))]
 #[serde]
@@ -177,6 +237,7 @@ pub async fn op_denojs_worker_host_call_async(
         .map(crate::bridge::wire::from_wire_json)
         .collect::<Vec<_>>();
 
+    // Async ops can suspend naturally, so oneshot is the lightest reply channel.
     let (tx, rx) = oneshot::channel::<Result<JsValueBridge, JsValueBridge>>();
 
     if ctx
@@ -232,6 +293,62 @@ pub async fn op_denojs_worker_host_call_async_bin(
     let bridged_args = vec![bytes_to_u8_bridge(&arg)];
     let (tx, rx) = oneshot::channel::<Result<JsValueBridge, JsValueBridge>>();
 
+    if ctx
+        .node_tx
+        .send(NodeMsg::InvokeHostFunctionAsync {
+            func_id: func_id as usize,
+            args: bridged_args,
+            reply: tx,
+        })
+        .await
+        .is_err()
+    {
+        return serde_json::json!({
+            "ok": false,
+            "error": err_wire("HostFunctionError", "Node channel closed")
+        });
+    }
+
+    let reply = match rx.await {
+        Ok(v) => v,
+        Err(_) => {
+            return serde_json::json!({
+                "ok": false,
+                "error": err_wire("HostFunctionError", "Async reply dropped")
+            });
+        }
+    };
+
+    match reply {
+        Ok(v) => serde_json::json!({ "ok": true, "value": ok_wire(v) }),
+        Err(e) => serde_json::json!({ "ok": false, "error": ok_wire(e) }),
+    }
+}
+
+// Worker -> Node: host function call (async, first arg Uint8Array + JSON rest)
+#[op2(async(lazy))]
+#[serde]
+pub async fn op_denojs_worker_host_call_async_bin_mixed(
+    state: std::rc::Rc<std::cell::RefCell<OpState>>,
+    #[smi] func_id: i32,
+    #[buffer] arg0: JsBuffer,
+    #[serde] rest: Vec<serde_json::Value>,
+) -> serde_json::Value {
+    let ctx = match state.borrow().try_borrow::<WorkerOpContext>() {
+        Some(v) => v.clone(),
+        None => {
+            return serde_json::json!({
+                "ok": false,
+                "error": err_wire("OpStateError", "WorkerOpContext missing in OpState")
+            });
+        }
+    };
+
+    let mut bridged_args = Vec::with_capacity(rest.len() + 1);
+    bridged_args.push(bytes_to_u8_bridge(&arg0));
+    bridged_args.extend(rest.into_iter().map(crate::bridge::wire::from_wire_json));
+
+    let (tx, rx) = oneshot::channel::<Result<JsValueBridge, JsValueBridge>>();
     if ctx
         .node_tx
         .send(NodeMsg::InvokeHostFunctionAsync {

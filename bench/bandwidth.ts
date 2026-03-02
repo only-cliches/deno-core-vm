@@ -18,6 +18,10 @@ import { DenoWorker } from "../src/index";
 type Args = {
   size: number;
   messages: number;
+  graphMessages: number;
+  graphDepth: number;
+  graphFanout: number;
+  graphShare: number;
   evalIter: number;
   durationMs: number;
   ackEvery: number;
@@ -32,6 +36,10 @@ function parseArgs(argv: string[]): Args {
   const out: Args = {
     size: 1 * 1024 * 1024,
     messages: 200,
+    graphMessages: 200,
+    graphDepth: 5,
+    graphFanout: 3,
+    graphShare: 0.35,
     evalIter: 50,
     durationMs: 2500,
     ackEvery: 25,
@@ -53,9 +61,18 @@ function parseArgs(argv: string[]): Args {
     const n = Number(s);
     return Number.isFinite(n) && n >= 0 ? Math.floor(n) : fallback;
   };
+  const toFloat = (s: string | undefined, fallback: number) => {
+    if (!s) return fallback;
+    const n = Number(s);
+    return Number.isFinite(n) ? n : fallback;
+  };
 
   out.size = toInt(take("--size"), out.size);
   out.messages = toInt(take("--messages"), out.messages);
+  out.graphMessages = toInt(take("--graph-messages"), out.graphMessages);
+  out.graphDepth = Math.max(1, toInt(take("--graph-depth"), out.graphDepth));
+  out.graphFanout = Math.max(1, toInt(take("--graph-fanout"), out.graphFanout));
+  out.graphShare = Math.min(0.95, Math.max(0, toFloat(take("--graph-share"), out.graphShare)));
   out.evalIter = toInt(take("--eval-iter"), out.evalIter);
   out.durationMs = toInt(take("--duration-ms"), out.durationMs);
   out.ackEvery = toInt(take("--ack-every"), out.ackEvery);
@@ -91,6 +108,54 @@ function makeBytes(size: number): Buffer {
   const b = Buffer.allocUnsafe(size);
   for (let i = 0; i < b.length; i++) b[i] = i & 0xff;
   return b;
+}
+
+function makeRecursiveGraphPayload(depth: number, fanout: number, share: number): Record<string, unknown> {
+  let seq = 0;
+  const pool: Array<Record<string, unknown>> = [];
+
+  function shouldReuse(id: number, edge: number): boolean {
+    if (pool.length === 0) return false;
+    const bucket = ((id * 31 + edge * 17 + 13) % 10_000) / 10_000;
+    return bucket < share;
+  }
+
+  function build(level: number): Record<string, unknown> {
+    const id = seq++;
+    const node: Record<string, unknown> = {
+      id,
+      level,
+      label: `n-${id}`,
+      even: (id & 1) === 0,
+      scalar: (id * 2654435761) >>> 0,
+    };
+    pool.push(node);
+
+    if (level <= 0) return node;
+
+    for (let i = 0; i < fanout; i++) {
+      if (shouldReuse(id, i)) {
+        const ref = pool[(id + i * 7) % pool.length];
+        node[`c${i}`] = ref;
+      } else {
+        node[`c${i}`] = build(level - 1);
+      }
+    }
+
+    if (id % 5 === 0) node.self = node;
+    if (pool.length > 2 && id % 7 === 0) node.peer = pool[(id * 11) % pool.length];
+    return node;
+  }
+
+  const root = build(depth);
+  root.root = root;
+  root.meta = {
+    depth,
+    fanout,
+    share,
+    nodes: pool.length,
+  };
+  return root;
 }
 
 function fmt(n: number, digits = 2): string {
@@ -279,12 +344,25 @@ function buildWorkerBenchModuleSource(): string {
       _nodeToWorkerMsgs: 0,
       _nodeToWorkerTargetMsgs: 0,
       _nodeToWorkerAckEvery: 25,
+      _nodeToWorkerGraphWeight: 0,
+      _nodeToWorkerGraphMsgs: 0,
+      _nodeToWorkerGraphTargetMsgs: 0,
+      _nodeToWorkerMode: "bytes",
 
       _nodeToWorkerReset(targetMsgs, ackEvery) {
         this._nodeToWorkerBytes = 0;
         this._nodeToWorkerMsgs = 0;
         this._nodeToWorkerTargetMsgs = targetMsgs >>> 0;
         this._nodeToWorkerAckEvery = ackEvery >>> 0;
+        this._nodeToWorkerMode = "bytes";
+      },
+
+      _nodeToWorkerGraphReset(targetMsgs, ackEvery) {
+        this._nodeToWorkerGraphWeight = 0;
+        this._nodeToWorkerGraphMsgs = 0;
+        this._nodeToWorkerGraphTargetMsgs = targetMsgs >>> 0;
+        this._nodeToWorkerAckEvery = ackEvery >>> 0;
+        this._nodeToWorkerMode = "graph";
       },
 
       async workerToNodePostMessage(size, messages, durationMs) {
@@ -408,6 +486,83 @@ function buildWorkerBenchModuleSource(): string {
       return 0;
     }
 
+    function __benchGraphWeight(msg) {
+      const seen = typeof WeakSet !== "undefined" ? new WeakSet() : null;
+      const stack = [msg];
+      let total = 0;
+
+      while (stack.length > 0) {
+        const v = stack.pop();
+        if (v == null) {
+          total += 4;
+          continue;
+        }
+
+        const t = typeof v;
+        if (t === "boolean") {
+          total += 4;
+          continue;
+        }
+        if (t === "number") {
+          total += 8;
+          continue;
+        }
+        if (t === "bigint") {
+          total += String(v).length;
+          continue;
+        }
+        if (t === "string") {
+          total += v.length * 2;
+          continue;
+        }
+        if (t === "function" || t === "symbol") {
+          total += 0;
+          continue;
+        }
+
+        if (seen) {
+          if (seen.has(v)) continue;
+          seen.add(v);
+        }
+
+        if (v instanceof Uint8Array) {
+          total += v.byteLength;
+          continue;
+        }
+        if (typeof ArrayBuffer !== "undefined" && v instanceof ArrayBuffer) {
+          total += v.byteLength;
+          continue;
+        }
+        if (Array.isArray(v)) {
+          total += 16 + v.length * 4;
+          for (let i = 0; i < v.length; i++) stack.push(v[i]);
+          continue;
+        }
+        if (v instanceof Map) {
+          total += 24;
+          for (const [k, vv] of v.entries()) {
+            stack.push(k);
+            stack.push(vv);
+          }
+          continue;
+        }
+        if (v instanceof Set) {
+          total += 24;
+          for (const vv of v.values()) stack.push(vv);
+          continue;
+        }
+        if (typeof v === "object") {
+          total += 24;
+          for (const [k, vv] of Object.entries(v)) {
+            total += k.length * 2;
+            stack.push(vv);
+          }
+        }
+      }
+
+      return total >>> 0;
+    }
+
     globalThis.on("message", (msg) => {
       try {
         if (msg && typeof msg === "object" && msg.__bench_cmd === "nodeToWorkerReset") {
@@ -415,9 +570,14 @@ function buildWorkerBenchModuleSource(): string {
           postMessage({ __bench_ack: true, kind: "nodeToWorkerReset" });
           return;
         }
+        if (msg && typeof msg === "object" && msg.__bench_cmd === "nodeToWorkerGraphReset") {
+          globalThis.__bench._nodeToWorkerGraphReset(msg.targetMsgs, msg.ackEvery);
+          postMessage({ __bench_ack: true, kind: "nodeToWorkerGraphReset" });
+          return;
+        }
 
         const bytes = __benchByteLength(msg);
-        if (bytes > 0) {
+        if (globalThis.__bench._nodeToWorkerMode === "bytes" && bytes > 0) {
           globalThis.__bench._nodeToWorkerMsgs++;
           globalThis.__bench._nodeToWorkerBytes += bytes;
 
@@ -433,6 +593,30 @@ function buildWorkerBenchModuleSource(): string {
               kind: "nodeToWorkerPostMessage",
               receivedMsgs: globalThis.__bench._nodeToWorkerMsgs,
               receivedBytes: globalThis.__bench._nodeToWorkerBytes,
+            });
+          }
+        }
+
+        if (globalThis.__bench._nodeToWorkerMode === "graph" && msg && typeof msg === "object") {
+          globalThis.__bench._nodeToWorkerGraphMsgs++;
+          globalThis.__bench._nodeToWorkerGraphWeight += __benchGraphWeight(msg);
+
+          const every = globalThis.__bench._nodeToWorkerAckEvery || 0;
+          if (every > 0 && (globalThis.__bench._nodeToWorkerGraphMsgs % every) === 0) {
+            postMessage({
+              __bench_ack: true,
+              kind: "nodeToWorkerGraphProgress",
+              msgs: globalThis.__bench._nodeToWorkerGraphMsgs,
+            });
+          }
+
+          if (globalThis.__bench._nodeToWorkerGraphTargetMsgs > 0 &&
+              globalThis.__bench._nodeToWorkerGraphMsgs >= globalThis.__bench._nodeToWorkerGraphTargetMsgs) {
+            postMessage({
+              __bench_done: true,
+              kind: "nodeToWorkerRecursiveGraph",
+              receivedMsgs: globalThis.__bench._nodeToWorkerGraphMsgs,
+              receivedBytes: globalThis.__bench._nodeToWorkerGraphWeight,
             });
           }
         }
@@ -673,6 +857,137 @@ async function benchNodeToWorkerPostMessage(
   };
 }
 
+async function benchNodeToWorkerPostMessagesBatch(
+  dw: DenoWorker,
+  bus: MessageBus,
+  args: Args
+): Promise<BenchResult> {
+  const { size, messages, ackEvery, warmup, timeoutMs } = args;
+  const chunkSize = Math.max(1, Math.min(64, Math.floor(messages / 4) || 8));
+  const payload = makeBytes(size);
+
+  if (typeof (dw as any).postMessages !== "function") {
+    return {
+      name: "Node -> Worker postMessages batch (Buffer[])",
+      bytes: 0,
+      seconds: 0,
+      mibPerSec: 0,
+      extra: { skipped: true, reason: "native postMessages API unavailable" },
+    };
+  }
+
+  for (let i = 0; i < warmup; i++) {
+    dw.postMessage({ __bench_cmd: "nodeToWorkerReset", targetMsgs: 4, ackEvery: 0 });
+    await bus.waitFor(
+      (m) => m && m.__bench_ack === true && m.kind === "nodeToWorkerReset",
+      timeoutMs,
+      "nodeToWorkerReset (batch warmup ack)"
+    );
+    const arr = [payload, payload, payload, payload];
+    const sent = (dw as any).postMessages(arr);
+    if (sent !== arr.length) throw new Error("postMessages warmup dropped");
+    await bus.waitFor(
+      (m) => m && m.__bench_done === true && m.kind === "nodeToWorkerPostMessage",
+      timeoutMs,
+      "nodeToWorkerPostMessages warmup done"
+    );
+  }
+
+  dw.postMessage({ __bench_cmd: "nodeToWorkerReset", targetMsgs: messages, ackEvery });
+  await bus.waitFor(
+    (m) => m && m.__bench_ack === true && m.kind === "nodeToWorkerReset",
+    timeoutMs,
+    "nodeToWorkerReset (batch ack)"
+  );
+
+  const start = nowNs();
+  let sentMsgs = 0;
+  while (sentMsgs < messages) {
+    const n = Math.min(chunkSize, messages - sentMsgs);
+    const arr = new Array(n).fill(payload);
+    const sent = (dw as any).postMessages(arr);
+    if (sent !== n) throw new Error(`postMessages dropped at ${sentMsgs}/${messages}`);
+    sentMsgs += sent;
+  }
+
+  const done = await bus.waitFor(
+    (m) => m && m.__bench_done === true && m.kind === "nodeToWorkerPostMessage",
+    timeoutMs,
+    "nodeToWorkerPostMessages done"
+  );
+
+  const end = nowNs();
+  const receivedBytes =
+    typeof done.receivedBytes === "number" ? done.receivedBytes : messages * payload.byteLength;
+  const seconds = nsToSec(end - start);
+
+  return {
+    name: "Node -> Worker postMessages batch (Buffer[])",
+    bytes: receivedBytes,
+    seconds,
+    mibPerSec: mibPerSec(receivedBytes, seconds),
+    extra: { receivedMsgs: done.receivedMsgs, chunkSize },
+  };
+}
+
+async function benchNodeToWorkerRecursiveGraph(
+  dw: DenoWorker,
+  bus: MessageBus,
+  args: Args
+): Promise<BenchResult> {
+  const { graphDepth, graphFanout, graphShare, graphMessages, ackEvery, warmup, timeoutMs } = args;
+  const payload = makeRecursiveGraphPayload(graphDepth, graphFanout, graphShare);
+
+  for (let i = 0; i < warmup; i++) {
+    dw.postMessage({ __bench_cmd: "nodeToWorkerGraphReset", targetMsgs: 2, ackEvery: 0 });
+    await bus.waitFor(
+      (m) => m && m.__bench_ack === true && m.kind === "nodeToWorkerGraphReset",
+      timeoutMs,
+      "nodeToWorkerGraphReset (warmup ack)"
+    );
+    dw.postMessage(payload);
+    dw.postMessage(payload);
+    await bus.waitFor(
+      (m) => m && m.__bench_done === true && m.kind === "nodeToWorkerRecursiveGraph",
+      timeoutMs,
+      "nodeToWorkerRecursiveGraph warmup done"
+    );
+  }
+
+  dw.postMessage({ __bench_cmd: "nodeToWorkerGraphReset", targetMsgs: graphMessages, ackEvery });
+  await bus.waitFor(
+    (m) => m && m.__bench_ack === true && m.kind === "nodeToWorkerGraphReset",
+    timeoutMs,
+    "nodeToWorkerGraphReset ack"
+  );
+
+  const start = nowNs();
+  for (let i = 0; i < graphMessages; i++) dw.postMessage(payload);
+
+  const done = await bus.waitFor(
+    (m) => m && m.__bench_done === true && m.kind === "nodeToWorkerRecursiveGraph",
+    timeoutMs,
+    "nodeToWorkerRecursiveGraph done"
+  );
+  const end = nowNs();
+
+  const receivedBytes = typeof done.receivedBytes === "number" ? done.receivedBytes : 0;
+  const seconds = nsToSec(end - start);
+
+  return {
+    name: "Node -> Worker postMessage (recursive object graph)",
+    bytes: receivedBytes,
+    seconds,
+    mibPerSec: mibPerSec(receivedBytes, seconds),
+    extra: {
+      receivedMsgs: done.receivedMsgs,
+      depth: graphDepth,
+      fanout: graphFanout,
+      share: graphShare,
+    },
+  };
+}
+
 async function benchEvalReturnBytes(
   dw: DenoWorker,
   args: Args,
@@ -732,6 +1047,8 @@ async function main() {
 
    
     results.push(await benchNodeToWorkerPostMessage(dw, bus, args));
+    results.push(await benchNodeToWorkerPostMessagesBatch(dw, bus, args));
+    results.push(await benchNodeToWorkerRecursiveGraph(dw, bus, args));
    
 
    
@@ -763,6 +1080,7 @@ async function main() {
         "Config:",
         `  size: ${args.size} bytes (${fmt(bytesToMiB(args.size), 4)} MiB)`,
         `  node->worker messages: ${args.messages} (ackEvery=${args.ackEvery})`,
+        `  recursive graph messages: ${args.graphMessages} (depth=${args.graphDepth}, fanout=${args.graphFanout}, share=${fmt(args.graphShare, 2)})`,
         `  worker->node duration: ${args.durationMs} ms`,
         `  eval iters: ${args.evalIter}`,
         `  timeout: ${args.timeoutMs} ms`,

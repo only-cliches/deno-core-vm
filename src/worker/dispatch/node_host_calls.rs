@@ -7,6 +7,8 @@ fn get_thenable<'a>(
     cx: &mut TaskContext<'a>,
     v: Handle<'a, JsValue>,
 ) -> Option<(Handle<'a, JsObject>, Handle<'a, JsFunction>)> {
+    // Thenable detection (not strict Promise check) so userland Promise-like values
+    // are routed through async callback path as expected.
     let obj = v.downcast::<JsObject, _>(cx).ok()?;
     let then_any = obj.get_value(cx, "then").ok()?;
     let then_fn = then_any.downcast::<JsFunction, _>(cx).ok()?;
@@ -90,6 +92,8 @@ pub fn handle_invoke_sync(
             });
         }
 
+        // Sync bridge forbids async return values to prevent deadlock and preserve
+        // deterministic call semantics for worker sync op handlers.
         send(Err(host_function_error(
             "Sync host function returned a Promise; use async host function instead",
         )));
@@ -120,6 +124,7 @@ pub fn handle_invoke_async(
 
     impl AsyncState {
         fn send_once(&self, value: Result<JsValueBridge, JsValueBridge>) {
+            // Ensure only first settle wins even if user promise resolves/rejects multiple times.
             let tx_opt = self.reply.lock().ok().and_then(|mut g| g.take());
             if let Some(tx) = tx_opt {
                 let _ = tx.send(value);
@@ -167,6 +172,7 @@ pub fn handle_invoke_async(
 
     let thenable = get_thenable(cx, returned);
     if thenable.is_none() {
+        // Non-thenable return is valid for async host bridge: resolve immediately.
         match crate::bridge::neon_codec::from_neon_value(cx, returned) {
             Ok(b) => state.send_once(Ok(b)),
             Err(e) => state.send_once(Err(host_function_error(e.to_string()))),

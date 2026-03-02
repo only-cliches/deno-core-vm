@@ -55,6 +55,7 @@ impl ModuleRegistry {
     }
 
     pub fn next_virtual_specifier(&self, ext: &str) -> String {
+        // Monotonic virtual ids avoid collision across evalModule calls.
         let n = self.counter.fetch_add(1, Ordering::Relaxed) + 1;
         let ext = match ext {
             "js" | "ts" | "tsx" | "jsx" => ext,
@@ -79,6 +80,8 @@ impl ModuleRegistry {
                 code: code.to_string(),
                 module_type,
                 persistent: false,
+                // Ephemeral modules survive a few loads to account for resolve/load
+                // retries in the module graph, then are evicted.
                 uses_left: Some(3),
             },
         );
@@ -110,6 +113,7 @@ impl ModuleRegistry {
                 *n -= 1;
                 let out = entry.code.clone();
                 let module_type = entry.module_type.clone();
+                // Remove once budget is consumed so transient eval modules do not leak.
                 if *n == 0 {
                     map.remove(specifier);
                 }
@@ -199,7 +203,7 @@ impl DynamicModuleLoader {
             return None;
         }
 
-        // Determine base directory for resolution
+        // Determine the base directory for resolution.
         let base_dir = if referrer.starts_with("file://") {
             Url::parse(referrer)
                 .ok()
@@ -210,7 +214,7 @@ impl DynamicModuleLoader {
             self.sandbox_root.clone()
         };
 
-        // Relative or absolute path without extension: try Node-style extensions and index.*
+        // Relative/absolute path resolution with Node-style extension/index fallback.
         if specifier.starts_with("./") || specifier.starts_with("../") || specifier.starts_with('/')
         {
             let p = if specifier.starts_with('/') {
@@ -244,7 +248,7 @@ impl DynamicModuleLoader {
             return None;
         }
 
-        // Bare specifier: node_modules lookup under sandbox root only.
+        // Bare specifier: constrained node_modules lookup under sandbox root only.
         if Self::is_bare_specifier(specifier) {
             let (pkg, subpath) = if specifier.starts_with('@') {
                 // @scope/name[/...]
@@ -283,7 +287,7 @@ impl DynamicModuleLoader {
                 return None;
             }
 
-            // package.json main/module fallback, else index.*
+            // Use package.json module/main fallback, then index.*.
             let pkg_json = pkg_dir.join("package.json");
             if pkg_json.exists() {
                 if let Ok(text) = std::fs::read_to_string(&pkg_json) {
