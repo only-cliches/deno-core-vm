@@ -678,8 +678,26 @@ pub fn create_worker(mut cx: FunctionContext) -> JsResult<JsObject> {
     {
         let id2 = id;
         let f = JsFunction::new(&mut cx, move |mut cx| {
+            struct EvalSyncGuard(std::sync::Arc<std::sync::atomic::AtomicBool>);
+            impl Drop for EvalSyncGuard {
+                fn drop(&mut self) {
+                    self.0.store(false, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
+
             let src = cx.argument::<JsString>(0)?.value(&mut cx);
             let options = parse_eval_options(&mut cx, 1);
+
+            let eval_sync_active = {
+                let map = WORKERS
+                    .lock()
+                    .map_err(|e| cx.throw_error::<_, ()>(e.to_string()).unwrap_err())?;
+                map.get(&id2)
+                    .map(|w| w.eval_sync_active.clone())
+                    .ok_or_else(|| cx.throw_error::<_, ()>("Runtime is closed").unwrap_err())?
+            };
+            eval_sync_active.store(true, std::sync::atomic::Ordering::SeqCst);
+            let _guard = EvalSyncGuard(eval_sync_active);
 
             let tx = deno_tx_for_worker(id2)
                 .ok_or_else(|| cx.throw_error::<_, ()>("Runtime is closed").unwrap_err())?;

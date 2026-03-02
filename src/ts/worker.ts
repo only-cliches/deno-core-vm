@@ -607,11 +607,62 @@ export class DenoWorker {
 			} else {
 				raw = await this.eval(source, { ...(options ?? {}), type: "module" });
 			}
-			} catch (e) {
-				throw hydrateFromWire(e);
-			}
-			return wrapModuleNamespace<T>(this, hydrateFromWire(raw));
+		} catch (e) {
+			throw hydrateFromWire(e);
 		}
+		return wrapModuleNamespace<T>(this, hydrateFromWire(raw));
 	}
+
+	/**
+	 * Import a module specifier and return a callable namespace proxy.
+	 *
+	 * This routes through the runtime's normal import resolution pipeline
+	 * (including imports callbacks and permission policy).
+	 */
+	async getModule<T extends Record<string, any> = Record<string, any>>(specifier: string): Promise<T> {
+		await this.startupPromise;
+
+		const specJson = JSON.stringify(String(specifier));
+		const source = `(async () => {
+			const spec = ${specJson};
+			const m = await import(spec);
+			const o = Object.create(null);
+			const moduleFnKeys = [];
+			const moduleAsyncFnKeys = [];
+			o.__denojs_worker_module_spec = spec;
+
+			for (const k of Object.keys(m)) {
+				const v = m[k];
+				if (typeof v === "function") {
+					const isAsync = Object.prototype.toString.call(v) === "[object AsyncFunction]";
+					o[k] = { __denojs_worker_type: "module_fn", spec, name: k, async: isAsync };
+					moduleFnKeys.push(k);
+					if (isAsync) moduleAsyncFnKeys.push(k);
+				} else {
+					o[k] = v;
+				}
+			}
+
+			if ("default" in m) {
+				const dv = m.default;
+				if (typeof dv === "function") {
+					const isDefaultAsync = Object.prototype.toString.call(dv) === "[object AsyncFunction]";
+					o.default = { __denojs_worker_type: "module_fn", spec, name: "default", async: isDefaultAsync };
+					if (!moduleFnKeys.includes("default")) moduleFnKeys.push("default");
+					if (isDefaultAsync && !moduleAsyncFnKeys.includes("default")) moduleAsyncFnKeys.push("default");
+				} else {
+					o.default = dv;
+				}
+			}
+
+			if (moduleFnKeys.length) o.__denojs_worker_module_fns = moduleFnKeys;
+			if (moduleAsyncFnKeys.length) o.__denojs_worker_module_async_fns = moduleAsyncFnKeys;
+			return o;
+		})()`;
+
+		const raw = await this.eval(source);
+		return wrapModuleNamespace<T>(this, raw);
+	}
+}
 
 export default DenoWorker;

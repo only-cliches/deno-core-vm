@@ -43,21 +43,49 @@ npm install deno-director
 ### The Basics: Evaluated TS and Host Callbacks
 
 ```ts
-import { DenoWorker } from "deno-director";
+import { DenoWorker } from "./src/index";
 
+// 1. Boot a locked-down V8 isolate
+// Deno cannot touch the network or the disk. It only knows what we feed it.
 const worker = new DenoWorker({
-  // Lock it down. Deno cannot read the disk or access the network.
-  permissions: { read: false, net: false, env: false },
+    permissions: { net: false, read: false, env: false }
 });
 
-// Evaluate directly in the sandbox!
-const result = await worker.eval(`
-  const x = 42;
-  nodeLogger("Calculating universe secrets...");
-  x * 2;
+// 2. Drop an ASYNC Node.js function into Deno's global scope
+await worker.setGlobal("hostFetchData", async (userId: string) => {
+    console.log(`[Node.js] Deno asked for data for ${userId}. Fetching securely...`);
+
+    // Simulate an async database or API call on the Node side
+    await new Promise(resolve => setTimeout(resolve, 500));
+    return { id: userId, secret: "super_classified_payload" };
+});
+
+// 3. Inject an ES Module into Deno
+// Notice how Deno seamlessly awaits the Node.js function we just injected!
+const sandbox = await worker.evalModule(`
+    export async function processUser(userId) {
+
+        console.log(\`[Deno] Initiating secure processing for \${userId}...\`);
+
+        // Call the async Node.js function from inside the isolated Deno sandbox
+        const rawData = await globalThis.hostFetchData(userId);
+        
+        // Return the processed data back to Node
+        return { 
+            status: "SECURED", 
+            originalId: rawData.id,
+            fingerprint: btoa(rawData.secret).substring(0, 12) 
+        };
+    }
 `);
 
-console.log(result); // 84
+// 4. Node.js calls the Deno exported module function
+console.log("[Node.js] Triggering Deno sandbox...");
+const result = await sandbox.processUser("user_999");
+
+console.log("[Node.js] Final Result from Deno:", result);
+// Result: { status: 'SECURED', originalId: 'user_999', fingerprint: 'c3VwZXJfY2xh' }
+
 await worker.close();
 
 ```
@@ -121,6 +149,13 @@ const mod = await worker.evalModule(`
 console.log(mod.version); // "1.0.0"
 console.log(await mod.encrypt("secret")); // "c2VjcmV0"
 
+```
+
+If you already have a module specifier, use `getModule` as a shorthand:
+
+```ts
+const math = await worker.getModule("app:math");
+console.log(await math.add(2, 3)); // 5
 ```
 
 ### 🪄 Magic Module Resolution: The `imports` Interceptor
@@ -326,6 +361,8 @@ Evaluates JavaScript or TypeScript asynchronously.
 Evaluates JavaScript or TypeScript synchronously (blocks Node event loop while waiting).
 * `evalModule<T>(src: string, options?: EvalOptions): Promise<T>`
 Evaluates the source as an ES Module and returns a callable Proxy namespace to the exports.
+* `getModule<T>(specifier: string): Promise<T>`
+Imports a module specifier through the runtime import pipeline and returns a callable Proxy namespace to the exports.
 
 #### **Environment & Memory**
 

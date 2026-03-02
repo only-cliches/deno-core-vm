@@ -52,6 +52,35 @@ describe("deno_worker: eval", () => {
     expect(dw.evalSync("2 + 3")).toBe(5);
   });
 
+  it(
+    "evalSync calling an injected host function fails fast with an explicit error",
+    async () => {
+      const hostFn = jest.fn((x: number) => x + 1);
+      await dw.setGlobal("hostFn", hostFn);
+
+      const started = Date.now();
+      expect(() => dw.evalSync("hostFn(1)")).toThrow(/evalsync|cross-runtime/i);
+      const elapsed = Date.now() - started;
+
+      expect(elapsed).toBeLessThan(1_500);
+    },
+    20_000,
+  );
+
+  it(
+    "evalSync calling an injected async host function fails fast with an explicit error",
+    async () => {
+      await dw.setGlobal("hostAsync", async (x: number) => x + 1);
+
+      const started = Date.now();
+      expect(() => dw.evalSync("hostAsync(1)")).toThrow(/evalsync|cross-runtime/i);
+      const elapsed = Date.now() - started;
+
+      expect(elapsed).toBeLessThan(1_500);
+    },
+    20_000,
+  );
+
   it("supports calling evaluated functions when args are provided", async () => {
     const fnSrc = "(a, b, c) => [a, b, c]";
     const result = await dw.eval(fnSrc, { args: [1, "second", true] });

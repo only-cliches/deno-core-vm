@@ -41,6 +41,7 @@ pub struct WorkerOpContext {
     #[allow(dead_code)]
     pub worker_id: usize,
     pub node_tx: mpsc::Sender<NodeMsg>,
+    pub eval_sync_active: Arc<AtomicBool>,
 }
 
 extension!(
@@ -264,11 +265,12 @@ pub fn spawn_worker_thread(
 
         let local = tokio::task::LocalSet::new();
         local.block_on(&rt, async move {
-            let node_tx = match crate::WORKERS.lock() {
-                Ok(map) => map.get(&worker_id).map(|w| w.node_tx.clone()),
+            let Some((node_tx, eval_sync_active)) = (match crate::WORKERS.lock() {
+                Ok(map) => map
+                    .get(&worker_id)
+                    .map(|w| (w.node_tx.clone(), w.eval_sync_active.clone())),
                 Err(_) => None,
-            };
-            let Some(node_tx) = node_tx else {
+            }) else {
                 return;
             };
 
@@ -341,6 +343,7 @@ pub fn spawn_worker_thread(
                 s.put(WorkerOpContext {
                     worker_id,
                     node_tx: node_tx.clone(),
+                    eval_sync_active: eval_sync_active.clone(),
                 });
                 s.put(module_reg.clone());
                 s.put(EnvRuntimeState {

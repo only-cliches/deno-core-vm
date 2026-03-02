@@ -26,6 +26,19 @@ fn bytes_to_u8_bridge(bytes: &[u8]) -> JsValueBridge {
     }
 }
 
+fn host_call_blocked_during_evalsync(ctx: &WorkerOpContext) -> Option<serde_json::Value> {
+    if ctx.eval_sync_active.load(std::sync::atomic::Ordering::SeqCst) {
+        return Some(serde_json::json!({
+            "ok": false,
+            "error": err_wire(
+                "HostFunctionError",
+                "Host callbacks are unavailable during evalSync; use eval(...) for cross-runtime calls"
+            )
+        }));
+    }
+    None
+}
+
 // Worker -> Node: hostPostMessage() op
 #[op2]
 pub fn op_denojs_worker_post_message(state: &mut OpState, #[serde] msg: serde_json::Value) -> bool {
@@ -66,6 +79,9 @@ pub fn op_denojs_worker_host_call_sync(
             "error": err_wire("OpStateError", "WorkerOpContext missing in OpState")
         });
     };
+    if let Some(v) = host_call_blocked_during_evalsync(&ctx) {
+        return v;
+    }
 
     let bridged_args = args
         .into_iter()
@@ -124,6 +140,9 @@ pub fn op_denojs_worker_host_call_sync_bin(
             "error": err_wire("OpStateError", "WorkerOpContext missing in OpState")
         });
     };
+    if let Some(v) = host_call_blocked_during_evalsync(&ctx) {
+        return v;
+    }
 
     let bridged_args = vec![bytes_to_u8_bridge(&arg)];
     let (tx, rx) = mpsc::channel::<Result<JsValueBridge, JsValueBridge>>();
@@ -177,6 +196,9 @@ pub fn op_denojs_worker_host_call_sync_bin_mixed(
             "error": err_wire("OpStateError", "WorkerOpContext missing in OpState")
         });
     };
+    if let Some(v) = host_call_blocked_during_evalsync(&ctx) {
+        return v;
+    }
 
     let mut bridged_args = Vec::with_capacity(rest.len() + 1);
     bridged_args.push(bytes_to_u8_bridge(&arg0));
@@ -231,6 +253,9 @@ pub async fn op_denojs_worker_host_call_async(
             });
         }
     };
+    if let Some(v) = host_call_blocked_during_evalsync(&ctx) {
+        return v;
+    }
 
     let bridged_args = args
         .into_iter()
@@ -289,6 +314,9 @@ pub async fn op_denojs_worker_host_call_async_bin(
             });
         }
     };
+    if let Some(v) = host_call_blocked_during_evalsync(&ctx) {
+        return v;
+    }
 
     let bridged_args = vec![bytes_to_u8_bridge(&arg)];
     let (tx, rx) = oneshot::channel::<Result<JsValueBridge, JsValueBridge>>();
@@ -343,6 +371,9 @@ pub async fn op_denojs_worker_host_call_async_bin_mixed(
             });
         }
     };
+    if let Some(v) = host_call_blocked_during_evalsync(&ctx) {
+        return v;
+    }
 
     let mut bridged_args = Vec::with_capacity(rest.len() + 1);
     bridged_args.push(bytes_to_u8_bridge(&arg0));

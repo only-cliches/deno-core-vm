@@ -4,7 +4,7 @@ use deno_runtime::transpile::{JsParseDiagnostic, JsTranspileError};
 
 use crate::worker::messages::NodeMsg;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::{
@@ -38,19 +38,85 @@ struct ModuleEntry {
     module_type: ModuleType,
     persistent: bool,
     uses_left: Option<usize>,
+    loaded_once: bool,
+}
+
+struct ModuleRegistryState {
+    modules: HashMap<String, ModuleEntry>,
+    persistent_lru: VecDeque<String>,
+    persistent_limit: usize,
 }
 
 #[derive(Clone)]
 pub struct ModuleRegistry {
-    modules: Arc<Mutex<HashMap<String, ModuleEntry>>>,
+    state: Arc<Mutex<ModuleRegistryState>>,
     counter: Arc<AtomicUsize>,
 }
 
 impl ModuleRegistry {
-    pub fn new(_base_url: Url) -> Self {
+    const DEFAULT_PERSISTENT_LIMIT: usize = 512;
+
+    fn configured_persistent_limit() -> usize {
+        std::env::var("DENOJS_WORKER_PERSISTENT_MODULE_LIMIT")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(Self::DEFAULT_PERSISTENT_LIMIT)
+    }
+
+    fn with_persistent_limit(persistent_limit: usize) -> Self {
         Self {
-            modules: Arc::new(Mutex::new(HashMap::new())),
+            state: Arc::new(Mutex::new(ModuleRegistryState {
+                modules: HashMap::new(),
+                persistent_lru: VecDeque::new(),
+                persistent_limit,
+            })),
             counter: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    pub fn new(_base_url: Url) -> Self {
+        Self::with_persistent_limit(Self::configured_persistent_limit())
+    }
+
+    #[cfg(test)]
+    fn with_persistent_limit_for_test(persistent_limit: usize) -> Self {
+        Self::with_persistent_limit(persistent_limit)
+    }
+
+    fn touch_lru(lru: &mut VecDeque<String>, specifier: &str) {
+        if let Some(i) = lru.iter().position(|s| s == specifier) {
+            lru.remove(i);
+        }
+        lru.push_back(specifier.to_string());
+    }
+
+    fn evict_persistent_if_needed(state: &mut ModuleRegistryState) {
+        let mut persistent_count = state.modules.values().filter(|e| e.persistent).count();
+        if persistent_count <= state.persistent_limit {
+            return;
+        }
+
+        let mut checks_remaining = state.persistent_lru.len();
+        while persistent_count > state.persistent_limit && checks_remaining > 0 {
+            let Some(candidate) = state.persistent_lru.pop_front() else {
+                break;
+            };
+
+            let can_evict = state
+                .modules
+                .get(&candidate)
+                .map(|entry| entry.persistent && entry.loaded_once)
+                .unwrap_or(false);
+
+            if can_evict {
+                state.modules.remove(&candidate);
+                persistent_count -= 1;
+                checks_remaining = state.persistent_lru.len();
+            } else {
+                state.persistent_lru.push_back(candidate);
+                checks_remaining -= 1;
+            }
         }
     }
 
@@ -65,16 +131,16 @@ impl ModuleRegistry {
     }
 
     pub fn has(&self, specifier: &str) -> bool {
-        self.modules
+        self.state
             .lock()
             .ok()
-            .map(|m| m.contains_key(specifier))
+            .map(|s| s.modules.contains_key(specifier))
             .unwrap_or(false)
     }
 
     pub fn put_ephemeral(&self, specifier: &str, code: &str, module_type: ModuleType) {
-        let mut map = self.modules.lock().expect("modules lock");
-        map.insert(
+        let mut state = self.state.lock().expect("modules lock");
+        state.modules.insert(
             specifier.to_string(),
             ModuleEntry {
                 code: code.to_string(),
@@ -83,31 +149,42 @@ impl ModuleRegistry {
                 // Ephemeral modules survive a few loads to account for resolve/load
                 // retries in the module graph, then are evicted.
                 uses_left: Some(3),
+                loaded_once: false,
             },
         );
+        if let Some(i) = state.persistent_lru.iter().position(|s| s == specifier) {
+            state.persistent_lru.remove(i);
+        }
     }
 
     pub fn put_persistent(&self, specifier: &str, code: &str, module_type: ModuleType) {
-        let mut map = self.modules.lock().expect("modules lock");
-        map.insert(
+        let mut state = self.state.lock().expect("modules lock");
+        state.modules.insert(
             specifier.to_string(),
             ModuleEntry {
                 code: code.to_string(),
                 module_type,
                 persistent: true,
                 uses_left: None,
+                loaded_once: false,
             },
         );
+        Self::touch_lru(&mut state.persistent_lru, specifier);
+        Self::evict_persistent_if_needed(&mut state);
     }
 
     pub fn get_for_load(&self, specifier: &str) -> Option<(String, ModuleType)> {
-        let mut map = self.modules.lock().ok()?;
-        let entry = map.get_mut(specifier)?;
-
-        if entry.persistent {
-            return Some((entry.code.clone(), entry.module_type.clone()));
+        let mut state = self.state.lock().ok()?;
+        if let Some(entry) = state.modules.get_mut(specifier) {
+            if entry.persistent {
+                entry.loaded_once = true;
+                let out = (entry.code.clone(), entry.module_type.clone());
+                Self::touch_lru(&mut state.persistent_lru, specifier);
+                return Some(out);
+            }
         }
 
+        let entry = state.modules.get_mut(specifier)?;
         match entry.uses_left.as_mut() {
             Some(n) if *n > 0 => {
                 *n -= 1;
@@ -115,12 +192,12 @@ impl ModuleRegistry {
                 let module_type = entry.module_type.clone();
                 // Remove once budget is consumed so transient eval modules do not leak.
                 if *n == 0 {
-                    map.remove(specifier);
+                    state.modules.remove(specifier);
                 }
                 Some((out, module_type))
             }
             _ => {
-                map.remove(specifier);
+                state.modules.remove(specifier);
                 None
             }
         }
@@ -946,5 +1023,58 @@ impl ModuleLoader for DynamicModuleLoader {
 
         self.fs_loader
             .load(module_specifier, maybe_referrer, options)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ModuleRegistry;
+    use deno_core::url::Url;
+    use deno_runtime::deno_core::ModuleType;
+
+    fn test_registry(limit: usize) -> ModuleRegistry {
+        ModuleRegistry::with_persistent_limit_for_test(limit)
+    }
+
+    #[test]
+    fn persistent_entries_are_evicted_after_first_load_when_over_limit() {
+        let reg = test_registry(2);
+        let base = Url::parse("file:///tmp/").expect("url");
+
+        let a = format!("{}/a.js", base.as_str().trim_end_matches('/'));
+        let b = format!("{}/b.js", base.as_str().trim_end_matches('/'));
+        let c = format!("{}/c.js", base.as_str().trim_end_matches('/'));
+
+        reg.put_persistent(&a, "export const a = 1;", ModuleType::JavaScript);
+        reg.put_persistent(&b, "export const b = 1;", ModuleType::JavaScript);
+        assert!(reg.get_for_load(&a).is_some());
+        assert!(reg.get_for_load(&b).is_some());
+
+        reg.put_persistent(&c, "export const c = 1;", ModuleType::JavaScript);
+
+        assert!(!reg.has(&a));
+        assert!(reg.has(&b));
+        assert!(reg.has(&c));
+    }
+
+    #[test]
+    fn never_loaded_persistent_entries_are_not_evicted() {
+        let reg = test_registry(1);
+        let base = Url::parse("file:///tmp/").expect("url");
+
+        let a = format!("{}/a.js", base.as_str().trim_end_matches('/'));
+        let b = format!("{}/b.js", base.as_str().trim_end_matches('/'));
+
+        reg.put_persistent(&a, "export const a = 1;", ModuleType::JavaScript);
+        reg.put_persistent(&b, "export const b = 1;", ModuleType::JavaScript);
+
+        assert!(reg.has(&a));
+        assert!(reg.has(&b));
+
+        // Once an entry has been loaded, it becomes evictable under pressure.
+        assert!(reg.get_for_load(&a).is_some());
+        let c = format!("{}/c.js", base.as_str().trim_end_matches('/'));
+        reg.put_persistent(&c, "export const c = 1;", ModuleType::JavaScript);
+        assert!(!reg.has(&a));
     }
 }

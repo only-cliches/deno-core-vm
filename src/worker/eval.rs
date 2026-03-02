@@ -289,13 +289,16 @@ async fn eval_module(
   const m = await import(spec);
   const o = Object.create(null);
   const moduleFnKeys = [];
+  const moduleAsyncFnKeys = [];
   o.__denojs_worker_module_spec = spec;
 
   for (const k of Object.keys(m)) {{
     const v = m[k];
     if (typeof v === "function") {{
-      o[k] = {{ __denojs_worker_type: "module_fn", spec, name: k }};
+      const isAsync = Object.prototype.toString.call(v) === "[object AsyncFunction]";
+      o[k] = {{ __denojs_worker_type: "module_fn", spec, name: k, async: isAsync }};
       moduleFnKeys.push(k);
+      if (isAsync) moduleAsyncFnKeys.push(k);
     }} else {{
       // Keep raw values here; Rust bridge dehydration happens once on the full
       // result object. Pre-dehydrating each export here can double-wrap graph
@@ -305,12 +308,19 @@ async fn eval_module(
   }}
 
   if ("default" in m) {{
-    o.default = {{ __denojs_worker_type: "module_fn", spec, name: "default" }};
+    const isDefaultAsync =
+      typeof m.default === "function" &&
+      Object.prototype.toString.call(m.default) === "[object AsyncFunction]";
+    o.default = {{ __denojs_worker_type: "module_fn", spec, name: "default", async: isDefaultAsync }};
     if (!moduleFnKeys.includes("default")) moduleFnKeys.push("default");
+    if (isDefaultAsync && !moduleAsyncFnKeys.includes("default")) moduleAsyncFnKeys.push("default");
   }}
 
   if (moduleFnKeys.length) {{
     o.__denojs_worker_module_fns = moduleFnKeys;
+  }}
+  if (moduleAsyncFnKeys.length) {{
+    o.__denojs_worker_module_async_fns = moduleAsyncFnKeys;
   }}
 
   return o;

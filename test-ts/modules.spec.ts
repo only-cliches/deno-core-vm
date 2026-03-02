@@ -77,4 +77,36 @@ describe("deno_worker: modules", () => {
     },
     20_000
   );
+
+  it("getModule loads through imports callback and returns callable namespace", async () => {
+    const seen: string[] = [];
+    dw = new DenoWorker({
+      imports: (specifier: string) => {
+        seen.push(specifier);
+        if (specifier === "virtual:math") {
+          return {
+            js: `
+              export const n = 21;
+              export function double(x) { return x * 2; }
+              export async function plusOneAsync(x) { return x + 1; }
+              export default "math-default";
+            `,
+          };
+        }
+        return false;
+      },
+    } as any);
+
+    const mod = await dw.getModule("virtual:math");
+    expect(seen).toContain("virtual:math");
+    expect(mod.n).toBe(21);
+    expect(mod.default).toBe("math-default");
+    expect(mod.double(2)).toBe(4);
+    await expect(mod.plusOneAsync(41)).resolves.toBe(42);
+  });
+
+  it("getModule propagates import rejection", async () => {
+    dw = new DenoWorker({ imports: false } as any);
+    await expect(dw.getModule("virtual:nope")).rejects.toBeDefined();
+  });
 });

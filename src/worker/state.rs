@@ -649,6 +649,7 @@ pub struct WorkerHandle {
     pub closed: Arc<AtomicBool>,
     pub pending: Arc<PendingRequests>,
     pub last_stats: Arc<Mutex<Option<ExecStats>>>,
+    pub eval_sync_active: Arc<AtomicBool>,
 }
 
 impl WorkerHandle {
@@ -670,6 +671,7 @@ impl WorkerHandle {
             closed: Arc::new(AtomicBool::new(false)),
             pending: Arc::new(PendingRequests::default()),
             last_stats: Arc::new(Mutex::new(None)),
+            eval_sync_active: Arc::new(AtomicBool::new(false)),
         };
 
         (handle, deno_rx, node_rx)

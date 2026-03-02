@@ -5,23 +5,29 @@ import { hydrateFromWire } from "./wire";
 
 type ModuleWrapperHost = {
 	evalSync(src: string, options?: EvalOptions): any;
+	eval(src: string, options?: EvalOptions): Promise<any>;
 };
 
-function getModuleFnTag(x: any): { spec: string; name: string } | null {
+function getModuleFnTag(x: any): { spec: string; name: string; isAsync: boolean } | null {
 	if (!x || typeof x !== "object") return null;
 	const specRaw = (x as any).spec;
 	const nameRaw = (x as any).name;
+	const asyncRaw = (x as any).async;
 	const tag = (x as any).__denojs_worker_type;
 	if (specRaw == null || nameRaw == null) return null;
 
 	const spec = String(specRaw);
 	const name = String(nameRaw);
+	const isAsync = asyncRaw === true;
 	if (!spec.startsWith("denojs+")) return null;
 
-	if (tag === "module_fn") return { spec, name };
+	if (tag === "module_fn") return { spec, name, isAsync };
 	const keys = Object.keys(x);
-	if (keys.length <= 3 && keys.every((k) => k === "__denojs_worker_type" || k === "spec" || k === "name")) {
-		return { spec, name };
+	if (
+		keys.length <= 4 &&
+		keys.every((k) => k === "__denojs_worker_type" || k === "spec" || k === "name" || k === "async")
+	) {
+		return { spec, name, isAsync };
 	}
 	return null;
 }
@@ -37,14 +43,20 @@ export function wrapModuleNamespace<T extends Record<string, any>>(dw: ModuleWra
 			? (ns as any).__denojs_worker_module_fns.filter((x: any) => typeof x === "string")
 			: [],
 	);
+	const moduleAsyncFnKeys = new Set(
+		Array.isArray((ns as any).__denojs_worker_module_async_fns)
+			? (ns as any).__denojs_worker_module_async_fns.filter((x: any) => typeof x === "string")
+			: [],
+	);
 
 	for (const [k, v] of Object.entries(ns)) {
-		if (k === "__denojs_worker_module_spec" || k === "__denojs_worker_module_fns") continue;
+		if (k === "__denojs_worker_module_spec" || k === "__denojs_worker_module_fns" || k === "__denojs_worker_module_async_fns") continue;
 		const modFn = getModuleFnTag(v);
 		const shouldWrap = !!modFn || moduleFnKeys.has(k);
 		if (shouldWrap) {
 			const spec = modFn?.spec ?? moduleSpec;
 			const name = modFn?.name ?? k;
+			const isAsync = modFn?.isAsync ?? moduleAsyncFnKeys.has(k);
 			if (typeof spec !== "string") {
 				out[k] = hydrateFromWire(v);
 				continue;
@@ -54,7 +66,9 @@ export function wrapModuleNamespace<T extends Record<string, any>>(dw: ModuleWra
 			const nameJson = JSON.stringify(name);
 
 			out[k] = (...args: any[]) => {
-				return dw.evalSync(`(...args) => import(${specJson}).then(m => m[${nameJson}](...args))`, { args });
+				const src = `(...args) => import(${specJson}).then(m => m[${nameJson}](...args))`;
+				if (isAsync) return dw.eval(src, { args });
+				return dw.evalSync(src, { args });
 			};
 		} else {
 			out[k] = hydrateFromWire(v);

@@ -116,4 +116,59 @@ describe("evalModule: module namespace API", () => {
       await dw.close();
     }
   });
+
+  test("async module exports do not deadlock when awaiting async host callbacks", async () => {
+    const dw = new DenoWorker({ console: false });
+    try {
+      await dw.setGlobal("hostFetchData", async (userId: string) => {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        return { id: userId, secret: "super_classified_payload" };
+      });
+
+      const sandbox = await dw.evalModule(`
+        export async function processUser(userId) {
+          const rawData = await globalThis.hostFetchData(userId);
+          return {
+            status: "SECURED",
+            originalId: rawData.id,
+            fingerprint: btoa(rawData.secret).substring(0, 12),
+          };
+        }
+      `);
+
+      const result = await sandbox.processUser("user_999");
+      expect(result).toEqual({
+        status: "SECURED",
+        originalId: "user_999",
+        fingerprint: "c3VwZXJfY2xh",
+      });
+    } finally {
+      await dw.close();
+    }
+  });
+
+  test(
+    "sync module exports that invoke host callbacks fail fast under evalSync path",
+    async () => {
+      const dw = new DenoWorker({ console: false });
+      try {
+        await dw.setGlobal("hostDouble", (x: number) => x * 2);
+
+        const mod = await dw.evalModule(`
+          export function run() {
+            return globalThis.hostDouble(21);
+          }
+        `);
+
+        const started = Date.now();
+        expect(() => mod.run()).toThrow(/evalsync|cross-runtime/i);
+        const elapsed = Date.now() - started;
+
+        expect(elapsed).toBeLessThan(1_500);
+      } finally {
+        await dw.close();
+      }
+    },
+    20_000,
+  );
 });
