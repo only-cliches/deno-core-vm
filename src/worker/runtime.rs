@@ -18,7 +18,9 @@ use crate::worker::messages::{DenoMsg, NodeMsg};
 use crate::worker::ops::{
     op_denojs_worker_env_delete, op_denojs_worker_env_get, op_denojs_worker_env_set,
     op_denojs_worker_env_to_object, op_denojs_worker_host_call_async,
-    op_denojs_worker_host_call_sync, op_denojs_worker_post_message,
+    op_denojs_worker_host_call_async_bin, op_denojs_worker_host_call_sync,
+    op_denojs_worker_host_call_sync_bin, op_denojs_worker_post_message,
+    op_denojs_worker_post_message_bin,
 };
 use crate::worker::state::RuntimeLimits;
 
@@ -43,8 +45,11 @@ extension!(
     deno_worker_extension,
     ops = [
         op_denojs_worker_post_message,
+        op_denojs_worker_post_message_bin,
         op_denojs_worker_host_call_sync,
+        op_denojs_worker_host_call_sync_bin,
         op_denojs_worker_host_call_async,
+        op_denojs_worker_host_call_async_bin,
         op_denojs_worker_env_get,
         op_denojs_worker_env_set,
         op_denojs_worker_env_delete,

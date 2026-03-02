@@ -1,7 +1,7 @@
 [package]
 name = "deno-director"
 version = "0.8.0"
-description = "Run a Deno core worker from NodeJS"
+description = "Run a Deno worker from NodeJS"
 authors = ["me@scottlott.com"]
 license = "MIT"
 edition = "2024"

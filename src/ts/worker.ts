@@ -332,7 +332,9 @@ export class DenoWorker {
 			throw new Error("DenoWorker.postMessage dropped: worker queue full or closed");
 		}
 
-		const ok = this.native.postMessage(dehydrateForWire(msg));
+		const payload =
+			typeof Buffer !== "undefined" && Buffer.isBuffer(msg) ? msg : dehydrateForWire(msg);
+		const ok = this.native.postMessage(payload);
 		if (!ok) {
 			throw new Error("DenoWorker.postMessage dropped: worker queue full or closed");
 		}
@@ -345,7 +347,9 @@ export class DenoWorker {
 	 */
 	tryPostMessage(msg: any): boolean {
 		if (this.isClosed()) return false;
-		return this.native.postMessage(dehydrateForWire(msg));
+		const payload =
+			typeof Buffer !== "undefined" && Buffer.isBuffer(msg) ? msg : dehydrateForWire(msg);
+		return this.native.postMessage(payload);
 	}
 
 	/**

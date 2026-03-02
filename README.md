@@ -1,618 +1,400 @@
-# deno-director
-Run Deno Core runtimes inside Node.js, with first-class bridging in both directions.
+<div align="center">
 
-## Why this exists
-### Problem it solves
-Modern Node apps often need to execute dynamic code (plugins, rules, tenant code, generated code) without turning the host process into a giant unsafe shared runtime. `deno-director` gives you a way to run that code with stronger boundaries while keeping your existing Node architecture.
+# 🦕 Deno Director 🎬
 
-### What this solves technically
-`deno-director` runs Deno runtimes inside Node with a direct API for:
+**Embed, Orchestrate, and Sandbox Deno V8 Isolates Directly Inside Node.js.**
 
-- isolated execution contexts
-- controlled imports (including virtual modules)
-- bidirectional function bridging (Node <-> Deno)
-- runtime lifecycle management (`restart`, `force close`, hooks)
-- multi-runtime orchestration (`DenoWorkerTemplate`, `DenoDirector`)
+</div>
 
-### Where it fits vs `vm` / `worker_threads`
-- vs `vm`: gives you Deno runtime semantics and import/permission controls, not just JavaScript context separation.
-- vs raw `worker_threads`: gives you a higher-level execution model and bridge protocol out of the box.
-- vs hand-rolled RPC bridges: built-in host-function hydration and module/function invocation patterns reduce custom glue code.
+---
 
-### Real production use cases
-- plugin platforms running third-party or team-owned extensions
-- policy/rules engines evaluating customer-defined logic
-- multi-tenant execution where tenant state must stay isolated
-- AI/tool systems executing generated scripts with explicit runtime controls
-- gradual adoption paths where Node remains host and Deno handles isolated execution workloads
+Node.js is legendary. Deno is secure by default. **What if you didn't have to choose?**
 
-## Quick Start
-Super high-level flow: install, create a worker, run code, and bridge both directions.
+**Deno Director** is a native Rust/Neon module that embeds the Deno runtime natively into your Node.js process. It allows you to spin up lightning-fast, heavily sandboxed, completely isolated V8 threads, and control them from Node.js.
+
+Whether you are building a multi-tenant edge-compute platform, executing untrusted third-party code, or just want to use Deno's native TypeScript and URL-import capabilities inside your legacy Node.js monolith, Deno Director is the ultimate weapon.
+
+## 🔥 Why Deno Director?
+
+* **Zero-Serialization Friction:** Unlike standard IPC, Deno Director uses a highly optimized native bridge. Pass `Map`, `Set`, `ArrayBuffer`, `Date`, `RegExp`, native `Error` objects, and even **Functions** across the Node/Deno boundary without losing fidelity.
+* **Wield Host Functions:** Pass a Node.js function *into* the Deno sandbox. Call it from Deno, and it executes in Node. Synchronously or asynchronously.
+* **Ironclad Sandboxing:** Every worker is a Deno isolate. You have absolute control over `read`, `write`, `net`, `env`, and `ffi` permissions. Lock it down.
+* **Native TypeScript & JSX:** Evaluate `.ts` and `.tsx` files directly. No build step required. Deno Director handles transpilation on the fly.
+* **Fleet Orchestration:** Spin up thousands of runtimes. Tag them, label them, and manage their lifecycles seamlessly with the built-in `DenoDirector` orchestration class.
+* **Telemetry:** Extract granular V8 heap space statistics and exact CPU/Wall-clock execution times for every script evaluation.
+
+## 💡 How it works
+
+- **One Node.js process** hosts **many Deno runtimes**.
+- Each `DenoWorker` is a **separate V8 isolate** (and is treated as an isolated runtime boundary within the same process).
+- Calls and values cross the Node and Deno boundary using a **native bridge** backed by V8 serialization plus function bridging for host callbacks.
+- You control **Deno permissions** per worker (`read`, `write`, `net`, `env`, `ffi`, `sys`) plus optional host side policies like import interception and console routing.
+- You can enforce **timeouts and memory limits** per worker, and capture execution stats per evaluation.
+
+---
+
+## 🚀 Quick Start
 
 ```bash
 npm install deno-director
+
 ```
 
-### 1) Create a worker and run code
+### The Basics: Evaluated TS and Host Callbacks
+
 ```ts
 import { DenoWorker } from "deno-director";
 
-const dw = new DenoWorker();
-
-console.log(await dw.eval("1 + 1")); // 2
-console.log(dw.evalSync("6 * 7")); // 42
-
-await dw.close();
-```
-
-### 2) Node -> Deno: call exported module functions
-```ts
-import { DenoWorker } from "deno-director";
-
-const dw = new DenoWorker();
-
-const math = await dw.evalModule(`
-  export const version = "1.0.0";
-  export function add(a, b) { return a + b; }
-  export async function addAsync(a, b) { return a + b; }
-`);
-
-console.log(math.version); // "1.0.0"
-console.log(math.add(2, 3)); // 5
-console.log(await math.addAsync(20, 22)); // 42
-
-await dw.close();
-```
-
-### 3) Deno -> Node: inject host functions
-```ts
-import { DenoWorker } from "deno-director";
-
-const dw = new DenoWorker();
-
-await dw.setGlobal("triple", (n: number) => n * 3);
-await dw.setGlobal("loadUser", async (id: string) => ({ id, name: "Ada" }));
-
-const out = await dw.eval(`
-  (async () => {
-    const n = triple(14);
-    const user = await loadUser("u_1");
-    return { n, user };
-  })()
-`);
-
-console.log(out); // { n: 42, user: { id: "u_1", name: "Ada" } }
-
-await dw.close();
-```
-
-### 4) Virtual module quick example
-```ts
-import { DenoWorker } from "deno-director";
-
-const dw = new DenoWorker({
-  permissions: { import: true },
-  imports: (specifier) => {
-    // provide source code
-    if (specifier === "virtual:config") {
-      return { js: `export const appName = "director";` };
-    }
-    // block all other modules from loading
-    return false;
-  },
+const worker = new DenoWorker({
+  // Lock it down. Deno cannot read the disk or access the network.
+  permissions: { read: false, net: false, env: false },
+  // Enable on-the-fly TS transpilation
+  moduleLoader: { transpileTs: true }
 });
 
-const mod = await dw.evalModule(`
-  import { appName } from "virtual:config";
-  export const out = appName;
-`);
-
-console.log(mod.out); // "director"
-await dw.close();
-```
-
-### 5) Constructor globals (values, functions, nested objects, modules)
-```ts
-import * as fs from "node:fs";
-import { DenoWorker } from "deno-director";
-
-const dw = new DenoWorker({
-  globals: {
-    value: 22,
-    nested: { key: true },
-    someFn: (x: number) => x + 1,
-    anotherFn: async (x: number) => x + 2,
-    fs, // module object injection works too
-  },
+// Pass a Node.js function into the Deno sandbox
+await worker.setGlobal("nodeLogger", (msg: string) => {
+  console.log(`[Node.js received from Deno]: ${msg}`);
 });
 
-console.log(await dw.eval("value")); // 22
-console.log(await dw.eval("nested.key")); // true
-console.log(await dw.eval("someFn(41)")); // 42
-console.log(await dw.eval("(async () => await anotherFn(40))()")); // 42
-console.log(await dw.eval(`fs.readFileSync("/etc/hosts", "utf8").length > 0`)); // true
-
-await dw.close();
-```
-
-### 6) Console routing + runtime env configuration
-```ts
-import { DenoWorker } from "deno-director";
-
-const dw = new DenoWorker({
-  // Route worker console output into Node handlers.
-  console: {
-    log: (...args) => console.log("[worker:log]", ...args),
-    error: (...args) => console.error("[worker:error]", ...args),
-    debug: false, // disable console.debug in the worker
-  },
-
-  // Runtime env map (inside Deno runtime).
-  env: {
-    APP_ENV: "dev",
-    API_URL: "https://example.com",
-  },
-});
-
-await dw.eval(`console.log("hello");`);
-console.log(await dw.eval("Deno.env.get('APP_ENV')")); // "dev"
-
-await dw.close();
-```
-
-Note: async console handlers are fire-and-forget. For real-time streaming output during long evals/benchmarks, prefer synchronous handlers (or call your sink before the first `await`).
-
-## Major Features
-
-### 1) Virtual Modules (`imports` callback)
-<details>
-<summary>How it works + usage</summary>
-
-Use the `imports` callback to intercept import requests and return in-memory module source.
-
-```ts
-import { DenoWorker } from "deno-director";
-
-const dw = new DenoWorker({
-  permissions: { import: true },
-  imports: (specifier) => {
-    if (specifier === "virtual:config") {
-      return {
-        js: `export const env = "dev"; export const retries = 3;`,
-      };
-    }
-    return false; // block anything else (or return true to allow default disk resolution)
-  },
-});
-
-const result = await dw.evalModule(`
-  import { env, retries } from "virtual:config";
-  export const out = \`\${env}:\${retries}\`;
+// Evaluate TypeScript directly in the sandbox!
+const result = await worker.eval(`
+  const x: number = 42;
+  nodeLogger("Calculating universe secrets...");
+  x * 2;
 `);
 
-console.log(result.out); // "dev:3"
-await dw.close();
-```
-
-What to know about the `imports` callback:
-
-- Return `false` to block an import.
-- Return `true` to allow default resolution on disk.
-- Return `{ js | ts | tsx | jsx }` to provide source in memory.
-- Return `{ resolve: "..." }` to rewrite to another module name.
-
-</details>
-
-### 2) Call Deno Module Functions from Node
-<details>
-<summary>How it works + usage</summary>
-
-`evalModule(...)` returns a namespace object. Exported functions can be called directly from Node.
-
-```ts
-import { DenoWorker } from "deno-director";
-
-const dw = new DenoWorker();
-
-const mod = await dw.evalModule(`
-  export const version = "1.0.0";
-  export function sum(a, b) { return a + b; }
-  export async function slowDouble(n) {
-    await Promise.resolve();
-    return n * 2;
-  }
-`);
-
-console.log(mod.version); // "1.0.0"
-console.log(mod.sum(20, 22)); // 42
-console.log(await mod.slowDouble(21)); // 42
-
-await dw.close();
-```
-
-You can also use default exports:
-
-```ts
-const mod = await dw.evalModule(`
-  export default function multiply(a, b) { return a * b; }
-`);
-
-console.log(mod.default(6, 7)); // 42
-```
-
-</details>
-
-### 3) Create Node Functions Callable from Deno
-<details>
-<summary>How it works + usage</summary>
-
-Inject host functions with `setGlobal`, then call/await them inside Deno.
-
-```ts
-import { DenoWorker } from "deno-director";
-
-const dw = new DenoWorker();
-
-await dw.setGlobal("double", (n: number) => n * 2);
-await dw.setGlobal("fetchUser", async (id: string) => {
-  return { id, name: "Ada" };
-});
-
-const out = await dw.eval(`
-  (async () => {
-    const n = double(21);
-    const user = await fetchUser("u_123");
-    return { n, user };
-  })()
-`);
-
-console.log(out); // { n: 42, user: { id: "u_123", name: "Ada" } }
-await dw.close();
-```
-
-If a Node function throws, the error is propagated back through `eval(...)`.  The same is true the other way.
-```ts
-import { DenoWorker } from "deno-director";
-
-const dw = new DenoWorker({
-    console: false // ignore all console.* calls
-    console: console
-});
-
+console.log(result); // 84
+await worker.close();
 
 ```
-</details>
 
-### 4) Runtime Templates and Orchestration
-<details>
-<summary>How it works + usage</summary>
+### Fleet Orchestration: Managing 1,000 Tenants
 
-Use `DenoWorkerTemplate` for reusable runtime defaults and `DenoDirector` to manage multiple runtimes with ids/labels/tags.
+Use the `DenoDirector` to orchestrate massive fleets of sandboxed runtimes.
 
 ```ts
 import { DenoDirector } from "deno-director";
 
 const director = new DenoDirector({
   template: {
-    workerOptions: {
-      permissions: { env: true },
-    },
-    globals: { APP_NAME: "director-demo" },
-  },
+    // Base configuration for ALL workers
+    workerOptions: { maxMemoryBytes: 128 * 1024 * 1024 }, // 128MB limit
+    bootstrapScripts: ["globalThis.APP_RUNTIME = 'DenoDirector';"]
+  }
 });
 
-const a = await director.start({ label: "tenant-a", tags: ["billing"] });
-const b = await director.start({ label: "tenant-b", tags: ["analytics"] });
-
-console.log(await a.eval("APP_NAME")); // "director-demo"
-console.log(director.list({ tag: "billing" }).length); // 1
-
-await director.stopAll();
-```
-
-</details>
-
-## API Reference
-
-### `DenoWorker`
-Create and control a single Deno runtime.
-
-Constructor:
-
-```ts
-const dw = new DenoWorker(options?);
-```
-
-Common options:
-
-- `imports`: `boolean | (specifier, referrer?, isDynamicImport?) => result`
-- `permissions`: Deno-style permissions (`read`, `write`, `net`, `env`, `run`, `ffi`, `sys`, `import`, `hrtime`)
-- `cwd`: runtime working directory
-- `maxEvalMs`, `maxMemoryBytes`, `maxStackSizeBytes`, `channelSize`
-- `nodeResolve`, `nodeCompat`
-- `console`
-- `console`: `false`, `Console`, or per-method handlers (`log/info/warn/error/debug/trace`)
-- `env`: runtime env config (`string dotenv path` or `Record<string,string>`)
-- `envFile`: `true` (search `.env` upward from `cwd`) or explicit dotenv path
-- `inspect`
-- `moduleLoader` (`denoRemote`, `transpileTs`, `tsCompiler`, `cacheDir`, `reload`)
-- `globals` (inject startup globals/functions into `globalThis`)
-- `lifecycle` hooks (`beforeStart`, `afterStart`, `beforeStop`, `afterStop`, `onCrash`)
-
-Methods:
-
-- `await dw.eval(source, options?)`: async evaluate script/module source.
-- `dw.evalSync(source, options?)`: sync (blocking) evaluate source.
-- `await dw.evalModule(source, options?)`: evaluate ES module source, return namespace object.
-- `await dw.setGlobal(name, value)`: set `globalThis[name]` inside runtime.
-- `dw.postMessage(msg)`: enqueue message to runtime.
-- `dw.tryPostMessage(msg)`: same as `postMessage`, but returns `false` on enqueue failure.
-- `dw.on(event, handler)`: subscribe to `"message" | "close" | "lifecycle"`.
-- `dw.off(event, handler?)`: unsubscribe one handler or all handlers for event.
-- `dw.isClosed()`: runtime closed/closing status.
-- `await dw.memory()`: runtime V8 heap stats.
-- `dw.lastExecutionStats`: `{ cpuTimeMs?, evalTimeMs? }`: Execution cost of the last eval/evalSync
-- `await dw.restart(options?)`: restart runtime in-place.
-- `await dw.close(options?)`: close runtime.
-
-Startup note:
-
-- Constructor `globals` are applied asynchronously during startup.
-- Async APIs (`eval`, `evalModule`, `setGlobal`, `memory`) wait for startup globals automatically.
-- `evalSync` throws if called before constructor globals finish initializing.
-
-Console and env notes:
-
-- `console` lets you disable methods or route them to host handlers.
-- `console: false` disables runtime `console.*` methods.
-- `console: console` forwards runtime logs directly to the host console object.
-- `env` config applies to the runtime’s `Deno.env`.
-- `env` overrides `envFile` when both are provided.
-
-```ts
-const off = new DenoWorker({ console: false });
-const passthrough = new DenoWorker({ console: console });
-```
-
-Env permission note:
-
-- To read runtime env from evaluated code (`Deno.env.get`, `Deno.env.toObject`), enable env permission.
-- Use `permissions: { env: true }` to allow all env keys, or `permissions: { env: ["APP_ENV", "TOKEN"] }` for an allow-list.
-- Without env permission, env API access is denied even if `env`/`envFile` is configured.
-
-Minimal example:
-
-```ts
-const dw = new DenoWorker({ maxEvalMs: 500 });
-await dw.setGlobal("double", (n: number) => n * 2);
-console.log(await dw.eval("double(21)")); // 42
-await dw.close();
-```
-
-### `DenoWorkerTemplate`
-Reusable runtime blueprint (shared options, globals, bootstraps, setup).
-
-Constructor:
-
-```ts
-const template = new DenoWorkerTemplate({
-  workerOptions: { permissions: { env: true } },
-  globals: { APP_NAME: "director" },
-  bootstrapScripts: "globalThis.VERSION = 1;",
+// Start a runtime for a specific tenant
+const tenantA = await director.start({
+  label: "tenant-a",
+  tags: ["premium-tier", "us-east"],
+  globals: { TENANT_ID: "A" }
 });
+
+await tenantA.eval(`console.log("Hello from", TENANT_ID)`);
+
+// Query and manage your fleet
+const premiumRuntimes = director.list({ tag: "premium-tier" });
+console.log(`Active premium runtimes: ${premiumRuntimes.length}`);
+
+// Nuke a specific tenant
+await director.stopByLabel("tenant-a");
+
 ```
 
-Methods:
+---
 
-- `await template.create(createOptions?)`: create a new `DenoWorker` from template defaults + per-runtime overrides.
+## 🧠 Major Capabilities
 
-Example:
+### The Transdimensional Bridge
 
-```ts
-const runtime = await template.create({
-  globals: { TENANT: "a" },
-});
-console.log(await runtime.eval("`${APP_NAME}:${TENANT}`")); // "director:a"
-await runtime.close();
-```
+When you pass data between Node and Deno using `eval`, `evalSync`, or `setGlobal`, Deno Director doesn't just `JSON.stringify`. It uses a complex custom codec backed by V8 serialization.
 
-### `DenoDirector`
-Orchestrate multiple runtimes with metadata (`id`, `label`, `tags`).
+* `NaN`, `Infinity`, `-0`? Preserved.
+* `Uint8Array`, `DataView`, `SharedArrayBuffer`? Passed instantly via underlying memory views.
+* Promises? Automatically chained across the boundary.
 
-Constructor:
+### ES Module Proxying
+
+Don't just evaluate strings—import entire ES modules and use them as if they were native Node.js objects.
 
 ```ts
-const director = new DenoDirector({
-  template: {
-    workerOptions: { permissions: { env: true } },
-  },
-});
-```
-
-Methods:
-
-- `await director.start(options?)`: start managed runtime, returns `runtime` with `runtime.meta`.
-- `director.get(id)`: get runtime by id.
-- `director.getByLabel(label)`: get runtimes by label.
-- `director.list(filter?)`: list runtimes, optionally by `label` and/or `tag`.
-- `director.setLabel(runtimeOrId, label?)`
-- `director.setTags(runtimeOrId, tags)`
-- `director.addTag(runtimeOrId, tag)`
-- `director.removeTag(runtimeOrId, tag)`
-- `await director.stop(runtimeOrId)`
-- `await director.stopByLabel(label)`
-- `await director.stopAll()`
-
-Example:
-
-```ts
-const a = await director.start({ id: "rt-a", label: "tenant-a", tags: ["billing"] });
-const b = await director.start({ label: "tenant-b", tags: ["analytics"] });
-
-console.log(a.meta.id); // "rt-a"
-console.log(director.list({ tag: "billing" }).length); // 1
-
-await director.stopAll();
-```
-
-### `Eval` options
-Used by `eval`, `evalSync`, and `evalModule`.
-
-- `filename`: virtual filename in stack traces
-- `type`: `"script"` or `"module"`
-- `args`: positional args (if source evaluates to a function, runtime will call it with these args)
-- `maxEvalMs`: per-call timeout override
-
-Example:
-
-```ts
-const out = await dw.eval("(a, b) => a + b", { args: [20, 22], maxEvalMs: 1000 });
-console.log(out); // 42
-```
-
-## Recipes
-
-### 1) Per-call timeout for untrusted code
-```ts
-const dw = new DenoWorker({ maxEvalMs: 250 });
-
-// Global maxEvalMs is 250, but this call gets 2s.
-const result = await dw.eval("while (Date.now() < Date.now() + 10) {}", {
-  maxEvalMs: 2000,
-});
-```
-
-### 2) Force-close when work is stuck
-```ts
-const dw = new DenoWorker();
-
-const pending = dw.eval(`
-  (async () => {
-    await new Promise(() => {}); // never resolves
-  })()
+// Deno dynamically imports the code, and Node gets a fully typed proxy namespace!
+const mod = await worker.evalModule(`
+  export const version = "1.0.0";
+  export function encrypt(data) { return btoa(data); }
 `);
 
-await dw.close({ force: true });
-await pending.catch((err) => console.error("rejected:", err.message));
+console.log(mod.version); // "1.0.0"
+console.log(await mod.encrypt("secret")); // "c2VjcmV0"
+
 ```
 
-### 3) Restart a runtime in place
+### 🪄 Magic Module Resolution: The `imports` Interceptor
+
+By default, Deno resolves modules from the disk or network. But with Deno Director, you can completely hijack the ES Module graph. Every time the Deno sandbox encounters an `import` statement, it pauses and asks your Node.js host exactly what to do.
+
+You can use the `imports` callback to rewrite specifiers, block malicious network requests, or even serve **virtual modules directly from memory**. Because the callback can be `async`, you have the full power of Node.js at your fingertips to fetch, compile, and cache code on the fly.
+
+**What it looks like inside the Deno Sandbox:**
+From Deno's perspective, everything is just standard ECMAScript. It has no idea you are pulling the strings behind the scenes.
+
 ```ts
-const dw = new DenoWorker();
+// Inside Deno:
+import { sum } from "./math.ts";                   // Normal relative import
+import { db } from "app:database";                 // Custom URL scheme!
+const Secret = await import("untrusted-dynamic");  // Dynamic import
 
-await dw.eval("globalThis.counter = 10");
-await dw.restart();
-
-console.log(await dw.eval("typeof globalThis.counter")); // "undefined"
 ```
 
-### 4) Constructor globals pattern
-```ts
-const dw = new DenoWorker({
-  globals: {
-    apiBase: "https://example.com",
-    add: (a: number, b: number) => a + b,
-  },
-});
-
-console.log(await dw.eval("apiBase")); // "https://example.com"
-console.log(await dw.eval("add(20, 22)")); // 42
-```
-
-### 5) Console routing pattern
-```ts
-const dw = new DenoWorker({
-  console: {
-    log: (...args) => hostLogger.info(args),
-    warn: (...args) => hostLogger.warn(args),
-    error: (...args) => hostLogger.error(args),
-    debug: false,
-  },
-});
-```
+**What it looks like on the Node.js Host:**
+Let's build an interceptor that blocks dynamic imports for security, uses a custom in-memory cache, and compiles a proprietary module scheme (`app:`) on the fly.
 
 ```ts
-const disabled = new DenoWorker({ console: false });
-const forwarded = new DenoWorker({ console: console });
-```
+import { DenoWorker } from "deno-director";
 
-Use synchronous console handlers when you need immediate output. Async handlers are not awaited by worker `console.*` calls.
+// A simple in-memory cache on the Node side
+const moduleCache = new Map<string, string>();
 
-### 6) Runtime env pattern (`env` + `envFile`)
-```ts
-const dwA = new DenoWorker({
-  permissions: { env: true },
-  env: { APP_ENV: "test", TOKEN: "abc123" },
-});
+const worker = new DenoWorker({
+  moduleLoader: { transpileTs: true }, // We want Deno to handle our TS/JSX
+  
+  // The ultimate import interceptor
+  imports: async (specifier, referrer, isDynamicImport) => {
+    console.log(`[Deno] requesting: ${specifier} (from ${referrer})`);
 
-const dwB = new DenoWorker({
-  cwd: "/srv/app",
-  permissions: { env: ["APP_ENV", "TOKEN"] },
-  envFile: true, // find .env upward from cwd
-});
-
-const dwC = new DenoWorker({
-  envFile: "/srv/app/.env",
-  env: { APP_ENV: "override" }, // env wins over envFile
-});
-```
-
-### 7) Strict virtual import allow-list
-```ts
-const dw = new DenoWorker({
-  permissions: { import: true },
-  imports: (specifier) => {
-    if (specifier === "virtual:math") {
-      return { js: "export const add = (a,b) => a + b;" };
+    // 1. Security: Block ALL dynamic imports (const y = await import("..")) to prevent code-injection attacks
+    if (isDynamicImport) {
+      console.warn(`Blocked dynamic import of ${specifier}`);
+      return false; // false = block module with error
     }
-    return false; // block everything else
-  },
-});
-```
 
-### 8) Multi-tenant runtime grouping with `DenoDirector`
-```ts
-const director = new DenoDirector();
+    // 2. Custom Scheme: Intercept "app:*" imports and compile them on the fly
+    if (specifier.startsWith("app:")) {
+      const moduleName = specifier.replace("app:", "");
+      
+      // Check our Node-side cache first!
+      if (moduleCache.has(moduleName)) {
+        return { ts: moduleCache.get(moduleName)! }; // Serve from memory
+      }
 
-const a1 = await director.start({ label: "tenant-a", tags: ["billing"] });
-const a2 = await director.start({ label: "tenant-a", tags: ["analytics"] });
-const b1 = await director.start({ label: "tenant-b", tags: ["billing"] });
+      // Simulate fetching or compiling custom code (e.g., from a DB or remote API)
+      const compiledTsCode = `export const ${moduleName} = "Super Secret Data for ${moduleName}";`;
+      
+      // Save to cache
+      moduleCache.set(moduleName, compiledTsCode);
 
-console.log(director.getByLabel("tenant-a").length); // 2
-console.log(director.list({ tag: "billing" }).length); // 2
+      // Feed it source code directly into Deno's memory as a TypeScript module!
+      return { ts: compiledTsCode }; 
+    }
 
-await director.stopByLabel("tenant-a"); // stops a1 + a2
-await director.stop(b1);
-```
-
-### 9) Worker <-> Node message bus
-```ts
-const dw = new DenoWorker();
-
-dw.on("message", (msg) => {
-  console.log("from worker:", msg);
+    // 3. Fallback: Allow normal resolution for everything else
+    return true; 
+  }
 });
 
-await dw.eval(`
-  on("message", (msg) => {
-    postMessage({ echo: msg });
-  });
+// Run it! Deno will hit our interceptor for "app:database"
+const result = await worker.evalModule(`
+  import { database } from "app:database";
+  export function getData() {
+    return database;
+  }
 `);
 
-dw.postMessage({ hello: "world" }); // => from worker: { echo: { hello: "world" } }
+console.log(await result.getData()); // "Super Secret Data for database"
+
 ```
 
-## Local Development
+**The resulting superpower:** You can seamlessly integrate tools like Webpack, SWC, or esbuild on the Node.js side, transpile custom DSLs, and feed the resulting raw code directly into the isolated Deno runtime without ever touching the disk.
 
-```bash
-npm install
-npm test
+### 🥷 Smuggling Node.js Modules into Deno
+
+Because Deno Director utilizes a recursive V8 serializer and native function bridging, you can literally inject entire Node.js core modules (or any complex object with methods) directly into the Deno sandbox.
+
+Deno Director will automatically walk the object's enumerable properties, wrapping all functions into blazing-fast native bridges.
+
+```ts
+import fs from "node:fs";
+import crypto from "node:crypto";
+import { DenoWorker } from "deno-director";
+
+const worker = new DenoWorker({
+  // Deno's native file reading is blocked...
+  permissions: { read: false }
+});
+
+// ...but we can smuggle Node's `fs` module in anyway!
+await worker.setGlobal("nodeFs", fs);
+await worker.setGlobal("nodeCrypto", crypto);
+
+const result = await worker.eval(`
+  // Calling Node.js fs.readFileSync synchronously from inside Deno!
+  const fileBuffer = nodeFs.readFileSync("./secrets.txt");
+  
+  // Calling Node's crypto module from Deno
+  // this function runs in the NODE context!
+  const hash = nodeCrypto.createHash("sha256");
+  hash.update(fileBuffer);
+  hash.digest("hex");
+`);
+
+console.log(`File hash: ${result}`);
+
 ```
 
-Build scripts:
+---
 
-- `npm run build-debug`
-- `npm run build-release`
+### 🤫 Hijack the Console
+
+Untrusted code loves to spam `console.log`. Deno Director gives you absolute authority over standard output. You can silence the sandbox completely, pipe it natively to Node.js, or route specific log levels to your own telemetry tools.
+
+```ts
+// 0. Default behavior: the sandbox console is routed to stdout/stderr/etc
+const silentWorker = new DenoWorker();
+
+// 1. Total Silence: no console output
+const silentWorker = new DenoWorker({ console: false });
+
+// 2. Native Passthrough: Pipe Deno's console directly to Node's console
+const noisyWorker = new DenoWorker({ console: console });
+
+// 3. Surgical Routing: Hook specific methods to custom host functions
+const customWorker = new DenoWorker({
+  console: {
+    log: (...args) => myDatadogLogger.info("Deno says:", ...args),
+    // async funcitons are supported!
+    error: async (...args) => await PagerDuty.alert("Deno crashed:", ...args),
+    warn: false, // Drop warnings into the void
+    debug: undefined // Fallback to default Deno behavior
+  }
+});
+
+```
+---
+
+### 🌍 Environment Variables: The Secure Way
+
+By default, Deno Director locks down environment variables.  You can inject explicit key value pairs, or have the worker dynamically load a `.env` file from disk.
+
+```ts
+const worker = new DenoWorker({
+  // 1. Explicitly pass a map of variables
+  env: {
+    DB_PASS: "super_secret",
+    NODE_ENV: "production"
+  },
+  
+  // OR 2. Auto-load from a .env file (searches upwards from cwd by default)
+  // envFile: true, 
+
+  // OR 3. provide exact file to load, errors out if the file doesn't exist
+  // envFile: ".my.env"
+});
+
+// Inside Deno, access them normally:
+await worker.eval(`
+  const pass = Deno.env.get("DB_PASS"); // "super_secret"
+`);
+
+```
+
+---
+
+## 📖 API Documentation
+
+### `class DenoDirector`
+
+The primary class for orchestrating multiple `DenoWorker` instances.
+
+| Method | Returns | Description |
+| --- | --- | --- |
+| `start(options?: DenoDirectorStartOptions)` | `Promise<DenoDirectedRuntime>` | Spawns a new managed Deno runtime. |
+| `get(id: string)` | `DenoDirectedRuntime | undefined` | Retrieves a runtime by its unique ID. |
+| `getByLabel(label: string)` | `DenoDirectedRuntime[]` | Retrieves all runtimes matching a specific label. |
+| `list(filter?: DenoDirectorListOptions)` | `DenoDirectedRuntime[]` | Lists runtimes, optionally filtering by label and/or tag. |
+| `setLabel(runtime, label: string)` | `boolean` | Updates a runtime's label. |
+| `setTags(runtime, tags: string[])` | `boolean` | Replaces a runtime's tags. |
+| `addTag/removeTag(runtime, tag)` | `boolean` | Modifies tags on an existing runtime. |
+| `stop(runtimeOrId)` | `Promise<boolean>` | Gracefully closes a runtime and removes it from the pool. |
+| `stopByLabel(label: string)` | `Promise<number>` | Stops all runtimes matching a given label. |
+| `stopAll()` | `Promise<number>` | Destroys the entire fleet. |
+
+---
+
+### `class DenoWorker`
+
+The core runtime isolate. Maps 1:1 with a V8 Thread.
+
+#### **Execution Methods**
+
+* `eval(src: string, options?: EvalOptions): Promise<any>`
+Evaluates JavaScript or TypeScript asynchronously.
+* `evalSync(src: string, options?: EvalOptions): any`
+Evaluates JavaScript or TypeScript synchronously (blocks Node event loop while waiting).
+* `evalModule<T>(src: string, options?: EvalOptions): Promise<T>`
+Evaluates the source as an ES Module and returns a callable Proxy namespace to the exports.
+
+#### **Environment & Memory**
+
+* `setGlobal(key: string, value: any): Promise<void>`
+Injects a value or function into the `globalThis` of the Deno isolate.
+* `memory(): Promise<DenoWorkerMemory>`
+Returns granular V8 heap statistics (`totalHeapSize`, `mallocedMemory`, etc.).
+* `lastExecutionStats: { cpuTimeMs?: number, evalTimeMs?: number }`
+Returns telemetry for the most recent `eval` operation.
+
+#### **Messaging & Lifecycle**
+
+* `postMessage(msg: any): void`
+Fires an event into Deno's `globalThis.onmessage`.
+* `on(event: "message" | "close" | "lifecycle", cb: Function)`
+Listen for messages from Deno (`hostPostMessage`), close events, or lifecycle transitions (`beforeStart`, `onCrash`, etc.).
+* `close(options?: { force?: boolean }): Promise<void>`
+Gracefully shuts down the V8 isolate. Use `force: true` to instantly terminate execution.
+* `restart(options?: { force?: boolean }): Promise<void>`
+Reboots the isolate in place, re-applying all template configurations and global variables.
+
+---
+
+### Configuration Types
+
+#### `DenoWorkerOptions`
+
+Passed into `new DenoWorker(opts)` or used as `workerOptions` in templates.
+
+```ts
+type DenoWorkerOptions = {
+  cwd?: string;                 // Virtual root for the filesystem sandbox
+  maxEvalMs?: number;           // Hard timeout for eval operations
+  maxMemoryBytes?: number;      // V8 Heap limit
+  startup?: string;             // Script evaluated before user code runs
+  permissions?: {               // Deno secure sandbox permissions
+    read?: boolean | string[];  // Allow read everywhere, or specific paths
+    write?: boolean | string[]; // Allow write everywhere, or specific paths
+    net?: boolean | string[];   // Allow network, or specific domains/ports
+    env?: boolean | string[];   // Allow env access, or specific variables
+    ffi?: boolean;              // Allow Foreign Function Interface
+    sys?: boolean;              // OS Info access
+  };
+  env?: Record<string, string>; // Custom environment variables
+  envFile?: string | boolean;   // Load from a .env file
+  imports?: boolean | ImportsCallback; // Custom module resolution interceptor
+  moduleLoader?: {
+    denoRemote?: boolean;       // Enable https:// imports
+    transpileTs?: boolean;      // Enable TypeScript / JSX
+    cacheDir?: string;          // Where to cache remote imports
+    reload?: boolean;           // Bypass cache
+    tsCompiler?: {              // JSX Factory configurations
+      jsx?: "react" | "react-jsx" | "preserve";
+      jsxFactory?: string;
+      jsxFragmentFactory?: string;
+    }
+  };
+  console?: false | Console | Record<string, Function | false>; // Route console logs
+  inspect?: boolean | { host?: string; port?: number; break?: boolean; }; // V8 Debugging
+};
+
+```
 
 ## Notes
 

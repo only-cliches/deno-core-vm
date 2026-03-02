@@ -89,6 +89,116 @@ fn hydrate_via_global<'s, 'p>(
         .unwrap_or(wire_value)
 }
 
+fn is_wire_marker_key(k: &str) -> bool {
+    matches!(
+        k,
+        "__undef"
+            | "__num"
+            | "__denojs_worker_num"
+            | "__date"
+            | "__bigint"
+            | "__regexp"
+            | "__buffer"
+            | "__map"
+            | "__set"
+            | "__url"
+            | "__urlSearchParams"
+            | TYPE_KEY
+    )
+}
+
+fn json_contains_wire_markers(v: &serde_json::Value) -> bool {
+    match v {
+        serde_json::Value::Array(arr) => arr.iter().any(json_contains_wire_markers),
+        serde_json::Value::Object(obj) => {
+            obj.keys().any(|k| is_wire_marker_key(k))
+                || obj.values().any(json_contains_wire_markers)
+        }
+        _ => false,
+    }
+}
+
+fn json_to_v8_plain<'s, 'p>(
+    ps: &mut v8::PinScope<'s, 'p>,
+    v: &serde_json::Value,
+    depth: usize,
+) -> Result<v8::Local<'s, v8::Value>, String> {
+    if depth > 200 {
+        return Ok(v8::undefined(ps).into());
+    }
+
+    match v {
+        serde_json::Value::Null => Ok(v8::null(ps).into()),
+        serde_json::Value::Bool(b) => Ok(v8::Boolean::new(ps, *b).into()),
+        serde_json::Value::Number(n) => {
+            let f = n.as_f64().unwrap_or(0.0);
+            Ok(v8::Number::new(ps, f).into())
+        }
+        serde_json::Value::String(s) => v8::String::new(ps, s)
+            .map(|x| x.into())
+            .ok_or_else(|| mk_err("alloc JSON string failed")),
+        serde_json::Value::Array(arr) => {
+            let out = v8::Array::new(ps, arr.len() as i32);
+            for (i, item) in arr.iter().enumerate() {
+                let vv = json_to_v8_plain(ps, item, depth + 1)?;
+                let _ = out.set_index(ps, i as u32, vv);
+            }
+            Ok(out.into())
+        }
+        serde_json::Value::Object(obj) => {
+            let out = v8::Object::new(ps);
+            for (k, item) in obj.iter() {
+                let kk =
+                    v8::String::new(ps, k.as_str()).ok_or_else(|| mk_err("alloc key failed"))?;
+                let vv = json_to_v8_plain(ps, item, depth + 1)?;
+                let _ = out.set(ps, kk.into(), vv);
+            }
+            Ok(out.into())
+        }
+    }
+}
+
+fn try_buffer_view_to_v8<'s, 'p>(
+    ps: &mut v8::PinScope<'s, 'p>,
+    kind: &str,
+    bytes: &[u8],
+    byte_offset: usize,
+    length: usize,
+) -> Option<v8::Local<'s, v8::Value>> {
+    if kind == "SharedArrayBuffer" {
+        return None;
+    }
+
+    let ab = if bytes.is_empty() {
+        v8::ArrayBuffer::new(ps, 0)
+    } else {
+        let bs = v8::ArrayBuffer::new_backing_store_from_vec(bytes.to_vec()).make_shared();
+        v8::ArrayBuffer::with_backing_store(ps, &bs)
+    };
+
+    if kind == "ArrayBuffer" {
+        return Some(ab.into());
+    }
+
+    if byte_offset > bytes.len() {
+        return None;
+    }
+    let end = byte_offset.checked_add(length)?;
+    if end > bytes.len() {
+        return None;
+    }
+
+    if kind == "Uint8Array" {
+        return v8::Uint8Array::new(ps, ab, byte_offset, length).map(|v| v.into());
+    }
+
+    if kind == "DataView" {
+        return Some(v8::DataView::new(ps, ab, byte_offset, length).into());
+    }
+
+    None
+}
+
 fn to_v8_via_wire<'s, 'p>(
     ps: &mut v8::PinScope<'s, 'p>,
     value: &JsValueBridge,
@@ -143,15 +253,30 @@ pub fn to_v8<'s, 'p>(
             .ok_or_else(|| mk_err("date create failed"))?
             .into()),
 
-        // Prefer wire hydration for these.
+        // Prefer direct V8 construction for hot paths; fallback to wire hydration when needed.
         JsValueBridge::BigInt(_)
         | JsValueBridge::RegExp { .. }
-        | JsValueBridge::BufferView { .. }
-        | JsValueBridge::Map(_)
-        | JsValueBridge::Set(_)
         | JsValueBridge::Url { .. }
-        | JsValueBridge::UrlSearchParams { .. }
-        | JsValueBridge::Json(_) => to_v8_via_wire(ps, value),
+        | JsValueBridge::UrlSearchParams { .. } => to_v8_via_wire(ps, value),
+
+        JsValueBridge::BufferView {
+            kind,
+            bytes,
+            byte_offset,
+            length,
+        } => try_buffer_view_to_v8(ps, kind, bytes, *byte_offset, *length)
+            .ok_or_else(|| mk_err("buffer view direct conversion failed"))
+            .or_else(|_| to_v8_via_wire(ps, value)),
+
+        JsValueBridge::Map(_) | JsValueBridge::Set(_) => to_v8_via_wire(ps, value),
+
+        JsValueBridge::Json(j) => {
+            if json_contains_wire_markers(j) {
+                to_v8_via_wire(ps, value)
+            } else {
+                json_to_v8_plain(ps, j, 0)
+            }
+        }
 
         JsValueBridge::V8Serialized(bytes) => {
             struct D;

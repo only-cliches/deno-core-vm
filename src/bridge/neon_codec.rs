@@ -538,6 +538,104 @@ pub fn from_neon_value<'a, C: Context<'a>>(
         });
     }
 
+    // Fast-path non-Buffer ArrayBuffer / TypedArray / DataView.
+    if let Ok(buf_ctor) = cx.global::<JsFunction>("Buffer") {
+        if let Ok(from_any) = buf_ctor.get_value(cx, "from") {
+            if let Ok(from_fn) = from_any.downcast::<JsFunction, _>(cx) {
+                let tag = object_to_string_tag(cx, value);
+                let is_ab = tag.as_deref() == Some("[object ArrayBuffer]");
+                let is_sab = tag.as_deref() == Some("[object SharedArrayBuffer]");
+                let is_view = if let Ok(ab_ctor) = cx.global::<JsFunction>("ArrayBuffer") {
+                    cx.try_catch(|cx| {
+                        let fn_any = ab_ctor.get_value(cx, "isView")?;
+                        let fn_is_view = fn_any.downcast::<JsFunction, _>(cx).unwrap();
+                        fn_is_view
+                            .call_with(cx)
+                            .this(ab_ctor)
+                            .arg(value)
+                            .apply::<JsBoolean, _>(cx)
+                    })
+                    .ok()
+                    .map(|b| b.value(cx))
+                    .unwrap_or(false)
+                } else {
+                    false
+                };
+
+                if is_ab || is_sab || is_view {
+                    let out_any = from_fn
+                        .call_with(cx)
+                        .this(buf_ctor)
+                        .arg(value)
+                        .apply::<JsValue, _>(cx)
+                        .unwrap_or_else(|_| cx.undefined().upcast());
+
+                    if let Ok(out_buf) = out_any.downcast::<JsBuffer, _>(cx) {
+                        let bytes = out_buf.as_slice(cx).to_vec();
+
+                        let kind = if is_ab {
+                            "ArrayBuffer".to_string()
+                        } else if is_sab {
+                            "SharedArrayBuffer".to_string()
+                        } else {
+                            value
+                                .downcast::<JsObject, _>(cx)
+                                .ok()
+                                .and_then(|o| o.get_value(cx, "constructor").ok())
+                                .and_then(|c| c.downcast::<JsObject, _>(cx).ok())
+                                .and_then(|co| get_string_prop(cx, co, "name"))
+                                .filter(|s| !s.trim().is_empty())
+                                .unwrap_or_else(|| "Uint8Array".to_string())
+                        };
+
+                        let byte_offset = if is_ab || is_sab {
+                            0usize
+                        } else {
+                            value
+                                .downcast::<JsObject, _>(cx)
+                                .ok()
+                                .and_then(|o| o.get_value(cx, "byteOffset").ok())
+                                .and_then(|n| n.downcast::<JsNumber, _>(cx).ok())
+                                .map(|n| n.value(cx) as usize)
+                                .unwrap_or(0usize)
+                        };
+
+                        let byte_length = if is_ab || is_sab {
+                            bytes.len()
+                        } else {
+                            value
+                                .downcast::<JsObject, _>(cx)
+                                .ok()
+                                .and_then(|o| o.get_value(cx, "byteLength").ok())
+                                .and_then(|n| n.downcast::<JsNumber, _>(cx).ok())
+                                .map(|n| n.value(cx) as usize)
+                                .unwrap_or(bytes.len())
+                        };
+
+                        let length = if kind == "DataView" || is_ab || is_sab {
+                            byte_length
+                        } else {
+                            value
+                                .downcast::<JsObject, _>(cx)
+                                .ok()
+                                .and_then(|o| o.get_value(cx, "length").ok())
+                                .and_then(|n| n.downcast::<JsNumber, _>(cx).ok())
+                                .map(|n| n.value(cx) as usize)
+                                .unwrap_or(byte_length)
+                        };
+
+                        return Ok(JsValueBridge::BufferView {
+                            kind,
+                            bytes,
+                            byte_offset,
+                            length,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
     // Error-like objects
     if let Ok(obj) = value.downcast::<JsObject, _>(cx) {
         let is_native_err = value.is_a::<neon::types::JsError, _>(cx);
@@ -603,6 +701,53 @@ fn make_arraybuffer_from_bytes<'a, C: Context<'a>>(
     cx: &mut C,
     bytes: &[u8],
 ) -> Result<Handle<'a, JsValue>, Throw> {
+    if let Ok(mut src) = JsBuffer::new(cx, bytes.len()) {
+        src.as_mut_slice(cx).copy_from_slice(bytes);
+        let src_obj = src.upcast::<JsObject>();
+
+        let out = cx.try_catch(|cx| {
+            let ab_any = src_obj.get_value(cx, "buffer")?;
+            let ab_obj = ab_any.downcast::<JsObject, _>(cx).map_err(|_| {
+                cx.throw_error::<_, Throw>("Buffer.buffer is not an object")
+                    .unwrap_err()
+            })?;
+
+            let bo = src_obj.get_value(cx, "byteOffset")?;
+            let bl = src_obj.get_value(cx, "byteLength")?;
+
+            let end = {
+                let bo_n = bo
+                    .downcast::<JsNumber, _>(cx)
+                    .ok()
+                    .map(|n| n.value(cx))
+                    .unwrap_or(0.0);
+                let bl_n = bl
+                    .downcast::<JsNumber, _>(cx)
+                    .ok()
+                    .map(|n| n.value(cx))
+                    .unwrap_or(bytes.len() as f64);
+                cx.number(bo_n + bl_n).upcast::<JsValue>()
+            };
+
+            let slice_any = ab_obj.get_value(cx, "slice")?;
+            let slice_fn = slice_any.downcast::<JsFunction, _>(cx).map_err(|_| {
+                cx.throw_error::<_, Throw>("ArrayBuffer.slice is not a function")
+                    .unwrap_err()
+            })?;
+
+            slice_fn
+                .call_with(cx)
+                .this(ab_obj)
+                .arg(bo)
+                .arg(end)
+                .apply::<JsValue, _>(cx)
+        });
+
+        if let Ok(v) = out {
+            return Ok(v);
+        }
+    }
+
     let ab_ctor = cx.global::<JsFunction>("ArrayBuffer")?;
     let len_v = cx.number(bytes.len() as f64).upcast::<JsValue>();
     let ab_any = reflect_construct(cx, ab_ctor, &[len_v])?;
@@ -620,10 +765,14 @@ fn make_arraybuffer_from_bytes<'a, C: Context<'a>>(
             .unwrap_err()
     })?;
 
-    for (i, b) in bytes.iter().enumerate() {
-        let n = cx.number(*b as f64);
-        let _ = u8.set(cx, i as u32, n);
-    }
+    let mut src = JsBuffer::new(cx, bytes.len())?;
+    src.as_mut_slice(cx).copy_from_slice(bytes);
+    let set_any = u8.get_value(cx, "set")?;
+    let set_fn = set_any.downcast::<JsFunction, _>(cx).map_err(|_| {
+        cx.throw_error::<_, Throw>("Uint8Array.set is not a function")
+            .unwrap_err()
+    })?;
+    let _ = set_fn.call_with(cx).this(u8).arg(src).apply::<JsValue, _>(cx);
 
     Ok(ab_obj.upcast())
 }
@@ -653,10 +802,14 @@ fn make_shared_arraybuffer_from_bytes<'a, C: Context<'a>>(
             .unwrap_err()
     })?;
 
-    for (i, b) in bytes.iter().enumerate() {
-        let n = cx.number(*b as f64);
-        let _ = u8.set(cx, i as u32, n);
-    }
+    let mut src = JsBuffer::new(cx, bytes.len())?;
+    src.as_mut_slice(cx).copy_from_slice(bytes);
+    let set_any = u8.get_value(cx, "set")?;
+    let set_fn = set_any.downcast::<JsFunction, _>(cx).map_err(|_| {
+        cx.throw_error::<_, Throw>("Uint8Array.set is not a function")
+            .unwrap_err()
+    })?;
+    let _ = set_fn.call_with(cx).this(u8).arg(src).apply::<JsValue, _>(cx);
 
     Ok(sab_obj.upcast())
 }
@@ -668,6 +821,14 @@ fn buffer_view_to_neon<'a, C: Context<'a>>(
     byte_offset: usize,
     length: usize,
 ) -> Result<Handle<'a, JsValue>, Throw> {
+    // Hot path: most message payloads are full Uint8Array byte buffers.
+    // Returning Node Buffer here avoids expensive per-byte JS property sets.
+    if kind == "Uint8Array" && byte_offset == 0 && length == bytes.len() {
+        let mut out = JsBuffer::new(cx, bytes.len())?;
+        out.as_mut_slice(cx).copy_from_slice(bytes);
+        return Ok(out.upcast());
+    }
+
     let ab_any = if kind == "SharedArrayBuffer" {
         make_shared_arraybuffer_from_bytes(cx, bytes)?
     } else {

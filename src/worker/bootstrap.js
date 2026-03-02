@@ -77,7 +77,10 @@ async function callCapturedAwait(captured, name, ...args) {
 // Unique op names to avoid collisions with built-in ops.
 const OP_HOST_CALL_SYNC = "op_denojs_worker_host_call_sync";
 const OP_HOST_CALL_ASYNC = "op_denojs_worker_host_call_async";
+const OP_HOST_CALL_SYNC_BIN = "op_denojs_worker_host_call_sync_bin";
+const OP_HOST_CALL_ASYNC_BIN = "op_denojs_worker_host_call_async_bin";
 const OP_POST_MESSAGE = "op_denojs_worker_post_message";
+const OP_POST_MESSAGE_BIN = "op_denojs_worker_post_message_bin";
 const OP_ENV_GET = "op_denojs_worker_env_get";
 const OP_ENV_SET = "op_denojs_worker_env_set";
 const OP_ENV_DELETE = "op_denojs_worker_env_delete";
@@ -86,7 +89,10 @@ const OP_ENV_TO_OBJECT = "op_denojs_worker_env_to_object";
 // Capture stable references at bootstrap time.
 const CAP_HOST_CALL_SYNC = getOpEntry(OP_HOST_CALL_SYNC);
 const CAP_HOST_CALL_ASYNC = getOpEntry(OP_HOST_CALL_ASYNC);
+const CAP_HOST_CALL_SYNC_BIN = getOpEntry(OP_HOST_CALL_SYNC_BIN);
+const CAP_HOST_CALL_ASYNC_BIN = getOpEntry(OP_HOST_CALL_ASYNC_BIN);
 const CAP_POST_MESSAGE = getOpEntry(OP_POST_MESSAGE);
+const CAP_POST_MESSAGE_BIN = getOpEntry(OP_POST_MESSAGE_BIN);
 const CAP_ENV_GET = getOpEntry(OP_ENV_GET);
 const CAP_ENV_SET = getOpEntry(OP_ENV_SET);
 const CAP_ENV_DELETE = getOpEntry(OP_ENV_DELETE);
@@ -261,6 +267,32 @@ function dehydrateArgs(args) {
   }
 }
 
+function asUint8ArrayForOp(x) {
+  try {
+    if (typeof Uint8Array === "undefined") return null;
+    if (x instanceof Uint8Array) return x;
+
+    if (typeof Buffer !== "undefined" && Buffer.isBuffer(x)) {
+      return new Uint8Array(x.buffer, x.byteOffset, x.byteLength);
+    }
+
+    if (typeof ArrayBuffer !== "undefined" && x instanceof ArrayBuffer) {
+      return new Uint8Array(x);
+    }
+
+    if (
+      typeof ArrayBuffer !== "undefined" &&
+      typeof ArrayBuffer.isView === "function" &&
+      ArrayBuffer.isView(x)
+    ) {
+      return new Uint8Array(x.buffer, x.byteOffset, x.byteLength);
+    }
+  } catch {
+    // ignore
+  }
+  return null;
+}
+
 
 function dehydrateConsoleAny(v) {
   const seen = typeof WeakSet !== "undefined" ? new WeakSet() : null;
@@ -395,6 +427,12 @@ function makeConsoleHostWrapper(fn) {
 
 function hostPostMessageImpl(msg) {
   try {
+    const bin = asUint8ArrayForOp(msg);
+    if (bin && CAP_POST_MESSAGE_BIN && CAP_POST_MESSAGE_BIN.kind !== "missing") {
+      callCapturedRaw(CAP_POST_MESSAGE_BIN, OP_POST_MESSAGE_BIN, bin);
+      return undefined;
+    }
+
     const payload = dehydrateAny(msg);
     callCapturedRaw(CAP_POST_MESSAGE, OP_POST_MESSAGE, payload);
   } catch {
@@ -548,12 +586,50 @@ function handleHostReply(res) {
   throw globalThis.__hydrate(r.error);
 }
 
-async function hostCallAsync(funcId, payloadArgs) {
-  const res = await callCapturedAwait(CAP_HOST_CALL_ASYNC, OP_HOST_CALL_ASYNC, funcId, payloadArgs);
+async function hostCallAsync(funcId, payloadArgs, rawArgs) {
+  const maybeBin =
+    Array.isArray(rawArgs) && rawArgs.length === 1
+      ? asUint8ArrayForOp(rawArgs[0])
+      : null;
+
+  if (maybeBin && CAP_HOST_CALL_ASYNC_BIN && CAP_HOST_CALL_ASYNC_BIN.kind !== "missing") {
+    const res = await callCapturedAwait(
+      CAP_HOST_CALL_ASYNC_BIN,
+      OP_HOST_CALL_ASYNC_BIN,
+      funcId,
+      maybeBin
+    );
+    return handleHostReply(res);
+  }
+
+  const res = await callCapturedAwait(
+    CAP_HOST_CALL_ASYNC,
+    OP_HOST_CALL_ASYNC,
+    funcId,
+    payloadArgs
+  );
   return handleHostReply(res);
 }
 
-function hostCallSync(funcId, payloadArgs) {
+function hostCallSync(funcId, payloadArgs, rawArgs) {
+  const maybeBin =
+    Array.isArray(rawArgs) && rawArgs.length === 1
+      ? asUint8ArrayForOp(rawArgs[0])
+      : null;
+
+  if (maybeBin && CAP_HOST_CALL_SYNC_BIN && CAP_HOST_CALL_SYNC_BIN.kind !== "missing") {
+    const out = callCapturedRaw(
+      CAP_HOST_CALL_SYNC_BIN,
+      OP_HOST_CALL_SYNC_BIN,
+      funcId,
+      maybeBin
+    );
+    if (isThenable(out)) {
+      return out.then((res) => handleHostReply(res));
+    }
+    return handleHostReply(out);
+  }
+
   const out = callCapturedRaw(CAP_HOST_CALL_SYNC, OP_HOST_CALL_SYNC, funcId, payloadArgs);
   if (isThenable(out)) {
     return out.then((res) => handleHostReply(res));
@@ -787,16 +863,16 @@ globalThis.__hydrate = function (v) {
     if (isAsync) {
       fn = async (...args) => {
         const payloadArgs = dehydrateArgs(args);
-        return await hostCallAsync(id, payloadArgs);
+        return await hostCallAsync(id, payloadArgs, args);
       };
     } else {
       fn = (...args) => {
         const payloadArgs = dehydrateArgs(args);
         try {
-          return hostCallSync(id, payloadArgs);
+          return hostCallSync(id, payloadArgs, args);
         } catch (e) {
           if (isSyncReturnedPromiseError(e)) {
-            return hostCallAsync(id, payloadArgs);
+            return hostCallAsync(id, payloadArgs, args);
           }
           throw e;
         }

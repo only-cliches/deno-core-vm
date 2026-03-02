@@ -1,4 +1,4 @@
-use deno_runtime::deno_core::{OpState, op2};
+use deno_runtime::deno_core::{JsBuffer, OpState, op2};
 use tokio::sync::oneshot;
 
 use crate::bridge::types::JsValueBridge;
@@ -15,6 +15,15 @@ fn env_state_from_state(state: &OpState) -> Option<&EnvRuntimeState> {
     state.try_borrow::<EnvRuntimeState>()
 }
 
+fn bytes_to_u8_bridge(bytes: &[u8]) -> JsValueBridge {
+    JsValueBridge::BufferView {
+        kind: "Uint8Array".into(),
+        bytes: bytes.to_vec(),
+        byte_offset: 0,
+        length: bytes.len(),
+    }
+}
+
 // Worker -> Node: hostPostMessage() op
 #[op2]
 pub fn op_denojs_worker_post_message(state: &mut OpState, #[serde] msg: serde_json::Value) -> bool {
@@ -23,6 +32,17 @@ pub fn op_denojs_worker_post_message(state: &mut OpState, #[serde] msg: serde_js
     };
 
     let value: JsValueBridge = crate::bridge::wire::from_wire_json(msg);
+    ctx.node_tx.try_send(NodeMsg::EmitMessage { value }).is_ok()
+}
+
+// Worker -> Node: hostPostMessage() binary fast path
+#[op2]
+pub fn op_denojs_worker_post_message_bin(state: &mut OpState, #[buffer] msg: JsBuffer) -> bool {
+    let Some(ctx) = ctx_from_state(state) else {
+        return false;
+    };
+
+    let value = bytes_to_u8_bridge(&msg);
     ctx.node_tx.try_send(NodeMsg::EmitMessage { value }).is_ok()
 }
 
@@ -82,6 +102,58 @@ pub fn op_denojs_worker_host_call_sync(
     }
 }
 
+// Worker -> Node: host function call (sync, single Uint8Array arg)
+#[op2]
+#[serde]
+pub fn op_denojs_worker_host_call_sync_bin(
+    state: &mut OpState,
+    #[smi] func_id: i32,
+    #[buffer] arg: JsBuffer,
+) -> serde_json::Value {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let Some(ctx) = ctx_from_state(state) else {
+        return serde_json::json!({
+            "ok": false,
+            "error": err_wire("OpStateError", "WorkerOpContext missing in OpState")
+        });
+    };
+
+    let bridged_args = vec![bytes_to_u8_bridge(&arg)];
+    let (tx, rx) = mpsc::channel::<Result<JsValueBridge, JsValueBridge>>();
+
+    if ctx
+        .node_tx
+        .try_send(NodeMsg::InvokeHostFunctionSync {
+            func_id: func_id as usize,
+            args: bridged_args,
+            reply: tx,
+        })
+        .is_err()
+    {
+        return serde_json::json!({
+            "ok": false,
+            "error": err_wire("HostFunctionError", "Node channel full or closed")
+        });
+    }
+
+    let reply = match rx.recv_timeout(Duration::from_secs(5)) {
+        Ok(v) => v,
+        Err(_) => {
+            return serde_json::json!({
+                "ok": false,
+                "error": err_wire("HostFunctionError", "Sync host call timed out")
+            });
+        }
+    };
+
+    match reply {
+        Ok(v) => serde_json::json!({ "ok": true, "value": ok_wire(v) }),
+        Err(e) => serde_json::json!({ "ok": false, "error": ok_wire(e) }),
+    }
+}
+
 // Worker -> Node: host function call (async)
 #[op2(async(lazy))]
 #[serde]
@@ -105,6 +177,59 @@ pub async fn op_denojs_worker_host_call_async(
         .map(crate::bridge::wire::from_wire_json)
         .collect::<Vec<_>>();
 
+    let (tx, rx) = oneshot::channel::<Result<JsValueBridge, JsValueBridge>>();
+
+    if ctx
+        .node_tx
+        .send(NodeMsg::InvokeHostFunctionAsync {
+            func_id: func_id as usize,
+            args: bridged_args,
+            reply: tx,
+        })
+        .await
+        .is_err()
+    {
+        return serde_json::json!({
+            "ok": false,
+            "error": err_wire("HostFunctionError", "Node channel closed")
+        });
+    }
+
+    let reply = match rx.await {
+        Ok(v) => v,
+        Err(_) => {
+            return serde_json::json!({
+                "ok": false,
+                "error": err_wire("HostFunctionError", "Async reply dropped")
+            });
+        }
+    };
+
+    match reply {
+        Ok(v) => serde_json::json!({ "ok": true, "value": ok_wire(v) }),
+        Err(e) => serde_json::json!({ "ok": false, "error": ok_wire(e) }),
+    }
+}
+
+// Worker -> Node: host function call (async, single Uint8Array arg)
+#[op2(async(lazy))]
+#[serde]
+pub async fn op_denojs_worker_host_call_async_bin(
+    state: std::rc::Rc<std::cell::RefCell<OpState>>,
+    #[smi] func_id: i32,
+    #[buffer] arg: JsBuffer,
+) -> serde_json::Value {
+    let ctx = match state.borrow().try_borrow::<WorkerOpContext>() {
+        Some(v) => v.clone(),
+        None => {
+            return serde_json::json!({
+                "ok": false,
+                "error": err_wire("OpStateError", "WorkerOpContext missing in OpState")
+            });
+        }
+    };
+
+    let bridged_args = vec![bytes_to_u8_bridge(&arg)];
     let (tx, rx) = oneshot::channel::<Result<JsValueBridge, JsValueBridge>>();
 
     if ctx

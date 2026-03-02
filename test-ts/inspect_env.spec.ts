@@ -107,11 +107,10 @@ describe("inspect + envFile", () => {
     }
   });
 
-  test("env option injects values at startup (no Node process env bridging)", async () => {
+  test("env option injects values at startup and auto-enables env permission", async () => {
     const key = `TEST_ENV_${Date.now()}`;
     const dw = new DenoWorker({
       env: { [key]: "from-config" },
-      permissions: { env: true },
     });
 
     try {
@@ -229,7 +228,7 @@ describe("inspect + envFile", () => {
     }
   });
 
-  test("envFile does not bypass env permissions", async () => {
+  test("envFile auto-enables env permission (even if env:false is provided)", async () => {
     const root = await mkTempDir("denojs-worker-envfile-perms-");
     const envPath = path.join(root, ".env");
 
@@ -243,7 +242,7 @@ describe("inspect + envFile", () => {
     });
 
     try {
-      await expect(dw.eval(`Deno.env.get("${key}")`)).rejects.toBeTruthy();
+      await expect(dw.eval(`Deno.env.get("${key}")`)).resolves.toBe("secret");
     } finally {
       if (!dw.isClosed()) await dw.close();
       await rmRF(root);

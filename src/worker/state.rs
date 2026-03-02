@@ -242,6 +242,23 @@ fn load_dotenv_file_strict(
     Ok(map)
 }
 
+fn ensure_env_permission_enabled(
+    permissions: Option<serde_json::Value>,
+    env_is_configured: bool,
+) -> Option<serde_json::Value> {
+    if !env_is_configured {
+        return permissions;
+    }
+
+    let mut out = match permissions {
+        Some(serde_json::Value::Object(map)) => map,
+        _ => serde_json::Map::new(),
+    };
+
+    out.insert("env".to_string(), serde_json::Value::Bool(true));
+    Some(serde_json::Value::Object(out))
+}
+
 impl WorkerCreateOptions {
     pub fn from_neon<'a>(cx: &mut FunctionContext<'a>, idx: i32) -> Result<Self, Throw> {
         let mut out = Self {
@@ -556,7 +573,48 @@ impl WorkerCreateOptions {
             }
         }
 
+        out.runtime_options.permissions = ensure_env_permission_enabled(
+            out.runtime_options.permissions.take(),
+            out.runtime_options.env.is_some(),
+        );
+
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ensure_env_permission_enabled;
+
+    #[test]
+    fn ensure_env_permission_enabled_keeps_permissions_when_env_not_configured() {
+        let original = Some(serde_json::json!({ "read": true, "env": false }));
+        let out = ensure_env_permission_enabled(original.clone(), false);
+        assert_eq!(out, original);
+    }
+
+    #[test]
+    fn ensure_env_permission_enabled_sets_env_true_when_missing() {
+        let out = ensure_env_permission_enabled(Some(serde_json::json!({ "read": true })), true);
+        assert_eq!(out, Some(serde_json::json!({ "read": true, "env": true })));
+    }
+
+    #[test]
+    fn ensure_env_permission_enabled_overrides_explicit_env_false() {
+        let out = ensure_env_permission_enabled(
+            Some(serde_json::json!({ "env": false, "write": ["./tmp"] })),
+            true,
+        );
+        assert_eq!(out, Some(serde_json::json!({ "env": true, "write": ["./tmp"] })));
+    }
+
+    #[test]
+    fn ensure_env_permission_enabled_handles_non_object_permissions() {
+        let out = ensure_env_permission_enabled(Some(serde_json::Value::Bool(true)), true);
+        assert_eq!(out, Some(serde_json::json!({ "env": true })));
+
+        let out_none = ensure_env_permission_enabled(None, true);
+        assert_eq!(out_none, Some(serde_json::json!({ "env": true })));
     }
 }
 

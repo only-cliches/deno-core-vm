@@ -175,7 +175,7 @@ export type DenoWorkerInspectOption =
  *
  * Notes:
  * - `env` overrides `envFile` when both are provided.
- * - runtime code still needs `permissions.env` to read env values via `Deno.env.*`.
+ * - using `env` or `envFile` automatically enables runtime env permission.
  */
 export type DenoWorkerEnvOption = undefined | string | Record<string, string>;
 
@@ -311,6 +311,7 @@ export type DenoWorkerOptions = {
 	 * - `string`: load explicit dotenv path
 	 *
 	 * Ignored when `env` is explicitly provided.
+	 * Using `envFile` automatically enables runtime env permission.
 	 */
 	envFile?: boolean | string;
 

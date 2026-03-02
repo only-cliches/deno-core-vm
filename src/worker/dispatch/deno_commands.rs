@@ -120,11 +120,33 @@ async fn handle_memory_msg(
 }
 
 fn handle_post_message_msg(worker: &mut MainWorker, value: JsValueBridge) -> bool {
-    let payload = serde_json::to_string(&crate::bridge::wire::to_wire_json(&value))
-        .unwrap_or_else(|_| "null".into());
-    let script = format!("globalThis.__dispatchNodeMessage(globalThis.__hydrate({payload}))");
+    let dispatched = {
+        deno_core::scope!(scope, &mut worker.js_runtime);
+        let Some(key) = v8::String::new(scope, "__dispatchNodeMessage") else {
+            return false;
+        };
+        let ctx = scope.get_current_context();
+        let global = ctx.global(scope);
+        let Some(fn_any) = global.get(scope, key.into()) else {
+            return false;
+        };
+        let Ok(dispatch_fn) = v8::Local::<v8::Function>::try_from(fn_any) else {
+            return false;
+        };
 
-    let _ = worker.js_runtime.execute_script("<postMessage>", script);
+        let Ok(arg) = crate::bridge::v8_codec::to_v8(scope, &value) else {
+            return false;
+        };
+
+        dispatch_fn.call(scope, global.into(), &[arg]).is_some()
+    };
+
+    if !dispatched {
+        let payload = serde_json::to_string(&crate::bridge::wire::to_wire_json(&value))
+            .unwrap_or_else(|_| "null".into());
+        let script = format!("globalThis.__dispatchNodeMessage(globalThis.__hydrate({payload}))");
+        let _ = worker.js_runtime.execute_script("<postMessage>", script);
+    }
     false
 }
 

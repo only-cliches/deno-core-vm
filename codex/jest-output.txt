@@ -1,20 +1,16 @@
-PASS test-ts/console.spec.ts
-  console option
-    ✓ console: false disables all methods (85 ms)
-    ✓ console: node routes logs to Node console methods (smoke) (30 ms)
-    ✓ console: per-method routing supports sync handlers (26 ms)
-    ✓ console: per-method routing supports async handlers (fire-and-forget) (51 ms)
-    ✓ console: Date argument round-trips (top-level) (26 ms)
-    ✓ console: setting warn:false disables warn but keeps others (26 ms)
-    ✓ console callback errors are swallowed (sync) (32 ms)
-    ✓ console callback errors are swallowed (async rejection) (24 ms)
-    ✓ console argument dehydration: BigInt becomes string, symbol/function become null (25 ms)
-    ✓ console argument dehydration: circular objects are truncated (26 ms)
-    ✓ console argument dehydration: Uint8Array becomes Buffer in Node callback (25 ms)
-    ✓ console argument dehydration: nested Date markers are not automatically rehydrated (25 ms)
+PASS test-ts/inspect_env.spec.ts
+  inspect + envFile
+    ✓ inspect option starts inspector server (basic connect) (9 ms)
+    ✓ inspect: host=localhost binds to 127.0.0.1 (2 ms)
+    ✓ env option injects values at startup and auto-enables env permission (359 ms)
+    ✓ envFile true loads .env from cwd upward (81 ms)
+    ✓ envFile string loads from explicit path (48 ms)
+    ✓ envFile values are isolated to the worker that loaded them (56 ms)
+    ✓ envFile: parses export prefix, quotes, and inline comments (42 ms)
+    ✓ envFile auto-enables env permission (even if env:false is provided) (42 ms)
 
 Test Suites: 1 passed, 1 total
-Tests:       12 passed, 12 total
+Tests:       8 passed, 8 total
 Snapshots:   0 total
-Time:        1.329 s, estimated 2 s
-Ran all test suites matching /test-ts\/console.spec.ts/i.
+Time:        2.562 s, estimated 3 s
+Ran all test suites matching /test-ts\/inspect_env.spec.ts/i.
