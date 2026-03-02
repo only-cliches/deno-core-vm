@@ -5,7 +5,7 @@ import path from "node:path";
 
 import { DenoWorker } from "../src/index";
 
-function makeTempDir(prefix = "deno-core-vm-imports-") {
+function makeTempDir(prefix = "deno-director-imports-") {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 }
 

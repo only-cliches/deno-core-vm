@@ -4,7 +4,7 @@ import * as os from "os";
 import * as path from "path";
 
 async function withTempDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "deno-core-vm-"));
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "deno-director-"));
   try {
     return await fn(dir);
   } finally {

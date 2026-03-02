@@ -1,5 +1,5 @@
 {
-  "name": "deno-core-vm",
+  "name": "deno-director",
   "version": "0.8.0",
   "description": "Run a Deno Core worker from NodeJS",
   "main": "index.js",
