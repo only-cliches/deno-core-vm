@@ -1,7 +1,7 @@
 use lazy_static::lazy_static;
 use neon::prelude::*;
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::RwLock;
 use std::sync::atomic::AtomicUsize;
 use tokio::sync::mpsc::error::TrySendError;
 
@@ -15,7 +15,7 @@ use crate::worker::messages::DenoMsg;
 use crate::worker::state::WorkerHandle;
 
 lazy_static! {
-    pub static ref WORKERS: Mutex<HashMap<usize, WorkerHandle>> = Mutex::new(HashMap::new());
+    pub static ref WORKERS: RwLock<HashMap<usize, WorkerHandle>> = RwLock::new(HashMap::new());
     pub(crate) static ref NEXT_ID: AtomicUsize = AtomicUsize::new(1);
 }
 
@@ -51,7 +51,7 @@ pub(crate) fn try_send_deno_msg_or_reject(tx: &tokio::sync::mpsc::Sender<DenoMsg
 
 pub(crate) fn deno_tx_for_worker(worker_id: usize) -> Option<tokio::sync::mpsc::Sender<DenoMsg>> {
     WORKERS
-        .lock()
+        .read()
         .ok()
         .and_then(|map| map.get(&worker_id).map(|w| w.deno_tx.clone()))
 }

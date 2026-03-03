@@ -1202,6 +1202,19 @@ export class DenoWorker {
     }
 
     /**
+     * Actual inspector port bound by the runtime.
+     *
+     * Returns `undefined` when inspector is disabled or not bound.
+     */
+    get inspectPort(): number | undefined {
+        const v: any = (this.native as any).inspectPort;
+        if (typeof v === "number" && Number.isFinite(v) && v > 0) {
+            return Math.trunc(v);
+        }
+        return undefined;
+    }
+
+    /**
      * Gracefully close runtime.
      *
      * - default close waits for close command to be processed.

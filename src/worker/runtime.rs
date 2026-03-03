@@ -206,6 +206,11 @@ pub fn spawn_worker_thread(
                 let stop2 = stop.clone();
 
                 let port = listener.local_addr().map(|a| a.port()).unwrap_or(ins.port);
+                if let Ok(map) = crate::WORKERS.read() {
+                    if let Some(w) = map.get(&worker_id) {
+                        w.inspect_bound_port.store(port, Ordering::SeqCst);
+                    }
+                }
 
                 let handle = std::thread::spawn(move || {
                     fn write_http(mut stream: &std::net::TcpStream, status: &str, body: &str) {
@@ -280,7 +285,7 @@ pub fn spawn_worker_thread(
 
         let local = tokio::task::LocalSet::new();
         local.block_on(&rt, async move {
-            let Some((node_tx, eval_sync_active)) = (match crate::WORKERS.lock() {
+            let Some((node_tx, eval_sync_active)) = (match crate::WORKERS.read() {
                 Ok(map) => map
                     .get(&worker_id)
                     .map(|w| (w.node_tx.clone(), w.eval_sync_active.clone())),
@@ -371,7 +376,7 @@ pub fn spawn_worker_thread(
             }
 
             if worker.run_event_loop(false).await.is_err() {
-                if let Ok(map) = crate::WORKERS.lock() {
+                if let Ok(map) = crate::WORKERS.read() {
                     if let Some(w) = map.get(&worker_id) {
                         w.closed.store(true, Ordering::SeqCst);
                     }
@@ -401,7 +406,7 @@ pub fn spawn_worker_thread(
 
             if let Some(url) = startup_url.as_ref() {
                 if worker.execute_side_module(url).await.is_err() {
-                    if let Ok(map) = crate::WORKERS.lock() {
+                    if let Ok(map) = crate::WORKERS.read() {
                         if let Some(w) = map.get(&worker_id) {
                             w.closed.store(true, Ordering::SeqCst);
                         }
@@ -410,7 +415,7 @@ pub fn spawn_worker_thread(
                 }
 
                 if worker.run_event_loop(false).await.is_err() {
-                    if let Ok(map) = crate::WORKERS.lock() {
+                    if let Ok(map) = crate::WORKERS.read() {
                         if let Some(w) = map.get(&worker_id) {
                             w.closed.store(true, Ordering::SeqCst);
                         }

@@ -5,7 +5,7 @@ use neon::prelude::*;
 use neon::result::Throw;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
@@ -622,7 +622,7 @@ impl WorkerCreateOptions {
                 if let Ok(pv) = o.get::<JsValue, _, _>(cx, "port") {
                     if let Ok(pn) = pv.downcast::<JsNumber, _>(cx) {
                         let n = pn.value(cx);
-                        if n.is_finite() && n > 0.0 && n <= 65535.0 {
+                        if n.is_finite() && n >= 0.0 && n <= 65535.0 {
                             port = n as u16;
                         }
                     }
@@ -849,6 +849,7 @@ pub struct WorkerHandle {
     pub pending: Arc<PendingRequests>,
     pub last_stats: Arc<Mutex<Option<ExecStats>>>,
     pub eval_sync_active: Arc<AtomicBool>,
+    pub inspect_bound_port: Arc<AtomicU16>,
 }
 
 impl WorkerHandle {
@@ -871,6 +872,7 @@ impl WorkerHandle {
             pending: Arc::new(PendingRequests::default()),
             last_stats: Arc::new(Mutex::new(None)),
             eval_sync_active: Arc::new(AtomicBool::new(false)),
+            inspect_bound_port: Arc::new(AtomicU16::new(0)),
         };
 
         (handle, deno_rx, node_rx)

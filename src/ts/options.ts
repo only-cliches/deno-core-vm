@@ -106,7 +106,7 @@ function normalizeInspectOption(x: unknown): unknown {
 
         if (typeof o.host === "string") out.host = o.host;
 
-        if (typeof o.port === "number" && Number.isFinite(o.port) && o.port > 0 && o.port <= 65535) {
+        if (typeof o.port === "number" && Number.isFinite(o.port) && o.port >= 0 && o.port <= 65535) {
             out.port = Math.trunc(o.port);
         }
 

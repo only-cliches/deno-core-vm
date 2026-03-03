@@ -42,7 +42,7 @@ pub fn handle_emit_close(
     }
 
     // Close event is terminal for this handle; remove from global registry.
-    if let Ok(mut map) = crate::WORKERS.lock() {
+    if let Ok(mut map) = crate::WORKERS.write() {
         let _ = map.remove(&worker_id);
     }
 

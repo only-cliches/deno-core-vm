@@ -41,7 +41,7 @@ pub async fn handle_deno_msg(
 fn handle_close_msg(worker_id: usize, deferred: crate::bridge::promise::PromiseSettler) -> bool {
     deferred.resolve_with_value_via_channel(JsValueBridge::Undefined);
 
-    if let Ok(map) = crate::WORKERS.lock() {
+    if let Ok(map) = crate::WORKERS.read() {
         if let Some(w) = map.get(&worker_id) {
             w.closed.store(true, std::sync::atomic::Ordering::SeqCst);
         }
@@ -60,7 +60,7 @@ fn handle_close_msg(worker_id: usize, deferred: crate::bridge::promise::PromiseS
     }
 
     if try_direct_cleanup {
-        let (channel, on_close_cb_opt) = match crate::WORKERS.lock() {
+        let (channel, on_close_cb_opt) = match crate::WORKERS.read() {
             Ok(map) => {
                 if let Some(w) = map.get(&worker_id) {
                     (w.channel.clone(), w.callbacks.on_close.clone())
@@ -79,7 +79,7 @@ fn handle_close_msg(worker_id: usize, deferred: crate::bridge::promise::PromiseS
                 let _ = cb.call(&mut cx, this, &[]);
             }
 
-            if let Ok(mut map) = crate::WORKERS.lock() {
+            if let Ok(mut map) = crate::WORKERS.write() {
                 let _ = map.remove(&wid);
             }
 
@@ -270,7 +270,7 @@ async fn send_node_msg_or_reject(node_tx: &mpsc::Sender<NodeMsg>, msg: NodeMsg) 
 
 fn get_node_tx(worker_id: usize) -> Option<mpsc::Sender<NodeMsg>> {
     crate::WORKERS
-        .lock()
+        .read()
         .ok()?
         .get(&worker_id)
         .map(|w| w.node_tx.clone())

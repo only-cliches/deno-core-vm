@@ -13,11 +13,112 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
+use std::sync::{OnceLock, mpsc};
 use std::{
+    collections::HashMap,
     hash::{Hash, Hasher},
     path::PathBuf,
 };
 use std::time::{Duration, Instant};
+use std::{sync::atomic::AtomicU64, thread};
+
+enum EvalTimerCmd {
+    Arm {
+        timer_id: u64,
+        deadline: Instant,
+        cancel: Arc<AtomicBool>,
+        isolate_handle: v8::IsolateHandle,
+    },
+    Disarm {
+        timer_id: u64,
+    },
+}
+
+#[derive(Clone)]
+struct EvalTimerService {
+    tx: mpsc::Sender<EvalTimerCmd>,
+    next_timer_id: Arc<AtomicU64>,
+}
+
+impl EvalTimerService {
+    fn global() -> &'static EvalTimerService {
+        static TIMER: OnceLock<EvalTimerService> = OnceLock::new();
+        TIMER.get_or_init(|| {
+            let (tx, rx) = mpsc::channel::<EvalTimerCmd>();
+            let service = EvalTimerService {
+                tx,
+                next_timer_id: Arc::new(AtomicU64::new(1)),
+            };
+
+            thread::spawn(move || {
+                let mut timers: HashMap<u64, (Instant, Arc<AtomicBool>, v8::IsolateHandle)> =
+                    HashMap::new();
+
+                loop {
+                    let now = Instant::now();
+                    let due_ids: Vec<u64> = timers
+                        .iter()
+                        .filter_map(|(id, (deadline, _, _))| if *deadline <= now { Some(*id) } else { None })
+                        .collect();
+
+                    for id in due_ids {
+                        if let Some((_deadline, cancel, isolate_handle)) = timers.remove(&id) {
+                            if !cancel.load(Ordering::SeqCst) {
+                                isolate_handle.terminate_execution();
+                            }
+                        }
+                    }
+
+                    let wait = timers
+                        .values()
+                        .map(|(deadline, _, _)| {
+                            if *deadline > now {
+                                *deadline - now
+                            } else {
+                                Duration::from_millis(0)
+                            }
+                        })
+                        .min()
+                        .unwrap_or(Duration::from_secs(3600));
+
+                    match rx.recv_timeout(wait) {
+                        Ok(EvalTimerCmd::Arm {
+                            timer_id,
+                            deadline,
+                            cancel,
+                            isolate_handle,
+                        }) => {
+                            timers.insert(timer_id, (deadline, cancel, isolate_handle));
+                        }
+                        Ok(EvalTimerCmd::Disarm { timer_id }) => {
+                            timers.remove(&timer_id);
+                        }
+                        Err(mpsc::RecvTimeoutError::Timeout) => {}
+                        Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                    }
+                }
+            });
+
+            service
+        })
+    }
+
+    fn arm(&self, timeout_ms: u64, cancel: Arc<AtomicBool>, isolate_handle: v8::IsolateHandle) -> u64 {
+        let timer_id = self.next_timer_id.fetch_add(1, Ordering::Relaxed);
+        let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+        let _ = self.tx.send(EvalTimerCmd::Arm {
+            timer_id,
+            deadline,
+            cancel,
+            isolate_handle,
+        });
+        timer_id
+    }
+
+    fn disarm(&self, timer_id: u64) {
+        let _ = self.tx.send(EvalTimerCmd::Disarm { timer_id });
+    }
+}
 
 fn transpile_ts_enabled(limits: &RuntimeLimits) -> bool {
     limits
@@ -352,17 +453,8 @@ pub async fn eval_in_runtime(
     let cancel = Arc::new(AtomicBool::new(false));
     let effective_max_eval_ms = options.max_eval_ms.or(limits.max_eval_ms);
 
-    // Termination is driven from a side thread because V8 termination needs to
-    // happen even when the runtime is inside CPU-bound JS work.
-    let timeout_thread = effective_max_eval_ms.map(|ms| {
-        let cancel = cancel.clone();
-        let isolate_handle = isolate_handle.clone();
-        std::thread::spawn(move || {
-            std::thread::park_timeout(Duration::from_millis(ms));
-            if !cancel.load(Ordering::SeqCst) {
-                isolate_handle.terminate_execution();
-            }
-        })
+    let timeout_id = effective_max_eval_ms.map(|ms| {
+        EvalTimerService::global().arm(ms, cancel.clone(), isolate_handle.clone())
     });
 
     let result = if options.is_module {
@@ -372,9 +464,8 @@ pub async fn eval_in_runtime(
     };
 
     cancel.store(true, Ordering::SeqCst);
-    if let Some(h) = timeout_thread {
-        h.thread().unpark();
-        let _ = h.join();
+    if let Some(id) = timeout_id {
+        EvalTimerService::global().disarm(id);
     }
 
     // Defensive double-cancel:
@@ -455,12 +546,18 @@ async fn eval_module(
     worker
         .execute_side_module(&url)
         .await
-        .map_err(|e| JsValueBridge::any_error_to_bridge(e.into()))?;
+        .map_err(|e| {
+            reg.remove(&spec);
+            JsValueBridge::any_error_to_bridge(e.into())
+        })?;
 
     worker
         .run_event_loop(false)
         .await
-        .map_err(|e| JsValueBridge::any_error_to_bridge(e.into()))?;
+        .map_err(|e| {
+            reg.remove(&spec);
+            JsValueBridge::any_error_to_bridge(e.into())
+        })?;
 
     let decide_script = format!(
         r#"(async () => {{

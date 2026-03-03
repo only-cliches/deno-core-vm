@@ -643,8 +643,8 @@ pub fn from_v8<'s, 'p>(
     // Object/array fallback order matters:
     // 1) __dehydrate: handles recursive graphs and special JS objects safely.
     // 2) serde_v8: handles plain JSON-like objects without function calls.
-    // 3) JSON.stringify: permissive last-resort for odd host objects.
-    // 4) V8 structured clone serializer as final binary fallback.
+    // 3) V8 structured clone serializer for high-fidelity, fast binary transfer.
+    // 4) JSON.stringify: permissive last-resort for odd host objects.
     if value.is_object() || value.is_array() {
         if let Some(j) = try_global_dehydrate(ps, value) {
             return Ok(wire::from_wire_json(j));
@@ -654,11 +654,8 @@ pub fn from_v8<'s, 'p>(
             return Ok(wire::from_wire_json(j));
         }
 
-        if let Some(j) = try_json_stringify(ps, value) {
-            return Ok(wire::from_wire_json(j));
-        }
-
-        // Fallback to V8 serializer for structured clone types.
+        // Prefer V8 serializer before JSON.stringify so large/complex objects
+        // avoid stringification overhead and preserve structured-clone fidelity.
         struct S;
         impl v8::ValueSerializerImpl for S {
             fn throw_data_clone_error<'a>(
@@ -676,6 +673,10 @@ pub fn from_v8<'s, 'p>(
         let ctx = ps.get_current_context();
         if s.write_value(ctx, value).unwrap_or(false) {
             return Ok(JsValueBridge::V8Serialized(s.release()));
+        }
+
+        if let Some(j) = try_json_stringify(ps, value) {
+            return Ok(wire::from_wire_json(j));
         }
     }
 

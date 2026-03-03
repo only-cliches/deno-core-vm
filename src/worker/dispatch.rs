@@ -13,7 +13,7 @@ pub use deno_commands::handle_deno_msg;
 pub fn dispatch_node_msg(worker_id: usize, msg: NodeMsg) {
     // Snapshot callback/function roots under lock, then release the lock before
     // scheduling onto the Neon channel to avoid lock inversion with callbacks.
-    let (channel, handle_snapshot) = match crate::WORKERS.lock() {
+    let (channel, handle_snapshot) = match crate::WORKERS.read() {
         Ok(map) => {
             if let Some(w) = map.get(&worker_id) {
                 (

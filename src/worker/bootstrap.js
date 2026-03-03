@@ -692,14 +692,7 @@ function generateSecureRandomStreamKey() {
   } catch {
     // ignore
   }
-  try {
-    console.warn(
-      "[deno-director] hostStreams.create() crypto keygen unavailable; falling back to non-cryptographic key generation"
-    );
-  } catch {
-    // ignore
-  }
-  return `${Date.now().toString(16)}-${Math.random().toString(16).slice(2)}`;
+  throw new Error("Secure random stream key generation is unavailable (crypto API missing)");
 }
 
 function registerStream(name, id) {

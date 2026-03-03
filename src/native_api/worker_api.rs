@@ -39,7 +39,7 @@ fn register_host_fn<'a>(
     func: Handle<'a, JsFunction>,
 ) -> Option<usize> {
     let rooted = func.root(cx);
-    let mut map = WORKERS.lock().ok()?;
+    let mut map = WORKERS.write().ok()?;
     let w = map.get_mut(&worker_id)?;
     Some(w.register_global_fn(rooted))
 }
@@ -429,7 +429,7 @@ pub fn create_worker(mut cx: FunctionContext) -> JsResult<JsObject> {
 
     {
         let mut map = WORKERS
-            .lock()
+            .write()
             .map_err(|e| cx.throw_error::<_, ()>(e.to_string()).unwrap_err())?;
         map.insert(id, handle.clone());
     }
@@ -443,7 +443,7 @@ pub fn create_worker(mut cx: FunctionContext) -> JsResult<JsObject> {
                     if let Ok(f) = v.downcast::<JsFunction, _>(&mut cx) {
                         let rooted = f.root(&mut cx);
 
-                        if let Ok(mut map) = WORKERS.lock() {
+                        if let Ok(mut map) = WORKERS.write() {
                             if let Some(w) = map.get_mut(&id) {
                                 w.callbacks.imports = Some(Arc::new(rooted));
                             }
@@ -546,7 +546,7 @@ pub fn create_worker(mut cx: FunctionContext) -> JsResult<JsObject> {
             let cb = cx.argument::<JsFunction>(1)?.root(&mut cx);
 
             let mut map = WORKERS
-                .lock()
+                .write()
                 .map_err(|e| cx.throw_error::<_, ()>(e.to_string()).unwrap_err())?;
             let worker = map
                 .get_mut(&id2)
@@ -569,7 +569,7 @@ pub fn create_worker(mut cx: FunctionContext) -> JsResult<JsObject> {
         let f = JsFunction::new(&mut cx, move |mut cx| {
             let closed = {
                 let map = WORKERS
-                    .lock()
+                    .read()
                     .map_err(|e| cx.throw_error::<_, ()>(e.to_string()).unwrap_err())?;
                 map.get(&id2)
                     .map(|w| w.closed.load(Ordering::SeqCst))
@@ -618,7 +618,7 @@ pub fn create_worker(mut cx: FunctionContext) -> JsResult<JsObject> {
 
             let tx_and_value = {
                 let mut map = WORKERS
-                    .lock()
+                    .write()
                     .map_err(|e| cx.throw_error::<_, ()>(e.to_string()).unwrap_err())?;
                 let worker = map
                     .get_mut(&id2)
@@ -690,7 +690,7 @@ pub fn create_worker(mut cx: FunctionContext) -> JsResult<JsObject> {
 
             let eval_sync_active = {
                 let map = WORKERS
-                    .lock()
+                    .read()
                     .map_err(|e| cx.throw_error::<_, ()>(e.to_string()).unwrap_err())?;
                 map.get(&id2)
                     .map(|w| w.eval_sync_active.clone())
@@ -726,7 +726,7 @@ pub fn create_worker(mut cx: FunctionContext) -> JsResult<JsObject> {
                 .map_err(|e| cx.throw_error::<_, ()>(e.to_string()).unwrap_err())?;
 
             {
-                if let Ok(mut map) = WORKERS.lock() {
+                if let Ok(mut map) = WORKERS.write() {
                     if let Some(w) = map.get_mut(&id2) {
                         let stats = match &result {
                             EvalReply::Ok { stats, .. } => stats.clone(),
@@ -775,7 +775,7 @@ pub fn create_worker(mut cx: FunctionContext) -> JsResult<JsObject> {
         let getter = JsFunction::new(&mut cx, move |mut cx| -> JsResult<JsValue> {
             let stats_opt = {
                 let map = WORKERS
-                    .lock()
+                    .read()
                     .map_err(|e| cx.throw_error::<_, ()>(e.to_string()).unwrap_err())?;
 
                 map.get(&id2)
@@ -818,6 +818,48 @@ pub fn create_worker(mut cx: FunctionContext) -> JsResult<JsObject> {
             }
         }
     };
+
+    // inspectPort getter (actual bound inspector port; supports inspect.port = 0)
+    {
+        let id2 = id;
+
+        let getter = JsFunction::new(&mut cx, move |mut cx| -> JsResult<JsValue> {
+            let port_opt = {
+                let map = WORKERS
+                    .read()
+                    .map_err(|e| cx.throw_error::<_, ()>(e.to_string()).unwrap_err())?;
+                map.get(&id2)
+                    .map(|w| w.inspect_bound_port.load(Ordering::SeqCst))
+            };
+
+            match port_opt {
+                Some(port) if port > 0 => Ok(cx.number(port as f64).upcast()),
+                _ => Ok(cx.undefined().upcast()),
+            }
+        })?;
+
+        let object_ctor: Option<Handle<JsFunction>> = cx.global("Object").ok();
+        if let Some(object_ctor) = object_ctor {
+            let object_obj: Handle<JsObject> = object_ctor.upcast();
+            let define_prop: Option<Handle<JsFunction>> =
+                object_obj.get(&mut cx, "defineProperty").ok();
+
+            if let Some(define_prop) = define_prop {
+                let desc = cx.empty_object();
+                let bool_true = cx.boolean(true);
+                desc.set(&mut cx, "get", getter)?;
+                desc.set(&mut cx, "enumerable", bool_true)?;
+                desc.set(&mut cx, "configurable", bool_true)?;
+
+                let prop_name = cx.string("inspectPort");
+                let _ = define_prop.call(
+                    &mut cx,
+                    object_obj,
+                    &[api.upcast(), prop_name.upcast(), desc.upcast()],
+                );
+            }
+        }
+    }
 
     Ok(api)
 }

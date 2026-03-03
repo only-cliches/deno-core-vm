@@ -692,4 +692,6 @@ export type NativeWorker = {
 
     /** Last recorded execution stats snapshot. */
     lastExecutionStats: ExecStats;
+    /** Actual inspector port bound by runtime (undefined if inspect is disabled/unbound). */
+    inspectPort?: number;
 };

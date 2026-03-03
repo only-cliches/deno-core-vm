@@ -174,6 +174,14 @@ impl ModuleRegistry {
         Self::evict_persistent_if_needed(&mut state);
     }
 
+    pub fn remove(&self, specifier: &str) {
+        let mut state = self.state.lock().expect("modules lock");
+        state.modules.remove(specifier);
+        if let Some(i) = state.persistent_lru.iter().position(|s| s == specifier) {
+            state.persistent_lru.remove(i);
+        }
+    }
+
     pub fn get_for_load(&self, specifier: &str) -> Option<(String, ModuleType)> {
         let mut state = self.state.lock().ok()?;
         if let Some(entry) = state.modules.get_mut(specifier) {

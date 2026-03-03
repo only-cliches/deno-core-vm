@@ -19,6 +19,7 @@ All notable changes to this project will be documented in this file.
 - Added `examples/` directory with runnable usage examples, including `examples/11-streams.ts`.
 - Added test harness + cleanup utilities for Jest (`test-ts/helpers.worker-harness.ts`, `test-ts/jest.setup.ts`).
 - Added guard script to block new `as any` usage in tests (`codex/check-test-any.sh`).
+- Added runtime `inspectPort` surface to expose the actual bound inspector port (including ephemeral assignment when `inspect.port = 0`).
 
 ### Changed
 - Migrated remote module toggle from `moduleLoader.denoRemote` to `moduleLoader.httpsResolve`.
@@ -38,6 +39,10 @@ All notable changes to this project will be documented in this file.
 - Changed env permission behavior for configured env maps:
   - if `permissions.env` is missing or `[]`, it is populated with env-map keys,
   - if `permissions.env` is already set, it is left unchanged.
+- Replaced per-eval timeout thread spawning with a dedicated timer watchdog thread and channel-based scheduling.
+- Switched global worker registry locking from `Mutex<HashMap<...>>` to `RwLock<HashMap<...>>` to reduce read-path contention.
+- Reordered V8 object serialization fallback to prefer structured clone (`ValueSerializer`) before JSON stringification.
+- Updated inspect option normalization/parsing to allow `port: 0` for OS-assigned ephemeral debugging ports.
 
 ### Fixed
 - Fixed promise settlement channel behavior to avoid dropped completions under load (`send` instead of non-blocking `try_send`).
@@ -49,6 +54,7 @@ All notable changes to this project will be documented in this file.
 - Fixed timeout helper leaks in tests by clearing timers in `finally`.
 - Fixed example scripts and local import paths so examples run from this repository.
 - Fixed outdated env permission test expectations to match the new explicit-permissions behavior.
+- Fixed potential leaks of never-loaded ephemeral virtual modules by removing eval-module virtual entries when module startup fails.
 
 ### Security
 - Improved module loading safety by enforcing clearer permission boundaries for HTTPS/remote loads.
@@ -59,7 +65,7 @@ All notable changes to this project will be documented in this file.
   - keys are only reusable after both sides discard/release the stream.
 - Added startup warning when `moduleLoader.httpResolve` is enabled.
 - Added startup warning when env-map keys are configured but not readable by current `permissions.env`.
-- Added startup warning for non-cryptographic stream-key fallback in worker bootstrap.
+- Removed non-cryptographic stream-key fallback in worker bootstrap; secure crypto-based key generation is now required.
 - Split remote import gating:
   - `https://` requires `moduleLoader.httpsResolve`,
   - `http://` requires `moduleLoader.httpResolve`.
