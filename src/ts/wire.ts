@@ -5,6 +5,7 @@ const GRAPH_ID_KEY = "__denojs_worker_graph_id";
 const GRAPH_REF_KEY = "__denojs_worker_graph_ref";
 const GRAPH_KIND_KEY = "__denojs_worker_graph_kind";
 const GRAPH_VALUE_KEY = "__denojs_worker_graph_value";
+const FORBIDDEN_PROTO_KEYS = new Set(["__proto__", "constructor", "prototype"]);
 
 /** Canonical wire sentinel for `undefined` values. */
 function wireUndef(): WireJson {
@@ -269,6 +270,7 @@ function bufferViewFromWire(obj: any): any {
  */
 export function hydrateFromWire(v: any): any {
     const graph = new Map<number, any>();
+    const isForbiddenProtoKey = (k: string): boolean => FORBIDDEN_PROTO_KEYS.has(k);
 
     function inner(x: any): any {
         if (x == null) return x;
@@ -471,12 +473,18 @@ export function hydrateFromWire(v: any): any {
 
             const out: any = {};
             graph.set(id, out);
-            for (const [k, v2] of Object.entries(raw)) out[k] = inner(v2);
+            for (const [k, v2] of Object.entries(raw)) {
+                if (isForbiddenProtoKey(k)) continue;
+                out[k] = inner(v2);
+            }
             return out;
         }
 
         const out: any = {};
-        for (const [k, v2] of Object.entries(x)) out[k] = inner(v2);
+        for (const [k, v2] of Object.entries(x)) {
+            if (isForbiddenProtoKey(k)) continue;
+            out[k] = inner(v2);
+        }
         return out;
     }
 

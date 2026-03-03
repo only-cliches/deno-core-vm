@@ -9,14 +9,17 @@ use crate::worker::runtime::{SyncNodeDispatchAck, SyncNodeDispatchRequest, Worke
 use std::sync::mpsc as std_mpsc;
 use std::time::Duration;
 
+// Internal helper for runtime<->host op handling; it handles ctx from state.
 fn ctx_from_state(state: &OpState) -> Option<WorkerOpContext> {
     state.try_borrow::<WorkerOpContext>().cloned()
 }
 
+// Internal helper for runtime<->host op handling; it handles env state from state.
 fn env_state_from_state(state: &OpState) -> Option<&EnvRuntimeState> {
     state.try_borrow::<EnvRuntimeState>()
 }
 
+// Wraps raw bytes as a `Uint8Array` bridge value for zero-copy-friendly binary dispatch.
 fn bytes_to_u8_bridge(bytes: &[u8]) -> JsValueBridge {
     // Keep byte payloads in BufferView form so downstream bridge paths avoid
     // JSON array materialization and can preserve binary throughput.
@@ -28,6 +31,7 @@ fn bytes_to_u8_bridge(bytes: &[u8]) -> JsValueBridge {
     }
 }
 
+// Returns a wire error reply when host callbacks are attempted during `evalSync`.
 fn host_call_blocked_during_evalsync(ctx: &WorkerOpContext) -> Option<serde_json::Value> {
     if ctx.eval_sync_active.load(std::sync::atomic::Ordering::SeqCst) {
         return Some(serde_json::json!({
@@ -46,6 +50,7 @@ enum NodeSendWaitError {
     TimedOut,
 }
 
+// Sends a Node dispatch message and waits for bounded delivery acknowledgment.
 fn send_node_msg_wait(
     ctx: &WorkerOpContext,
     msg: NodeMsg,
@@ -455,6 +460,7 @@ pub async fn op_denojs_worker_host_call_async_bin_mixed(
 
 #[op2]
 #[serde]
+/// Internal helper for runtime<->host op handling; it handles op denojs worker env get.
 pub fn op_denojs_worker_env_get(state: &mut OpState, #[string] key: String) -> serde_json::Value {
     let Some(env_state) = env_state_from_state(state) else {
         return err_reply("OpStateError", "EnvRuntimeState missing in OpState");
@@ -485,6 +491,7 @@ pub fn op_denojs_worker_env_get(state: &mut OpState, #[string] key: String) -> s
 
 #[op2]
 #[serde]
+/// Internal helper for runtime<->host op handling; it handles op denojs worker env set.
 pub fn op_denojs_worker_env_set(
     state: &mut OpState,
     #[string] key: String,
@@ -516,6 +523,7 @@ pub fn op_denojs_worker_env_set(
 
 #[op2]
 #[serde]
+/// Internal helper for runtime<->host op handling; it handles op denojs worker env delete.
 pub fn op_denojs_worker_env_delete(
     state: &mut OpState,
     #[string] key: String,
@@ -543,6 +551,7 @@ pub fn op_denojs_worker_env_delete(
 
 #[op2]
 #[serde]
+/// Internal helper for runtime<->host op handling; it handles op denojs worker env to object.
 pub fn op_denojs_worker_env_to_object(state: &mut OpState) -> serde_json::Value {
     let Some(env_state) = env_state_from_state(state) else {
         return err_reply("OpStateError", "EnvRuntimeState missing in OpState");

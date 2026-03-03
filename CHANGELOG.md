@@ -13,6 +13,7 @@ All notable changes to this project will be documented in this file.
 - Added handle-level execution options (`DenoWorkerHandleExecOptions`) with per-call `maxEvalMs`.
 - Added handle creation-level timeout defaults (`handle.eval(..., { maxEvalMs })`, `handle.get(..., { maxEvalMs })`) that apply to subsequent handle operations.
 - Added `bridge.streamBacklogLimit` option to cap unaccepted worker->Node stream-open backlog (default `256`).
+- Added `limits.wasm` (default `true`) to allow disabling `.wasm` module loading when set to `false`.
 - Added a new handles usage example: `examples/12-handles.ts`.
 - Added new tests:
   - `test-ts/handles.spec.ts` (comprehensive handle API behavior),
@@ -24,7 +25,7 @@ All notable changes to this project will be documented in this file.
   - consolidated handle entrypoints to `worker.handle.{get,tryGet,eval}`,
   - removed prior alias/legacy-style handle entrypoints and watch/unwatch-style behavior.
 - Moved worker limits to `options.limits` and updated docs/examples/tests accordingly:
-  - `maxHandle`, `maxEvalMs`, `maxMemoryBytes`, `maxStackSizeBytes`.
+  - `maxHandle`, `maxEvalMs`, `maxMemoryBytes`.
 - Updated `mergeWorkerOptions` to deep-merge `limits` and `moduleLoader` (in addition to existing nested merges).
 - Enriched `DenoWorkerHandleApplyOp` typing with explicit operation union values.
 - Updated bridge/options/docs comments for clearer defaults and operational guidance.
@@ -40,6 +41,9 @@ All notable changes to this project will be documented in this file.
 - Hardened remote import permission checks (strict origin/path matching for URL allowlists).
 - Hardened environment file loading boundaries to prevent out-of-sandbox path reads through config.
 - Hardened handle bridge/runtime behavior and error signaling (structured codes and safer edge-case handling).
+- Hardened wire hydration on both host and runtime bootstrap paths by filtering prototype-pollution keys (`__proto__`, `constructor`, `prototype`).
+- Hardened Rust wire buffer-view decoding by clamping `byteOffset`/`length` to actual payload bytes to avoid oversized allocation/offset abuse.
+- Added startup warning when `permissions.run` is enabled to call out subprocess environment inheritance risk.
 
 ### Performance
 - Reused a shared `reqwest` HTTP client for remote module fetches (avoids per-fetch client construction).

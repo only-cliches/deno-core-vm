@@ -42,7 +42,7 @@ npm install deno-director
 
 ```
 
-### The Basics: Evaluated TS and Host Callbacks
+### 🚀 The Basics: Evaluated TS and Host Callbacks
 
 ```ts
 import { DenoWorker } from "deno-director";
@@ -97,7 +97,7 @@ await worker.close();
 
 ```
 
-### Fleet Orchestration: Managing 1,000 Tenants
+### 🧭 Fleet Orchestration: Managing 1,000 Tenants
 
 Use the `DenoDirector` to orchestrate massive fleets of sandboxed runtimes.
 
@@ -134,7 +134,7 @@ await director.stopByLabel("tenant-a");
 
 ## 🧠 Major Capabilities
 
-### The Transdimensional Bridge
+### 🌉 The Transdimensional Bridge
 
 When you pass data between Node and Deno using `eval`, `evalSync`, or `setGlobal`, Deno Director doesn't just `JSON.stringify`. It uses a complex custom codec backed by V8 serialization.
 
@@ -142,7 +142,7 @@ When you pass data between Node and Deno using `eval`, `evalSync`, or `setGlobal
 * `Uint8Array`, `DataView`, `SharedArrayBuffer`? Passed instantly via underlying memory views.
 * Promises? Automatically chained across the boundary.
 
-### ES Module Proxying
+### 📦 ES Module Proxying
 
 Don't just evaluate strings—import entire ES modules and use them as if they were native Node.js objects.
 
@@ -253,6 +253,40 @@ console.log(await result.getData()); // "Super Secret Data for database"
 
 **The resulting superpower:** You can seamlessly integrate tools like Webpack, SWC, or esbuild on the Node.js side, transpile custom DSLs, and feed the resulting raw code directly into the isolated Deno runtime without ever touching the disk.
 
+### 🎛️ Runtime Handles
+
+Handles let you keep a live reference to a runtime value and operate on it without re-evaluating lookup code each time. This is useful for complex object graphs, long-lived instances, and high-frequency operations.
+
+Entry points:
+- `worker.handle.get(path, options?)` -> bind to an existing runtime value (throws if path does not exist)
+- `worker.handle.tryGet(path, options?)` -> same as `get` but returns `undefined` when missing
+- `worker.handle.eval(source, options?)` -> evaluate source and bind the result as a handle root
+
+Once you have a handle, you can call methods like: `get`, `set`, `has`, `delete`, `keys`, `entries`, `call`, `construct`, `await`, and many more!
+
+```ts
+import { DenoWorker } from "deno-director";
+
+const worker = new DenoWorker();
+
+await worker.eval(`
+  globalThis.counter = {
+    value: 0,
+    inc(n = 1) { this.value += n; return this.value; }
+  };
+`);
+
+const h = await worker.handle.get("counter");
+await h.call("inc", [2]);                 // 2
+await h.set("value", 10);
+console.log(await h.get("value"));        // 10
+console.log(await h.getType());           // { type: "object", ... }
+console.log(h.rootType);                  // cached root type snapshot
+
+await h.dispose();
+await worker.close();
+```
+
 ### 🥷 Smuggling Node.js Modules into Deno
 
 Because Deno Director utilizes a recursive V8 serializer and native function bridging, you can literally inject entire Node.js core modules (or any complex object with methods) directly into the Deno sandbox.
@@ -320,7 +354,7 @@ const customWorker = new DenoWorker({
 
 ```
 
-### Function Calls with `args`
+### 🧮 Function Calls with `args`
 
 Use `options.args` to call a function value produced by `eval`/`evalSync`.
 
@@ -330,7 +364,7 @@ import { DenoWorker } from "deno-director";
 const worker = new DenoWorker();
 
 // Call a global function in the deno runtime ....
-// passing in args from the Node runtime
+// passing in args fromm Node
 const json_val = await worker.eval("JSON.parse", { args: ['{"key": "value"}'] });
 console.log(json_val); // {key: "value"}
 
@@ -483,6 +517,7 @@ Permission note:
 - If you provide `env` as a map and `permissions.env` is missing (or `[]`), the runtime auto-populates `permissions.env` with those env-map keys.
 - If `permissions.env` is already set, it is not changed.
 - If configured env keys are not readable under `permissions.env`, startup emits a warning.
+- If `permissions.run` is enabled, spawned subprocesses may observe host environment values unless command env is explicitly constrained.
 
 
 
@@ -490,7 +525,7 @@ Permission note:
 
 ## 📖 API Documentation
 
-### `class DenoDirector`
+### 🎬 `class DenoDirector`
 
 The primary class for orchestrating multiple `DenoWorker` instances.
 
@@ -509,7 +544,7 @@ The primary class for orchestrating multiple `DenoWorker` instances.
 
 ---
 
-### `class DenoWorker`
+### 🛡️ `class DenoWorker`
 
 The core runtime isolate. Maps 1:1 with a V8 Thread.
 
@@ -573,7 +608,7 @@ Reboots the isolate in place, re-applying all template configurations and global
 
 ---
 
-### Configuration Types
+### ⚙️ Configuration Types
 
 #### `DenoWorkerOptions`
 
@@ -585,7 +620,7 @@ type DenoWorkerOptions = {
     maxHandle?: number;         // Active handle cap (default 128)
     maxEvalMs?: number;         // Default timeout for eval + handle runtime operations
     maxMemoryBytes?: number;    // V8 Heap limit
-    maxStackSizeBytes?: number; // Stack limit (if supported)
+    wasm?: boolean;             // Enable/disable .wasm module loading (default true)
   };
   bridge?: {                    // Transport tuning
     channelSize?: number;       // Per-queue capacity (control/data/node callback queues)
@@ -600,6 +635,7 @@ type DenoWorkerOptions = {
     write?: boolean | string[]; // Allow write everywhere, or specific paths
     net?: boolean | string[];   // Allow network, or specific domains/ports
     env?: boolean | string[];   // Allow env access, or specific variables
+    run?: boolean | string[];   // Allow subprocess execution (high risk)
     ffi?: boolean;              // Allow Foreign Function Interface
     sys?: boolean;              // OS Info access
   };
@@ -632,7 +668,7 @@ type DenoWorkerOptions = {
 `bridge.channelSize` applies independently to multiple internal queues (control-plane, data-plane, and node callback dispatch), not a single shared queue. Under heavy load, total buffered slots can approach roughly `3 * channelSize`.
 `bridge.streamBacklogLimit` caps worker->Node stream opens that arrive before Node calls `stream.accept(key)`; excess opens are rejected to bound host memory growth.
 
-### `nodeCompat` vs `moduleLoader.nodeResolve`
+### 🧩 `nodeCompat` vs `moduleLoader.nodeResolve`
 
 Both options affect how bare specifiers (for example, `"lodash"` or `"pkg/subpath"`) are resolved.
 
@@ -655,3 +691,5 @@ Current behavior notes:
 
 - This package builds a native addon during install (`cargo` + Rust toolchain required).
 - For module imports, configure `imports` and related permissions/options based on your use case.
+- Prefer async host callbacks for heavy work; synchronous host callbacks execute on Node's main thread and can starve the event loop.
+- `limits.maxMemoryBytes` applies to V8 heap accounting; WebAssembly memory may not be fully constrained by this limit.

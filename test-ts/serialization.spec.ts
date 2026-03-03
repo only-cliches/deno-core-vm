@@ -166,4 +166,25 @@ describe("deno_worker: data serialization", () => {
       { numRuns: 100 }
     );
   });
+
+  it("does not allow prototype pollution from worker -> host hydration", async () => {
+    dw = createTestWorker();
+
+    const out: any = await dw.eval(`(() => JSON.parse('{"__proto__":{"polluted":"yes"},"safe":2}'))()`);
+    expect(({} as any).polluted).toBeUndefined();
+    expect(Object.prototype.hasOwnProperty.call(out, "__proto__")).toBe(false);
+  });
+
+  it("does not allow prototype pollution from host -> worker hydration", async () => {
+    dw = createTestWorker();
+
+    const payload = JSON.parse('{"__proto__":{"polluted":"yes"},"safe":1}');
+    const res: any = await dw.eval(
+      `(x) => ({ ownProto: Object.prototype.hasOwnProperty.call(x, "__proto__"), polluted: ({}).polluted, safe: x.safe })`,
+      { args: [payload] },
+    );
+    expect(res.ownProto).toBe(false);
+    expect(res.polluted).toBeUndefined();
+    expect(res.safe).toBe(1);
+  });
 });

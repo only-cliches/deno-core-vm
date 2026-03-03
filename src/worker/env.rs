@@ -11,6 +11,7 @@ pub enum EnvAccess {
 }
 
 impl EnvAccess {
+    /// Checks whether allows and returns the boolean result for runtime environment variable access control.
     pub fn allows(&self, key: &str) -> bool {
         match self {
             Self::Deny => false,
@@ -26,10 +27,12 @@ pub struct EnvRuntimeState {
     pub access: EnvAccess,
 }
 
+/// Valid env key.
 pub fn valid_env_key(k: &str) -> bool {
     !k.is_empty() && k.len() <= 4096 && !k.contains('\0')
 }
 
+/// Env access from permissions.
 pub fn env_access_from_permissions(permissions: Option<&serde_json::Value>) -> EnvAccess {
     let Some(cfg) = permissions else {
         return EnvAccess::Deny;
@@ -56,6 +59,7 @@ pub fn env_access_from_permissions(permissions: Option<&serde_json::Value>) -> E
     EnvAccess::Deny
 }
 
+/// Merges env snapshot while preserving invariants required by runtime environment variable access control.
 pub fn merge_env_snapshot(
     mut snapshot: HashMap<String, String>,
     cfg: Option<&EnvConfig>,
@@ -76,6 +80,7 @@ mod tests {
     use super::{EnvAccess, env_access_from_permissions, valid_env_key};
 
     #[test]
+    // Valid env key enforces empty nul and length limits.
     fn valid_env_key_enforces_empty_nul_and_length_limits() {
         assert!(!valid_env_key(""));
         assert!(!valid_env_key("BAD\0KEY"));
@@ -84,6 +89,7 @@ mod tests {
     }
 
     #[test]
+    // Env access allows helper matches mode.
     fn env_access_allows_helper_matches_mode() {
         assert!(!EnvAccess::Deny.allows("A"));
         assert!(EnvAccess::AllowAll.allows("A"));
@@ -96,6 +102,7 @@ mod tests {
     }
 
     #[test]
+    // Env access invalid or false config denies.
     fn env_access_invalid_or_false_config_denies() {
         let false_cfg = env_access_from_permissions(Some(&serde_json::json!({ "env": false })));
         assert!(matches!(false_cfg, EnvAccess::Deny));
@@ -105,6 +112,7 @@ mod tests {
     }
 
     #[test]
+    // Env access array ignores non strings and deduplicates.
     fn env_access_array_ignores_non_strings_and_deduplicates() {
         let cfg = env_access_from_permissions(Some(&serde_json::json!({
             "env": ["A", "A", 1, null, true, "B"]

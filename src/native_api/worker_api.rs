@@ -17,6 +17,7 @@ use crate::{
 use neon::result::Throw;
 use neon::types::JsDate;
 
+// Returns string prop from state used by Neon worker API glue between Node and runtime.
 fn get_string_prop<'a, C: Context<'a>>(
     cx: &mut C,
     obj: Handle<'a, JsObject>,
@@ -27,6 +28,7 @@ fn get_string_prop<'a, C: Context<'a>>(
     Some(s.value(cx))
 }
 
+// Internal helper for Neon API bridge setup; it handles host fn tag.
 fn host_fn_tag(id: usize, is_async: bool) -> serde_json::Value {
     json!({
         TYPE_KEY: TYPE_FUNCTION,
@@ -35,6 +37,7 @@ fn host_fn_tag(id: usize, is_async: bool) -> serde_json::Value {
     })
 }
 
+// Roots a JS function and registers it in the worker host-function table.
 fn register_host_fn<'a>(
     worker_id: usize,
     cx: &mut FunctionContext<'a>,
@@ -46,6 +49,7 @@ fn register_host_fn<'a>(
     Some(w.register_global_fn(rooted))
 }
 
+// Builds node console bridge fn required by Neon worker API glue between Node and runtime.
 fn build_node_console_bridge_fn<'a>(
     cx: &mut FunctionContext<'a>,
     method: &'static str,
@@ -95,6 +99,7 @@ fn build_node_console_bridge_fn<'a>(
     })
 }
 
+// Best-effort detection for async functions used to choose sync vs async callback path.
 fn is_async_like<'a>(cx: &mut FunctionContext<'a>, func: Handle<'a, JsFunction>) -> bool {
     let candidate: Handle<'a, JsFunction> = func;
 
@@ -131,6 +136,7 @@ fn is_async_like<'a>(cx: &mut FunctionContext<'a>, func: Handle<'a, JsFunction>)
     .unwrap_or(false)
 }
 
+// Builds console config from neon required by Neon worker API glue between Node and runtime.
 fn build_console_config_from_neon<'a>(
     cx: &mut FunctionContext<'a>,
     worker_id: usize,
@@ -222,6 +228,7 @@ fn build_console_config_from_neon<'a>(
     }
 }
 
+// Internal helper for Neon API bridge setup; it handles strict channel.
 fn strict_channel() -> bool {
     std::env::var("DENOJS_WORKER_STRICT_CHANNEL")
         .ok()
@@ -232,6 +239,7 @@ fn strict_channel() -> bool {
         .unwrap_or(false)
 }
 
+// Returns `Object.prototype.toString` tag for a JS value.
 fn object_to_string_tag<'a>(
     cx: &mut FunctionContext<'a>,
     value: Handle<'a, JsValue>,
@@ -249,6 +257,7 @@ fn object_to_string_tag<'a>(
     Some(s.value(cx))
 }
 
+// Checks whether arraybuffer view and returns the boolean result for Neon worker API glue between Node and runtime.
 fn is_arraybuffer_view<'a>(cx: &mut FunctionContext<'a>, value: Handle<'a, JsValue>) -> bool {
     cx.try_catch(|cx| {
         let ab_ctor: Handle<JsFunction> = cx.global("ArrayBuffer")?;
@@ -264,6 +273,7 @@ fn is_arraybuffer_view<'a>(cx: &mut FunctionContext<'a>, value: Handle<'a, JsVal
     .unwrap_or(false)
 }
 
+// Checks whether expand object and returns the boolean result for Neon worker API glue between Node and runtime.
 fn should_expand_object<'a>(
     cx: &mut FunctionContext<'a>,
     value: Handle<'a, JsValue>,
@@ -303,6 +313,7 @@ fn should_expand_object<'a>(
     !own_enumerable_string_keys(cx, obj).is_empty()
 }
 
+// Checks whether special wire json object and returns the boolean result for Neon worker API glue between Node and runtime.
 fn is_special_wire_json_object(v: &serde_json::Value) -> bool {
     let Some(obj) = v.as_object() else {
         return false;
@@ -336,6 +347,7 @@ fn is_special_wire_json_object(v: &serde_json::Value) -> bool {
     SPECIAL_KEYS.iter().any(|k| obj.contains_key(*k))
 }
 
+// Returns own enumerable string keys using JS `Object.keys` semantics.
 fn own_enumerable_string_keys<'a>(
     cx: &mut FunctionContext<'a>,
     obj: Handle<'a, JsObject>,
@@ -361,6 +373,7 @@ fn own_enumerable_string_keys<'a>(
     .unwrap_or_default()
 }
 
+// Encodes set global value into transport-safe form for Neon worker API glue between Node and runtime.
 fn encode_set_global_value<'a>(
     cx: &mut FunctionContext<'a>,
     worker: &mut WorkerHandle,
@@ -421,6 +434,7 @@ fn encode_set_global_value<'a>(
     crate::bridge::neon_codec::from_neon_value(cx, value)
 }
 
+/// Creates worker used by Neon worker API glue between Node and runtime.
 pub fn create_worker(mut cx: FunctionContext) -> JsResult<JsObject> {
     let mut opts = worker::state::WorkerCreateOptions::from_neon(&mut cx, 0)?;
 
@@ -710,6 +724,7 @@ pub fn create_worker(mut cx: FunctionContext) -> JsResult<JsObject> {
         let f = JsFunction::new(&mut cx, move |mut cx| {
             struct EvalSyncGuard(std::sync::Arc<std::sync::atomic::AtomicBool>);
             impl Drop for EvalSyncGuard {
+                // Releases scoped guard resources and restores associated runtime state on scope exit.
                 fn drop(&mut self) {
                     self.0.store(false, std::sync::atomic::Ordering::SeqCst);
                 }

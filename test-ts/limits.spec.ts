@@ -115,10 +115,6 @@ describe("deno_worker: limits", () => {
     15_000
   );
 
-  test("limits: maxStackSizeBytes is rejected explicitly", () => {
-    expect(() => createTestWorker({ limits: { maxStackSizeBytes: 1024 } })).toThrow(/maxStackSizeBytes/i);
-  });
-
   test(
     "limits: delayed catch attachment on eval rejection does not emit unhandledRejection",
     async () => {

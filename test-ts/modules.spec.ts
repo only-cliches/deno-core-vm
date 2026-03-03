@@ -3,6 +3,7 @@ import { createTestWorker } from "./helpers.worker-harness";
 import * as fs from "fs/promises";
 import * as os from "os";
 import * as path from "path";
+import { pathToFileURL } from "url";
 
 async function withTempDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "deno-director-"));
@@ -110,4 +111,19 @@ describe("deno_worker: modules", () => {
     dw = createTestWorker({ imports: false });
     await expect(dw.importModule("virtual:nope")).rejects.toBeDefined();
   });
+
+  it(
+    "limits.wasm=false blocks .wasm module loading",
+    async () => {
+      await withTempDir(async (dir) => {
+        const wasmPath = path.join(dir, "mod.wasm");
+        await fs.writeFile(wasmPath, Buffer.from([0x00, 0x61, 0x73, 0x6d]));
+
+        dw = createTestWorker({ cwd: dir, imports: true, limits: { wasm: false } });
+        const spec = pathToFileURL(wasmPath).href;
+        await expect(dw.importModule(spec)).rejects.toThrow(/WASM module loading is disabled by limits\.wasm/i);
+      });
+    },
+    20_000
+  );
 });

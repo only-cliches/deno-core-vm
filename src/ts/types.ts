@@ -98,7 +98,7 @@ export type DenoPermissions = {
     net?: DenoPermissionValue;
     /** Environment variable access. `true` = allow all, `string[]` = variable allow list. */
     env?: DenoPermissionValue;
-    /** Subprocess execution access. */
+    /** Subprocess execution access (treat as high-risk; spawned processes may inherit host env unless explicitly constrained). */
     run?: DenoPermissionValue;
     /** Native FFI access. */
     ffi?: DenoPermissionValue;
@@ -352,7 +352,7 @@ export type DenoWorkerLifecycleHooks = Partial<
 >;
 export type DenoWorkerLifecycleHandler = (ctx: DenoWorkerLifecycleContext) => void;
 
-/** Worker limit controls for execution, memory, stack, and handle capacity. */
+/** Worker limit controls for execution, memory, wasm loading, and handle capacity. */
 export type DenoWorkerLimits = {
     /**
      * Description: maximum number of allowed simultaneously active handle references on this worker.
@@ -380,12 +380,13 @@ export type DenoWorkerLimits = {
      */
     maxMemoryBytes?: number;
     /**
-     * Description: maximum stack size in bytes.
-     * Default: unset.
-     * Min recommended: n/a (currently not supported; setting this currently rejects).
-     * Max recommended: n/a (currently not supported; setting this currently rejects).
+     * Description: toggles WebAssembly module loading by `.wasm` specifier.
+     * When `false`, importing `.wasm` modules is rejected by the loader.
+     * Default: `true`.
+     * Min recommended: n/a.
+     * Max recommended: n/a.
      */
-    maxStackSizeBytes?: number;
+    wasm?: boolean;
 };
 
 /**
@@ -405,7 +406,7 @@ export type DenoWorkerLimits = {
  * ```
  */
 export type DenoWorkerOptions = {
-    /** Runtime limits bundle (timeouts, memory/stack caps, handle cap). */
+    /** Runtime limits bundle (timeouts, memory caps, handle cap). */
     limits?: DenoWorkerLimits;
     /** Bridge transport tuning (queue capacity and stream flow-control). */
     bridge?: DenoWorkerBridgeOption;

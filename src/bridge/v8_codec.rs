@@ -6,10 +6,12 @@ use crate::bridge::tags::{TYPE_FUNCTION, TYPE_KEY};
 use crate::bridge::types::JsValueBridge;
 use crate::bridge::wire;
 
+// Mk err.
 fn mk_err(msg: impl Into<String>) -> String {
     msg.into()
 }
 
+// Attempts to json stringify and returns a fallible result for bridge encoding/decoding between Rust, V8, and Neon.
 fn try_json_stringify<'s, 'p>(
     ps: &mut v8::PinScope<'s, 'p>,
     value: v8::Local<'s, v8::Value>,
@@ -35,6 +37,7 @@ fn try_json_stringify<'s, 'p>(
     serde_json::from_str::<serde_json::Value>(&s).ok()
 }
 
+// Attempts to global dehydrate and returns a fallible result for bridge encoding/decoding between Rust, V8, and Neon.
 fn try_global_dehydrate<'s, 'p>(
     ps: &mut v8::PinScope<'s, 'p>,
     value: v8::Local<'s, v8::Value>,
@@ -52,6 +55,7 @@ fn try_global_dehydrate<'s, 'p>(
     serde_v8::from_v8::<serde_json::Value>(ps, out).ok()
 }
 
+// Returns string prop from state used by bridge encoding/decoding between Rust, V8, and Neon.
 fn get_string_prop<'s, 'p>(
     ps: &mut v8::PinScope<'s, 'p>,
     obj: v8::Local<'s, v8::Object>,
@@ -68,6 +72,7 @@ fn get_string_prop<'s, 'p>(
     }
 }
 
+// Hydrate via global.
 fn hydrate_via_global<'s, 'p>(
     ps: &mut v8::PinScope<'s, 'p>,
     wire_value: v8::Local<'s, v8::Value>,
@@ -93,6 +98,7 @@ fn hydrate_via_global<'s, 'p>(
         .unwrap_or(wire_value)
 }
 
+// Checks whether wire marker key and returns the boolean result for bridge encoding/decoding between Rust, V8, and Neon.
 fn is_wire_marker_key(k: &str) -> bool {
     matches!(
         k,
@@ -115,6 +121,7 @@ fn is_wire_marker_key(k: &str) -> bool {
     )
 }
 
+// Json contains wire markers.
 fn json_contains_wire_markers(v: &serde_json::Value) -> bool {
     match v {
         serde_json::Value::Array(arr) => arr.iter().any(json_contains_wire_markers),
@@ -128,6 +135,7 @@ fn json_contains_wire_markers(v: &serde_json::Value) -> bool {
     }
 }
 
+// Json to v8 plain.
 fn json_to_v8_plain<'s, 'p>(
     ps: &mut v8::PinScope<'s, 'p>,
     v: &serde_json::Value,
@@ -168,6 +176,7 @@ fn json_to_v8_plain<'s, 'p>(
     }
 }
 
+// Attempts to buffer view to v8 and returns a fallible result for bridge encoding/decoding between Rust, V8, and Neon.
 fn try_buffer_view_to_v8<'s, 'p>(
     ps: &mut v8::PinScope<'s, 'p>,
     kind: &str,
@@ -209,6 +218,7 @@ fn try_buffer_view_to_v8<'s, 'p>(
     None
 }
 
+// Converts v8 via wire into output representation for bridge encoding/decoding between Rust, V8, and Neon.
 fn to_v8_via_wire<'s, 'p>(
     ps: &mut v8::PinScope<'s, 'p>,
     value: &JsValueBridge,
@@ -238,6 +248,7 @@ fn to_v8_via_wire<'s, 'p>(
     Ok(hydrate_via_global(ps, wire_val))
 }
 
+/// Converts v8 into output representation for bridge encoding/decoding between Rust, V8, and Neon.
 pub fn to_v8<'s, 'p>(
     ps: &mut v8::PinScope<'s, 'p>,
     value: &JsValueBridge,
@@ -347,6 +358,7 @@ pub fn to_v8<'s, 'p>(
     }
 }
 
+// Big int to string checked.
 fn big_int_to_string_checked<'s, 'p>(
     ps: &mut v8::PinScope<'s, 'p>,
     bi: v8::Local<'s, v8::BigInt>,
@@ -366,6 +378,7 @@ fn big_int_to_string_checked<'s, 'p>(
     Ok(s)
 }
 
+/// Constructs v8 from source input for bridge encoding/decoding between Rust, V8, and Neon.
 pub fn from_v8<'s, 'p>(
     ps: &mut v8::PinScope<'s, 'p>,
     value: v8::Local<'s, v8::Value>,
@@ -661,6 +674,7 @@ pub fn from_v8<'s, 'p>(
         // avoid stringification overhead and preserve structured-clone fidelity.
         struct S;
         impl v8::ValueSerializerImpl for S {
+            // Throw data clone error.
             fn throw_data_clone_error<'a>(
                 &self,
                 scope: &mut v8::PinnedRef<'a, v8::HandleScope<'_>>,

@@ -3,6 +3,7 @@ use neon::prelude::*;
 use crate::bridge::errors::host_function_error;
 use crate::bridge::types::JsValueBridge;
 
+// Returns thenable from state used by runtime bridge internals.
 fn get_thenable<'a>(
     cx: &mut TaskContext<'a>,
     v: Handle<'a, JsValue>,
@@ -15,6 +16,7 @@ fn get_thenable<'a>(
     Some((obj, then_fn))
 }
 
+// Thrown to bridge.
 fn thrown_to_bridge<'a>(cx: &mut TaskContext<'a>, thrown: Handle<'a, JsValue>) -> JsValueBridge {
     match crate::bridge::neon_codec::from_neon_value(cx, thrown) {
         Ok(JsValueBridge::Error {
@@ -40,6 +42,7 @@ fn thrown_to_bridge<'a>(cx: &mut TaskContext<'a>, thrown: Handle<'a, JsValue>) -
     }
 }
 
+/// Handle invoke sync.
 pub fn handle_invoke_sync(
     cx: &mut TaskContext,
     host_functions: &[std::sync::Arc<Root<JsFunction>>],
@@ -108,6 +111,7 @@ pub fn handle_invoke_sync(
     Ok(())
 }
 
+/// Handle invoke async.
 pub fn handle_invoke_async(
     cx: &mut TaskContext,
     host_functions: &[std::sync::Arc<Root<JsFunction>>],
@@ -123,6 +127,7 @@ pub fn handle_invoke_async(
     }
 
     impl AsyncState {
+        // Send once.
         fn send_once(&self, value: Result<JsValueBridge, JsValueBridge>) {
             // Ensure only first settle wins even if user promise resolves/rejects multiple times.
             let tx_opt = self.reply.lock().ok().and_then(|mut g| g.take());
@@ -131,6 +136,7 @@ pub fn handle_invoke_async(
             }
         }
 
+        // Clear hooks.
         fn clear_hooks(&self) {
             let _ = self.hooks.lock().ok().and_then(|mut g| g.take());
         }

@@ -20,6 +20,7 @@ pub struct PendingRequests {
 }
 
 impl PendingRequests {
+    /// Insert.
     pub fn insert(&self, settler: PromiseSettler) -> u64 {
         // Never return 0 so "missing id" and "first id" are distinguishable in logs.
         let id = self.next_id.fetch_add(1, Ordering::Relaxed).max(1);
@@ -27,10 +28,12 @@ impl PendingRequests {
         id
     }
 
+    /// Take.
     pub fn take(&self, id: u64) -> Option<PromiseSettler> {
         self.map.lock().unwrap().remove(&id)
     }
 
+    /// Reject all.
     pub fn reject_all(&self, message: &str) {
         let mut guard = self.map.lock().unwrap();
         let pending: Vec<_> = guard.drain().map(|(_, v)| v).collect();
@@ -41,6 +44,7 @@ impl PendingRequests {
         }
     }
 
+    /// Len.
     pub fn len(&self) -> usize {
         self.map.lock().unwrap().len()
     }
@@ -91,6 +95,7 @@ pub struct ModuleLoaderConfig {
 }
 
 impl Default for ModuleLoaderConfig {
+    // Provides default default values used by worker configuration/state parsing and runtime limits.
     fn default() -> Self {
         Self {
             https_resolve: false,
@@ -107,11 +112,11 @@ impl Default for ModuleLoaderConfig {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct RuntimeLimits {
     pub max_memory_bytes: Option<u64>,
-    pub max_stack_size_bytes: Option<u64>,
     pub max_eval_ms: Option<u64>,
+    pub wasm: bool,
 
     pub imports: ImportsPolicy,
 
@@ -134,6 +139,29 @@ pub struct RuntimeLimits {
     pub env: Option<EnvConfig>,
 }
 
+impl Default for RuntimeLimits {
+    // Returns default values used by worker option/state normalization.
+    fn default() -> Self {
+        Self {
+            max_memory_bytes: None,
+            max_eval_ms: None,
+            wasm: true,
+            imports: ImportsPolicy::default(),
+            cwd: None,
+            permissions: None,
+            startup: None,
+            node_resolve: false,
+            node_compat: false,
+            console: None,
+            inspect: None,
+            module_loader: None,
+            bridge: None,
+            startup_warnings: Vec::new(),
+            env: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BridgeConfig {
@@ -147,7 +175,9 @@ pub struct WorkerCreateOptions {
     pub runtime_options: RuntimeLimits,
 }
 
+// Parses dotenv text strict from input data and validates it for worker configuration/state parsing and runtime limits.
 fn parse_dotenv_text_strict(text: &str) -> Vec<(String, String)> {
+    // Unquote.
     fn unquote(s: &str) -> String {
         let ss = s.trim();
         if ss.len() >= 2 {
@@ -198,6 +228,7 @@ fn parse_dotenv_text_strict(text: &str) -> Vec<(String, String)> {
     out
 }
 
+// Resolves env path according to rules used by worker configuration/state parsing and runtime limits.
 fn resolve_env_path(base_cwd: &Path, raw: &str) -> PathBuf {
     let s = raw.trim();
 
@@ -218,16 +249,19 @@ fn resolve_env_path(base_cwd: &Path, raw: &str) -> PathBuf {
     }
 }
 
+// Canonicalize or lexical.
 fn canonicalize_or_lexical(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| crate::worker::filesystem::normalize_lexical_path(path))
 }
 
+// Checks whether base dir and returns the boolean result for worker configuration/state parsing and runtime limits.
 fn within_base_dir(base_dir: &Path, candidate: &Path) -> bool {
     let base_abs = canonicalize_or_lexical(base_dir);
     let cand_abs = canonicalize_or_lexical(candidate);
     cand_abs.starts_with(&base_abs)
 }
 
+// Find dotenv upwards.
 fn find_dotenv_upwards(start_dir: &Path) -> Option<PathBuf> {
     // Walk up to filesystem root, first .env wins.
     let mut cur = canonicalize_or_lexical(start_dir);
@@ -247,6 +281,7 @@ fn find_dotenv_upwards(start_dir: &Path) -> Option<PathBuf> {
     }
 }
 
+// Env map from js object.
 fn env_map_from_js_object(j: &serde_json::Value) -> HashMap<String, String> {
     let mut out = HashMap::new();
     let Some(map) = j.as_object() else {
@@ -265,6 +300,7 @@ fn env_map_from_js_object(j: &serde_json::Value) -> HashMap<String, String> {
     out
 }
 
+// Parses ts compiler config from input data and validates it for worker configuration/state parsing and runtime limits.
 fn parse_ts_compiler_config<'a>(
     cx: &mut FunctionContext<'a>,
     tco: Handle<'a, JsObject>,
@@ -322,6 +358,7 @@ fn parse_ts_compiler_config<'a>(
     }
 }
 
+// Loads dotenv file strict during worker configuration/state parsing and runtime limits.
 fn load_dotenv_file_strict(
     cx: &mut FunctionContext,
     path: &Path,
@@ -346,6 +383,7 @@ fn load_dotenv_file_strict(
     Ok(map)
 }
 
+// Ensure env permission enabled.
 fn ensure_env_permission_enabled(
     permissions: Option<serde_json::Value>,
     env_keys: Option<&HashMap<String, String>>,
@@ -405,12 +443,30 @@ fn ensure_env_permission_enabled(
     (Some(serde_json::Value::Object(out)), warnings)
 }
 
+// Checks whether `permissions.run` enables subprocess execution.
+fn run_permission_enabled(permissions: Option<&serde_json::Value>) -> bool {
+    let Some(obj) = permissions.and_then(|v| v.as_object()) else {
+        return false;
+    };
+    let Some(run) = obj.get("run") else {
+        return false;
+    };
+
+    match run {
+        serde_json::Value::Bool(v) => *v,
+        serde_json::Value::Array(arr) => !arr.is_empty(),
+        _ => false,
+    }
+}
+
 impl WorkerCreateOptions {
+    /// Constructs neon from source input for worker configuration/state parsing and runtime limits.
     pub fn from_neon<'a>(cx: &mut FunctionContext<'a>, idx: i32) -> Result<Self, Throw> {
         let mut out = Self {
             channel_size: 512,
             ..Default::default()
         };
+        out.runtime_options.wasm = true;
 
         if (idx as usize) >= cx.len() {
             return Ok(out);
@@ -524,13 +580,10 @@ impl WorkerCreateOptions {
             }
         }
 
-        // `maxStackSizeBytes`.
-        if let Ok(v) = obj.get::<JsValue, _, _>(cx, "maxStackSizeBytes") {
-            if let Ok(n) = v.downcast::<JsNumber, _>(cx) {
-                let sb = n.value(cx);
-                if sb.is_finite() && sb > 0.0 {
-                    out.runtime_options.max_stack_size_bytes = Some(sb as u64);
-                }
+        // `wasm`.
+        if let Ok(v) = obj.get::<JsValue, _, _>(cx, "wasm") {
+            if let Ok(b) = v.downcast::<JsBoolean, _>(cx) {
+                out.runtime_options.wasm = b.value(cx);
             }
         }
 
@@ -757,6 +810,12 @@ impl WorkerCreateOptions {
         );
         out.runtime_options.permissions = permissions;
         out.runtime_options.startup_warnings.extend(env_warnings);
+        if run_permission_enabled(out.runtime_options.permissions.as_ref()) {
+            out.runtime_options.startup_warnings.push(
+                "permissions.run is enabled: subprocesses may observe host environment values unless command env is explicitly constrained."
+                    .to_string(),
+            );
+        }
 
         if out
             .runtime_options
@@ -771,20 +830,17 @@ impl WorkerCreateOptions {
             );
         }
 
-        if out.runtime_options.max_stack_size_bytes.is_some() {
-            return cx.throw_error("maxStackSizeBytes is not supported yet");
-        }
-
         Ok(out)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ensure_env_permission_enabled, within_base_dir};
+    use super::{ensure_env_permission_enabled, run_permission_enabled, within_base_dir};
     use std::collections::HashMap;
     use std::path::PathBuf;
 
+    // Env map.
     fn env_map(keys: &[&str]) -> HashMap<String, String> {
         let mut out = HashMap::new();
         for k in keys {
@@ -794,6 +850,7 @@ mod tests {
     }
 
     #[test]
+    // Ensure env permission enabled keeps permissions when env not configured.
     fn ensure_env_permission_enabled_keeps_permissions_when_env_not_configured() {
         let original = Some(serde_json::json!({ "read": true, "env": false }));
         let (out, warnings) = ensure_env_permission_enabled(original.clone(), None);
@@ -802,6 +859,7 @@ mod tests {
     }
 
     #[test]
+    // Ensure env permission enabled sets env allow list when missing.
     fn ensure_env_permission_enabled_sets_env_allow_list_when_missing() {
         let env = env_map(&["A", "B"]);
         let (out, warnings) =
@@ -817,6 +875,7 @@ mod tests {
     }
 
     #[test]
+    // Ensure env permission enabled keeps existing env allow list.
     fn ensure_env_permission_enabled_keeps_existing_env_allow_list() {
         let env = env_map(&["A", "B"]);
         let (out, warnings) = ensure_env_permission_enabled(
@@ -832,6 +891,7 @@ mod tests {
     }
 
     #[test]
+    // Ensure env permission enabled keeps env false and warns.
     fn ensure_env_permission_enabled_keeps_env_false_and_warns() {
         let env = env_map(&["A"]);
         let (out, warnings) =
@@ -841,6 +901,18 @@ mod tests {
     }
 
     #[test]
+    // Checks whether permissions run enables subprocess execution.
+    fn run_permission_enabled_detects_supported_forms() {
+        assert!(run_permission_enabled(Some(&serde_json::json!({ "run": true }))));
+        assert!(run_permission_enabled(Some(&serde_json::json!({ "run": ["deno"] }))));
+        assert!(!run_permission_enabled(Some(&serde_json::json!({ "run": false }))));
+        assert!(!run_permission_enabled(Some(&serde_json::json!({ "run": [] }))));
+        assert!(!run_permission_enabled(Some(&serde_json::json!({ "read": true }))));
+        assert!(!run_permission_enabled(None));
+    }
+
+    #[test]
+    // Checks whether base dir rejects parent escape and returns the boolean result for worker configuration/state parsing and runtime limits.
     fn within_base_dir_rejects_parent_escape() {
         let base = if cfg!(windows) {
             PathBuf::from(r"C:\tmp\deno-director-sandbox")
@@ -863,6 +935,7 @@ pub enum ImportsPolicy {
 }
 
 impl Default for ImportsPolicy {
+    // Provides default default values used by worker configuration/state parsing and runtime limits.
     fn default() -> Self {
         ImportsPolicy::DenyAll
     }
@@ -887,6 +960,7 @@ pub struct WorkerHandle {
 }
 
 impl WorkerHandle {
+    /// Creates a new instance initialized for worker option/state normalization.
     pub fn new(
         id: usize,
         channel: Channel,
@@ -919,6 +993,7 @@ impl WorkerHandle {
         (handle, deno_rx, deno_data_rx, node_rx)
     }
 
+    /// Registers global fn in shared state used by worker configuration/state parsing and runtime limits.
     pub fn register_global_fn(&mut self, root: Root<JsFunction>) -> usize {
         let id = self.host_functions.len();
         self.host_functions.push(Arc::new(root));

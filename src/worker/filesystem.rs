@@ -12,6 +12,7 @@ pub struct SandboxFs {
 }
 
 impl SandboxFs {
+    /// Creates a new instance initialized for filesystem sandbox enforcement.
     pub fn new(cwd: PathBuf) -> Self {
         Self {
             inner: RealFs::default(),
@@ -20,6 +21,7 @@ impl SandboxFs {
     }
 }
 
+/// Normalizes startup url into a canonical form before it is used by sandboxed filesystem access and path normalization.
 pub fn normalize_startup_url(cwd: &Path, raw: Option<&str>) -> Option<Url> {
     let raw = raw.map(|s| s.trim()).filter(|s| !s.is_empty())?;
 
@@ -53,14 +55,17 @@ pub fn normalize_startup_url(cwd: &Path, raw: Option<&str>) -> Option<Url> {
 }
 
 impl FileSystem for SandboxFs {
+    // Cwd.
     fn cwd(&self) -> FsResult<PathBuf> {
         Ok((*self.cwd).clone())
     }
 
+    // Tmp dir.
     fn tmp_dir(&self) -> FsResult<PathBuf> {
         self.inner.tmp_dir()
     }
 
+    // Chdir.
     fn chdir(&self, _path: &CheckedPath<'_>) -> FsResult<()> {
         // Keep runtime cwd fixed to sandbox root for deterministic path policy.
         Err(std::io::Error::new(
@@ -70,10 +75,12 @@ impl FileSystem for SandboxFs {
         .into())
     }
 
+    // Umask.
     fn umask(&self, mask: Option<u32>) -> FsResult<u32> {
         self.inner.umask(mask)
     }
 
+    // Open sync.
     fn open_sync(
         &self,
         path: &CheckedPath<'_>,
@@ -83,6 +90,7 @@ impl FileSystem for SandboxFs {
         self.inner.open_sync(path, options)
     }
 
+    // Open async.
     fn open_async<'a, 'async_trait>(
         &'a self,
         path: CheckedPathBuf,
@@ -100,6 +108,7 @@ impl FileSystem for SandboxFs {
         self.inner.open_async(path, options)
     }
 
+    // Mkdir sync.
     fn mkdir_sync(
         &self,
         path: &CheckedPath<'_>,
@@ -109,6 +118,7 @@ impl FileSystem for SandboxFs {
         self.inner.mkdir_sync(path, recursive, mode)
     }
 
+    // Mkdir async.
     fn mkdir_async<'life0, 'async_trait>(
         &'life0 self,
         path: CheckedPathBuf,
@@ -122,10 +132,12 @@ impl FileSystem for SandboxFs {
         self.inner.mkdir_async(path, recursive, mode)
     }
 
+    // Chmod sync.
     fn chmod_sync(&self, path: &CheckedPath<'_>, mode: u32) -> FsResult<()> {
         self.inner.chmod_sync(path, mode)
     }
 
+    // Chmod async.
     fn chmod_async<'life0, 'async_trait>(
         &'life0 self,
         path: CheckedPathBuf,
@@ -138,6 +150,7 @@ impl FileSystem for SandboxFs {
         self.inner.chmod_async(path, mode)
     }
 
+    // Chown sync.
     fn chown_sync(
         &self,
         path: &CheckedPath<'_>,
@@ -147,6 +160,7 @@ impl FileSystem for SandboxFs {
         self.inner.chown_sync(path, uid, gid)
     }
 
+    // Chown async.
     fn chown_async<'life0, 'async_trait>(
         &'life0 self,
         path: CheckedPathBuf,
@@ -160,10 +174,12 @@ impl FileSystem for SandboxFs {
         self.inner.chown_async(path, uid, gid)
     }
 
+    // Lchmod sync.
     fn lchmod_sync(&self, path: &CheckedPath<'_>, mode: u32) -> FsResult<()> {
         self.inner.lchmod_sync(path, mode)
     }
 
+    // Lchmod async.
     fn lchmod_async<'life0, 'async_trait>(
         &'life0 self,
         path: CheckedPathBuf,
@@ -176,6 +192,7 @@ impl FileSystem for SandboxFs {
         self.inner.lchmod_async(path, mode)
     }
 
+    // Lchown sync.
     fn lchown_sync(
         &self,
         path: &CheckedPath<'_>,
@@ -185,6 +202,7 @@ impl FileSystem for SandboxFs {
         self.inner.lchown_sync(path, uid, gid)
     }
 
+    // Lchown async.
     fn lchown_async<'life0, 'async_trait>(
         &'life0 self,
         path: CheckedPathBuf,
@@ -198,10 +216,12 @@ impl FileSystem for SandboxFs {
         self.inner.lchown_async(path, uid, gid)
     }
 
+    // Removes sync from tracked state used by sandboxed filesystem access and path normalization.
     fn remove_sync(&self, path: &CheckedPath<'_>, recursive: bool) -> FsResult<()> {
         self.inner.remove_sync(path, recursive)
     }
 
+    // Removes async from tracked state used by sandboxed filesystem access and path normalization.
     fn remove_async<'life0, 'async_trait>(
         &'life0 self,
         path: CheckedPathBuf,
@@ -214,10 +234,12 @@ impl FileSystem for SandboxFs {
         self.inner.remove_async(path, recursive)
     }
 
+    // Copy file sync.
     fn copy_file_sync(&self, oldpath: &CheckedPath<'_>, newpath: &CheckedPath<'_>) -> FsResult<()> {
         self.inner.copy_file_sync(oldpath, newpath)
     }
 
+    // Copy file async.
     fn copy_file_async<'life0, 'async_trait>(
         &'life0 self,
         oldpath: CheckedPathBuf,
@@ -230,10 +252,12 @@ impl FileSystem for SandboxFs {
         self.inner.copy_file_async(oldpath, newpath)
     }
 
+    // Cp sync.
     fn cp_sync(&self, path: &CheckedPath<'_>, new_path: &CheckedPath<'_>) -> FsResult<()> {
         self.inner.cp_sync(path, new_path)
     }
 
+    // Cp async.
     fn cp_async<'life0, 'async_trait>(
         &'life0 self,
         path: CheckedPathBuf,
@@ -246,10 +270,12 @@ impl FileSystem for SandboxFs {
         self.inner.cp_async(path, new_path)
     }
 
+    // Stat sync.
     fn stat_sync(&self, path: &CheckedPath<'_>) -> FsResult<deno_io::fs::FsStat> {
         self.inner.stat_sync(path)
     }
 
+    // Stat async.
     fn stat_async<'life0, 'async_trait>(
         &'life0 self,
         path: CheckedPathBuf,
@@ -263,10 +289,12 @@ impl FileSystem for SandboxFs {
         self.inner.stat_async(path)
     }
 
+    // Lstat sync.
     fn lstat_sync(&self, path: &CheckedPath<'_>) -> FsResult<deno_io::fs::FsStat> {
         self.inner.lstat_sync(path)
     }
 
+    // Lstat async.
     fn lstat_async<'life0, 'async_trait>(
         &'life0 self,
         path: CheckedPathBuf,
@@ -280,10 +308,12 @@ impl FileSystem for SandboxFs {
         self.inner.lstat_async(path)
     }
 
+    // Exists sync.
     fn exists_sync(&self, path: &CheckedPath<'_>) -> bool {
         self.inner.exists_sync(path)
     }
 
+    // Exists async.
     fn exists_async<'life0, 'async_trait>(
         &'life0 self,
         path: CheckedPathBuf,
@@ -295,10 +325,12 @@ impl FileSystem for SandboxFs {
         self.inner.exists_async(path)
     }
 
+    // Reads dir sync for sandboxed filesystem access and path normalization.
     fn read_dir_sync(&self, path: &CheckedPath<'_>) -> FsResult<Vec<deno_fs::FsDirEntry>> {
         self.inner.read_dir_sync(path)
     }
 
+    // Reads dir async for sandboxed filesystem access and path normalization.
     fn read_dir_async<'life0, 'async_trait>(
         &'life0 self,
         path: CheckedPathBuf,
@@ -312,10 +344,12 @@ impl FileSystem for SandboxFs {
         self.inner.read_dir_async(path)
     }
 
+    // Rename sync.
     fn rename_sync(&self, oldpath: &CheckedPath<'_>, newpath: &CheckedPath<'_>) -> FsResult<()> {
         self.inner.rename_sync(oldpath, newpath)
     }
 
+    // Rename async.
     fn rename_async<'life0, 'async_trait>(
         &'life0 self,
         oldpath: CheckedPathBuf,
@@ -328,10 +362,12 @@ impl FileSystem for SandboxFs {
         self.inner.rename_async(oldpath, newpath)
     }
 
+    // Rmdir sync.
     fn rmdir_sync(&self, path: &CheckedPath<'_>) -> FsResult<()> {
         self.inner.rmdir_sync(path)
     }
 
+    // Rmdir async.
     fn rmdir_async<'life0, 'async_trait>(
         &'life0 self,
         path: CheckedPathBuf,
@@ -343,10 +379,12 @@ impl FileSystem for SandboxFs {
         self.inner.rmdir_async(path)
     }
 
+    // Truncate sync.
     fn truncate_sync(&self, path: &CheckedPath<'_>, len: u64) -> FsResult<()> {
         self.inner.truncate_sync(path, len)
     }
 
+    // Truncate async.
     fn truncate_async<'life0, 'async_trait>(
         &'life0 self,
         path: CheckedPathBuf,
@@ -359,6 +397,7 @@ impl FileSystem for SandboxFs {
         self.inner.truncate_async(path, len)
     }
 
+    // Utime sync.
     fn utime_sync(
         &self,
         path: &CheckedPath,
@@ -371,6 +410,7 @@ impl FileSystem for SandboxFs {
             .utime_sync(path, atime_secs, atime_nanos, mtime_secs, mtime_nanos)
     }
 
+    // Utime async.
     fn utime_async<'life0, 'async_trait>(
         &'life0 self,
         path: CheckedPathBuf,
@@ -387,6 +427,7 @@ impl FileSystem for SandboxFs {
             .utime_async(path, atime_secs, atime_nanos, mtime_secs, mtime_nanos)
     }
 
+    // Lutime sync.
     fn lutime_sync(
         &self,
         path: &CheckedPath,
@@ -399,6 +440,7 @@ impl FileSystem for SandboxFs {
             .lutime_sync(path, atime_secs, atime_nanos, mtime_secs, mtime_nanos)
     }
 
+    // Lutime async.
     fn lutime_async<'life0, 'async_trait>(
         &'life0 self,
         path: CheckedPathBuf,
@@ -415,10 +457,12 @@ impl FileSystem for SandboxFs {
             .lutime_async(path, atime_secs, atime_nanos, mtime_secs, mtime_nanos)
     }
 
+    // Reads link sync for sandboxed filesystem access and path normalization.
     fn read_link_sync(&self, path: &CheckedPath<'_>) -> FsResult<PathBuf> {
         self.inner.read_link_sync(path)
     }
 
+    // Reads link async for sandboxed filesystem access and path normalization.
     fn read_link_async<'life0, 'async_trait>(
         &'life0 self,
         path: CheckedPathBuf,
@@ -430,10 +474,12 @@ impl FileSystem for SandboxFs {
         self.inner.read_link_async(path)
     }
 
+    // Realpath sync.
     fn realpath_sync(&self, path: &CheckedPath<'_>) -> FsResult<PathBuf> {
         self.inner.realpath_sync(path)
     }
 
+    // Realpath async.
     fn realpath_async<'life0, 'async_trait>(
         &'life0 self,
         path: CheckedPathBuf,
@@ -445,10 +491,12 @@ impl FileSystem for SandboxFs {
         self.inner.realpath_async(path)
     }
 
+    // Link sync.
     fn link_sync(&self, oldpath: &CheckedPath<'_>, newpath: &CheckedPath<'_>) -> FsResult<()> {
         self.inner.link_sync(oldpath, newpath)
     }
 
+    // Link async.
     fn link_async<'life0, 'async_trait>(
         &'life0 self,
         oldpath: CheckedPathBuf,
@@ -461,6 +509,7 @@ impl FileSystem for SandboxFs {
         self.inner.link_async(oldpath, newpath)
     }
 
+    // Symlink sync.
     fn symlink_sync(
         &self,
         oldpath: &CheckedPath,
@@ -470,6 +519,7 @@ impl FileSystem for SandboxFs {
         self.inner.symlink_sync(oldpath, newpath, file_type)
     }
 
+    // Symlink async.
     fn symlink_async<'life0, 'async_trait>(
         &'life0 self,
         oldpath: CheckedPathBuf,
@@ -483,6 +533,7 @@ impl FileSystem for SandboxFs {
         self.inner.symlink_async(oldpath, newpath, file_type)
     }
 
+    // Writes file sync for sandboxed filesystem access and path normalization.
     fn write_file_sync(
         &self,
         path: &CheckedPath,
@@ -492,6 +543,7 @@ impl FileSystem for SandboxFs {
         self.inner.write_file_sync(path, options, data)
     }
 
+    // Writes file async for sandboxed filesystem access and path normalization.
     fn write_file_async<'life0, 'async_trait>(
         &'life0 self,
         path: CheckedPathBuf,
@@ -506,6 +558,7 @@ impl FileSystem for SandboxFs {
     }
 }
 
+/// Normalizes cwd into a canonical form before it is used by sandboxed filesystem access and path normalization.
 pub fn normalize_cwd(raw: Option<&str>) -> PathBuf {
     let fallback = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
@@ -530,10 +583,12 @@ pub fn normalize_cwd(raw: Option<&str>) -> PathBuf {
     }
 }
 
+/// Dir url from path.
 pub fn dir_url_from_path(p: &Path) -> Url {
     Url::from_directory_path(p).unwrap_or_else(|_| Url::parse("file:///").expect("file url"))
 }
 
+/// Normalizes lexical path into a canonical form before it is used by sandboxed filesystem access and path normalization.
 pub fn normalize_lexical_path(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     let mut parts: Vec<std::ffi::OsString> = Vec::new();
@@ -577,6 +632,7 @@ pub fn normalize_lexical_path(path: &Path) -> PathBuf {
     }
 }
 
+/// Sandboxed path list.
 pub fn sandboxed_path_list(root: &Path, items: &[String]) -> Vec<String> {
     let root_abs = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
     let mut out = Vec::with_capacity(items.len());
@@ -616,6 +672,7 @@ mod tests {
     };
     use std::path::{Path, PathBuf};
 
+    // Unique temp dir.
     fn unique_temp_dir(prefix: &str) -> PathBuf {
         let p = std::env::temp_dir().join(format!("{prefix}-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&p).expect("create temp dir");
@@ -623,6 +680,7 @@ mod tests {
     }
 
     #[test]
+    // Normalizes cwd handles file urls and relative paths into a canonical form before it is used by sandboxed filesystem access and path normalization.
     fn normalize_cwd_handles_file_urls_and_relative_paths() {
         let fallback = std::env::current_dir().expect("cwd");
         assert_eq!(normalize_cwd(None), fallback);
@@ -641,6 +699,7 @@ mod tests {
     }
 
     #[test]
+    // Normalizes startup url allows in sandbox and blocks outside into a canonical form before it is used by sandboxed filesystem access and path normalization.
     fn normalize_startup_url_allows_in_sandbox_and_blocks_outside() {
         let root = unique_temp_dir("startup-root");
         let inside = root.join("main.js");
@@ -661,6 +720,7 @@ mod tests {
     }
 
     #[test]
+    // Sandboxed path list filters outside and invalid inputs.
     fn sandboxed_path_list_filters_outside_and_invalid_inputs() {
         let root = unique_temp_dir("sandbox-list-root");
         let nested = root.join("nested");
@@ -685,6 +745,7 @@ mod tests {
     }
 
     #[test]
+    // Dir url from path returns file scheme.
     fn dir_url_from_path_returns_file_scheme() {
         let root = unique_temp_dir("dir-url");
         let url = dir_url_from_path(&root);
@@ -694,6 +755,7 @@ mod tests {
     }
 
     #[test]
+    // Normalizes startup url rejects directory and accepts file url inside into a canonical form before it is used by sandboxed filesystem access and path normalization.
     fn normalize_startup_url_rejects_directory_and_accepts_file_url_inside() {
         let root = unique_temp_dir("startup-file-url");
         let file = root.join("entry.ts");
@@ -712,6 +774,7 @@ mod tests {
     }
 
     #[test]
+    // Sandboxed path list accepts file url inside and blocks file url outside.
     fn sandboxed_path_list_accepts_file_url_inside_and_blocks_file_url_outside() {
         let root = unique_temp_dir("sandbox-file-url-root");
         let inside = root.join("inside.js");
@@ -737,6 +800,7 @@ mod tests {
     }
 
     #[test]
+    // Normalizes lexical path collapses parent segments into a canonical form before it is used by sandboxed filesystem access and path normalization.
     fn normalize_lexical_path_collapses_parent_segments() {
         let p = PathBuf::from("/tmp/a/../b/./c");
         let out = normalize_lexical_path(&p);
@@ -744,6 +808,7 @@ mod tests {
     }
 
     #[test]
+    // Sandboxed path list blocks lexical escape for nonexistent paths.
     fn sandboxed_path_list_blocks_lexical_escape_for_nonexistent_paths() {
         let root = unique_temp_dir("sandbox-lexical-root");
         let outside_root = unique_temp_dir("sandbox-lexical-outside");

@@ -8,6 +8,7 @@ use crate::worker::eval::eval_in_runtime;
 use crate::worker::messages::{DenoMsg, EvalReply, ExecStats, NodeMsg, ResolvePayload};
 use crate::worker::state::RuntimeLimits;
 
+/// Handle deno msg.
 pub async fn handle_deno_msg(
     worker: &mut MainWorker,
     worker_id: usize,
@@ -38,6 +39,7 @@ pub async fn handle_deno_msg(
     }
 }
 
+// Handle close msg.
 fn handle_close_msg(worker_id: usize, deferred: crate::bridge::promise::PromiseSettler) -> bool {
     deferred.resolve_with_value_via_channel(JsValueBridge::Undefined);
 
@@ -97,6 +99,7 @@ fn handle_close_msg(worker_id: usize, deferred: crate::bridge::promise::PromiseS
     true
 }
 
+// Handle memory msg.
 async fn handle_memory_msg(
     worker: &mut MainWorker,
     worker_id: usize,
@@ -129,6 +132,7 @@ async fn handle_memory_msg(
     false
 }
 
+// Handle post message msg.
 fn handle_post_message_msg(worker: &mut MainWorker, value: JsValueBridge) -> bool {
     let dispatched = {
         deno_core::scope!(scope, &mut worker.js_runtime);
@@ -161,6 +165,7 @@ fn handle_post_message_msg(worker: &mut MainWorker, value: JsValueBridge) -> boo
     false
 }
 
+// Handle set global msg.
 async fn handle_set_global_msg(
     worker: &mut MainWorker,
     worker_id: usize,
@@ -218,6 +223,7 @@ async fn handle_set_global_msg(
     false
 }
 
+// Handle eval msg.
 async fn handle_eval_msg(
     worker: &mut MainWorker,
     worker_id: usize,
@@ -266,6 +272,7 @@ async fn handle_eval_msg(
     false
 }
 
+// Send node msg or reject.
 async fn send_node_msg_or_reject(node_tx: &mpsc::Sender<NodeMsg>, msg: NodeMsg) {
     // If node side is gone, reject pending promise instead of dropping silently.
     if let Err(send_err) = node_tx.send(msg).await {
@@ -275,6 +282,7 @@ async fn send_node_msg_or_reject(node_tx: &mpsc::Sender<NodeMsg>, msg: NodeMsg) 
     }
 }
 
+// Returns node tx from state used by runtime bridge internals.
 fn get_node_tx(worker_id: usize) -> Option<mpsc::Sender<NodeMsg>> {
     crate::WORKERS
         .read()
@@ -283,6 +291,7 @@ fn get_node_tx(worker_id: usize) -> Option<mpsc::Sender<NodeMsg>> {
         .map(|w| w.node_tx.clone())
 }
 
+// Heap stats to json.
 fn heap_stats_to_json(stats: &v8::HeapStatistics) -> serde_json::Value {
     serde_json::json!({
         "totalHeapSize": stats.total_heap_size(),
@@ -300,6 +309,7 @@ fn heap_stats_to_json(stats: &v8::HeapStatistics) -> serde_json::Value {
     })
 }
 
+// Heap space stats to json.
 fn heap_space_stats_to_json(isolate: &mut v8::Isolate) -> serde_json::Value {
     let count = isolate.number_of_heap_spaces();
     let mut out = Vec::with_capacity(count as usize);

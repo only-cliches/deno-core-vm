@@ -24,6 +24,7 @@ enum CallbackDecisionWait {
     TimedOut,
 }
 
+// Controls debug logging behavior used by module loading and import policy flow.
 fn dbg_imports_enabled() -> bool {
     std::env::var("DENOJS_WORKER_DEBUG_IMPORTS")
         .ok()
@@ -34,6 +35,7 @@ fn dbg_imports_enabled() -> bool {
         .unwrap_or(false)
 }
 
+// Emits module-loader debug logs when import debug mode is active.
 fn dbg_imports(msg: impl AsRef<str>) {
     if dbg_imports_enabled() {
         println!("[denojs-worker][imports] {}", msg.as_ref());
@@ -64,6 +66,7 @@ pub struct ModuleRegistry {
 impl ModuleRegistry {
     const DEFAULT_PERSISTENT_LIMIT: usize = 512;
 
+    // Internal helper for module loading and import policy flow; it handles configured persistent limit.
     fn configured_persistent_limit() -> usize {
         std::env::var("DENOJS_WORKER_PERSISTENT_MODULE_LIMIT")
             .ok()
@@ -72,6 +75,7 @@ impl ModuleRegistry {
             .unwrap_or(Self::DEFAULT_PERSISTENT_LIMIT)
     }
 
+    // Constructs a module registry with an explicit persistent entry cap.
     fn with_persistent_limit(persistent_limit: usize) -> Self {
         Self {
             state: Arc::new(Mutex::new(ModuleRegistryState {
@@ -83,15 +87,18 @@ impl ModuleRegistry {
         }
     }
 
+    /// Creates a new instance initialized for module loading and import policy flow.
     pub fn new(_base_url: Url) -> Self {
         Self::with_persistent_limit(Self::configured_persistent_limit())
     }
 
     #[cfg(test)]
+    // Constructs a test registry with a deterministic persistent limit.
     fn with_persistent_limit_for_test(persistent_limit: usize) -> Self {
         Self::with_persistent_limit(persistent_limit)
     }
 
+    // Moves a specifier to most-recent position in persistent-module LRU order.
     fn touch_lru(lru: &mut VecDeque<String>, specifier: &str) {
         if let Some(i) = lru.iter().position(|s| s == specifier) {
             lru.remove(i);
@@ -99,6 +106,7 @@ impl ModuleRegistry {
         lru.push_back(specifier.to_string());
     }
 
+    // Evicts least-recently-used loaded persistent modules when over configured limit.
     fn evict_persistent_if_needed(state: &mut ModuleRegistryState) {
         let mut persistent_count = state.modules.values().filter(|e| e.persistent).count();
         if persistent_count <= state.persistent_limit {
@@ -128,6 +136,7 @@ impl ModuleRegistry {
         }
     }
 
+    /// Returns a unique virtual module specifier for generated source modules.
     pub fn next_virtual_specifier(&self, ext: &str) -> String {
         // Monotonic virtual ids avoid collision across evalModule calls.
         let n = self.counter.fetch_add(1, Ordering::Relaxed) + 1;
@@ -138,6 +147,7 @@ impl ModuleRegistry {
         format!("denojs-worker://virtual/__vm_{n}.{ext}")
     }
 
+    /// Checks whether has and returns the boolean result for module resolution, policy, and remote loading.
     pub fn has(&self, specifier: &str) -> bool {
         self.state
             .lock()
@@ -146,8 +156,12 @@ impl ModuleRegistry {
             .unwrap_or(false)
     }
 
+    /// Stores ephemeral in caches/state used by module resolution, policy, and remote loading.
     pub fn put_ephemeral(&self, specifier: &str, code: &str, module_type: ModuleType) {
-        let mut state = self.state.lock().expect("modules lock");
+        let mut state = match self.state.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         state.modules.insert(
             specifier.to_string(),
             ModuleEntry {
@@ -165,8 +179,12 @@ impl ModuleRegistry {
         }
     }
 
+    /// Stores persistent in caches/state used by module resolution, policy, and remote loading.
     pub fn put_persistent(&self, specifier: &str, code: &str, module_type: ModuleType) {
-        let mut state = self.state.lock().expect("modules lock");
+        let mut state = match self.state.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         state.modules.insert(
             specifier.to_string(),
             ModuleEntry {
@@ -181,14 +199,19 @@ impl ModuleRegistry {
         Self::evict_persistent_if_needed(&mut state);
     }
 
+    /// Removes remove from tracked state used by module resolution, policy, and remote loading.
     pub fn remove(&self, specifier: &str) {
-        let mut state = self.state.lock().expect("modules lock");
+        let mut state = match self.state.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         state.modules.remove(specifier);
         if let Some(i) = state.persistent_lru.iter().position(|s| s == specifier) {
             state.persistent_lru.remove(i);
         }
     }
 
+    /// Returns module source for a load request and updates entry lifecycle/eviction state.
     pub fn get_for_load(&self, specifier: &str) -> Option<(String, ModuleType)> {
         let mut state = self.state.lock().ok()?;
         if let Some(entry) = state.modules.get_mut(specifier) {
@@ -224,6 +247,7 @@ pub struct DynamicModuleLoader {
     pub reg: ModuleRegistry,
     pub node_tx: mpsc::Sender<NodeMsg>,
     pub imports_policy: crate::worker::state::ImportsPolicy,
+    pub wasm: bool,
     pub node_resolve: bool,
     pub node_compat: bool,
     pub sandbox_root: PathBuf,
@@ -234,6 +258,7 @@ pub struct DynamicModuleLoader {
 }
 
 impl DynamicModuleLoader {
+    // Returns the shared HTTP client used for remote module fetches.
     fn shared_http_client() -> Result<&'static reqwest::Client, JsErrorBox> {
         static CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
         let built = CLIENT.get_or_init(|| {
@@ -249,6 +274,7 @@ impl DynamicModuleLoader {
         }
     }
 
+    // Checks whether request path matches an allow-list path boundary.
     fn path_is_prefix_boundary(allow_path: &str, req_path: &str) -> bool {
         if allow_path.is_empty() || allow_path == "/" {
             return true;
@@ -264,6 +290,7 @@ impl DynamicModuleLoader {
                 .unwrap_or(false)
     }
 
+    // Checks scheme/host/port/path prefix match for URL-based import permissions.
     fn match_allow_url_prefix(allow: &Url, req: &Url) -> bool {
         if !allow.scheme().eq_ignore_ascii_case(req.scheme()) {
             return false;
@@ -282,6 +309,7 @@ impl DynamicModuleLoader {
         Self::path_is_prefix_boundary(allow.path(), req.path())
     }
 
+    // Internal helper for module loading and import policy flow; it handles node disk resolve enabled.
     fn node_disk_resolve_enabled(&self) -> bool {
         self.node_resolve
             || self.node_compat
@@ -292,14 +320,17 @@ impl DynamicModuleLoader {
                 .unwrap_or(false)
     }
 
+    // Internal helper for module loading and import policy flow; it handles jsr resolve enabled.
     fn jsr_resolve_enabled(&self) -> bool {
         self.module_loader_cfg().jsr_resolve
     }
 
+    /// Checks whether internal virtual url and returns the boolean result for module resolution, policy, and remote loading.
     pub fn is_internal_virtual_url(u: &Url) -> bool {
         u.scheme() == "denojs-worker" && u.host_str() == Some("virtual")
     }
 
+    /// Checks whether bare specifier and returns the boolean result for module resolution, policy, and remote loading.
     pub fn is_bare_specifier(specifier: &str) -> bool {
         if specifier.starts_with("./") || specifier.starts_with("../") || specifier.starts_with('/')
         {
@@ -314,6 +345,7 @@ impl DynamicModuleLoader {
         true
     }
 
+    // Maps `jsr:` or `@std/*` specifiers to `https://jsr.io/...` URLs.
     fn map_jsr_specifier(specifier: &str) -> Option<String> {
         if let Some(rest) = specifier.strip_prefix("jsr:") {
             let rest = rest.trim().trim_start_matches('/');
@@ -330,6 +362,7 @@ impl DynamicModuleLoader {
         None
     }
 
+    /// Encodes resolve url into transport-safe form for module resolution, policy, and remote loading.
     pub fn encode_resolve_url(&self, specifier: &str, referrer: &str) -> Url {
         let mut u = Url::parse("denojs-worker://resolve").expect("parse resolve url");
         u.query_pairs_mut()
@@ -338,6 +371,7 @@ impl DynamicModuleLoader {
         u
     }
 
+    /// Decodes resolve url from wire/serialized form for module resolution, policy, and remote loading.
     pub fn decode_resolve_url(u: &Url) -> Option<(String, String)> {
         if u.scheme() != "denojs-worker" {
             return None;
@@ -354,6 +388,7 @@ impl DynamicModuleLoader {
         Some((spec?, referrer.unwrap_or_default()))
     }
 
+    /// Checks whether sandbox and returns the boolean result for module resolution, policy, and remote loading.
     pub fn within_sandbox(&self, _file_url: &Url) -> bool {
         let root_abs =
             std::fs::canonicalize(&self.sandbox_root).unwrap_or_else(|_| self.sandbox_root.clone());
@@ -367,6 +402,7 @@ impl DynamicModuleLoader {
         cand_abs.starts_with(&root_abs)
     }
 
+    /// Attempts Node-style disk resolution for a specifier/referrer pair.
     pub fn try_node_resolve_disk(&self, specifier: &str, referrer: &str) -> Option<Url> {
         if !self.node_disk_resolve_enabled() {
             return None;
@@ -497,6 +533,7 @@ impl DynamicModuleLoader {
         None
     }
 
+    /// Attempts Deno module resolution with import policy integration.
     pub fn try_deno_resolve(&self, specifier: &str, referrer: &str) -> Result<Url, JsErrorBox> {
         // Deno's resolver is strict about the referrer being a valid URL (often file://).
         // When our referrer is an internal virtual URL, treat it like "cwd/" for resolution.
@@ -511,11 +548,13 @@ impl DynamicModuleLoader {
             .map_err(|e| JsErrorBox::generic(e.to_string()))
     }
 
+    /// Clones module loader state for async load/resolve operations.
     pub fn clone_for_async(&self) -> Self {
         Self {
             reg: self.reg.clone(),
             node_tx: self.node_tx.clone(),
             imports_policy: self.imports_policy.clone(),
+            wasm: self.wasm,
             node_resolve: self.node_resolve,
             node_compat: self.node_compat,
             sandbox_root: self.sandbox_root.clone(),
@@ -526,6 +565,7 @@ impl DynamicModuleLoader {
         }
     }
 
+    // Extracts original specifier/referrer from wrapped resolve URLs when present.
     fn original_spec_and_referrer(
         module_specifier: &Url,
         maybe_referrer: Option<&deno_core::ModuleLoadReferrer>,
@@ -539,6 +579,7 @@ impl DynamicModuleLoader {
             .unwrap_or_else(|| (spec, referrer_from_runtime))
     }
 
+    // Internal helper for module loading and import policy flow; it handles imports policy error.
     fn imports_policy_error(&self, orig_spec: &str) -> Option<JsErrorBox> {
         match self.imports_policy {
             crate::worker::state::ImportsPolicy::DenyAll => Some(JsErrorBox::generic(format!(
@@ -549,6 +590,7 @@ impl DynamicModuleLoader {
         }
     }
 
+    // Internal helper for module loading and import policy flow; it handles callback imports blocked during eval sync.
     fn callback_imports_blocked_during_eval_sync(&self) -> bool {
         self.eval_sync_active
             .as_ref()
@@ -556,10 +598,12 @@ impl DynamicModuleLoader {
             .unwrap_or(false)
     }
 
+    // Checks whether wrap with redirect and returns the boolean result for module resolution, policy, and remote loading.
     fn should_wrap_with_redirect(requested_specifier: &Url) -> bool {
         requested_specifier.scheme() == "denojs-worker"
     }
 
+    // Resolves allowed disk target according to rules used by module resolution, policy, and remote loading.
     fn resolve_allowed_disk_target(&self, orig_spec: &str, orig_referrer: &str) -> Option<Url> {
         self.try_node_resolve_disk(orig_spec, orig_referrer)
             .or_else(|| {
@@ -569,6 +613,7 @@ impl DynamicModuleLoader {
             .or_else(|| self.try_deno_resolve(orig_spec, orig_referrer).ok())
     }
 
+    // Resolves rewritten target according to rules used by module resolution, policy, and remote loading.
     fn resolve_rewritten_target(&self, rewritten_spec: &str, orig_referrer: &str) -> Option<Url> {
         let ns = rewritten_spec.trim();
         Url::parse(ns)
@@ -581,6 +626,7 @@ impl DynamicModuleLoader {
             .or_else(|| self.try_deno_resolve(ns, orig_referrer).ok())
     }
 
+    // Resolves allow disk or error according to rules used by module resolution, policy, and remote loading.
     fn resolve_allow_disk_or_error(
         &self,
         orig_spec: &str,
@@ -590,6 +636,7 @@ impl DynamicModuleLoader {
             .ok_or_else(|| JsErrorBox::generic(format!("Unable to resolve import: {}", orig_spec)))
     }
 
+    // Resolves rewritten or error according to rules used by module resolution, policy, and remote loading.
     fn resolve_rewritten_or_error(
         &self,
         new_spec: &str,
@@ -603,11 +650,13 @@ impl DynamicModuleLoader {
         })
     }
 
+    // Checks whether load remote non callback and returns the boolean result for module resolution, policy, and remote loading.
     fn should_load_remote_non_callback(&self, module_specifier: &Url) -> bool {
         (module_specifier.scheme() == "http" && self.http_resolve_enabled())
             || (module_specifier.scheme() == "https" && self.https_resolve_enabled())
     }
 
+    // Loads resolved module during module resolution, policy, and remote loading.
     async fn load_resolved_module(
         &self,
         requested_specifier: Url,
@@ -615,6 +664,7 @@ impl DynamicModuleLoader {
         maybe_referrer_owned: Option<deno_core::ModuleLoadReferrer>,
         options: deno_core::ModuleLoadOptions,
     ) -> Result<ModuleSource, JsErrorBox> {
+        self.ensure_wasm_allowed(&resolved)?;
         self.ensure_remote_load_allowed(&resolved)?;
 
         if resolved.scheme() == "file" && !self.within_sandbox(&resolved) {
@@ -648,6 +698,7 @@ impl DynamicModuleLoader {
         })
     }
 
+    // Reads or fetch remote source for module resolution, policy, and remote loading.
     async fn read_or_fetch_remote_source(&self, module_specifier: &Url) -> Result<String, JsErrorBox> {
         let cfg = self.module_loader_cfg();
         let cache_path = self.remote_cache_path(module_specifier);
@@ -666,6 +717,7 @@ impl DynamicModuleLoader {
         Ok(s)
     }
 
+    // Determines final module type for remote source, including TS-like coercions.
     fn final_module_type_for_remote(ext: &str, base: ModuleType) -> ModuleType {
         if DynamicModuleLoader::is_ts_like_ext(ext) {
             ModuleType::JavaScript
@@ -674,10 +726,12 @@ impl DynamicModuleLoader {
         }
     }
 
+    // Loads remote non callback module during module resolution, policy, and remote loading.
     async fn load_remote_non_callback_module(
         &self,
         module_specifier: Url,
     ) -> Result<ModuleSource, JsErrorBox> {
+        self.ensure_wasm_allowed(&module_specifier)?;
         self.ensure_remote_permissions(&module_specifier)?;
         let ext = DynamicModuleLoader::module_ext(&module_specifier).unwrap_or_default();
         let code = self.read_or_fetch_remote_source(&module_specifier).await?;
@@ -693,6 +747,7 @@ impl DynamicModuleLoader {
         ))
     }
 
+    // Normalizes callback decision into a canonical form before it is used by module resolution, policy, and remote loading.
     fn normalize_callback_decision(
         wait: CallbackDecisionWait,
         orig_spec: &str,
@@ -707,6 +762,7 @@ impl DynamicModuleLoader {
         }
     }
 
+    // Internal helper for module loading and import policy flow; it handles source typed wrapper.
     fn source_typed_wrapper(virt: &str) -> String {
         format!(
             "export * from {v};\nexport {{ default }} from {v};\n",
@@ -715,6 +771,7 @@ impl DynamicModuleLoader {
         )
     }
 
+    // Builds source typed module required by module resolution, policy, and remote loading.
     fn build_source_typed_module(
         &self,
         requested_specifier: &Url,
@@ -739,6 +796,7 @@ impl DynamicModuleLoader {
         ))
     }
 
+    // Requests import decision from Node callback channel.
     async fn request_import_decision(
         node_tx: &mpsc::Sender<NodeMsg>,
         orig_spec: &str,
@@ -755,6 +813,7 @@ impl DynamicModuleLoader {
         .await
     }
 
+    // Requests import decision with timeout and channel-closure handling.
     async fn request_import_decision_with_timeout(
         node_tx: &mpsc::Sender<NodeMsg>,
         orig_spec: &str,
@@ -785,10 +844,12 @@ impl DynamicModuleLoader {
         Self::normalize_callback_decision(wait, orig_spec)
     }
 
+    // Returns parsed permissions config used by module permission checks.
     fn permissions_cfg(&self) -> Option<&serde_json::Value> {
         self.permissions.as_ref()
     }
 
+    // Matches host[:port] allow-list entries against URL host and effective port.
     fn match_host_port(allow: &str, host: &str, port: Option<u16>) -> bool {
         let allow = allow.trim();
         if allow.is_empty() {
@@ -825,6 +886,7 @@ impl DynamicModuleLoader {
         allow.eq_ignore_ascii_case(host)
     }
 
+    // Checks whether import url and returns the boolean result for module resolution, policy, and remote loading.
     fn allows_import_url(&self, u: &Url) -> bool {
         let Some(cfg) = self.permissions_cfg() else {
             return false;
@@ -862,6 +924,7 @@ impl DynamicModuleLoader {
         false
     }
 
+    // Checks whether net url and returns the boolean result for module resolution, policy, and remote loading.
     fn allows_net_url(&self, u: &Url) -> bool {
         let Some(cfg) = self.permissions_cfg() else {
             return false;
@@ -887,6 +950,7 @@ impl DynamicModuleLoader {
         false
     }
 
+    // Validates remote import against import/net permission requirements.
     fn ensure_remote_permissions(&self, module_specifier: &Url) -> Result<(), JsErrorBox> {
         if !self.allows_import_url(module_specifier) {
             return Err(JsErrorBox::generic(format!(
@@ -903,6 +967,7 @@ impl DynamicModuleLoader {
         Ok(())
     }
 
+    // Validates resolved remote URL against loader feature flags and permissions.
     fn ensure_remote_load_allowed(&self, resolved: &Url) -> Result<(), JsErrorBox> {
         if resolved.scheme() != "http" && resolved.scheme() != "https" {
             return Ok(());
@@ -925,35 +990,69 @@ impl DynamicModuleLoader {
         self.ensure_remote_permissions(resolved)
     }
 
+    // Returns effective module-loader configuration with defaults.
     fn module_loader_cfg(&self) -> crate::worker::state::ModuleLoaderConfig {
         self.module_loader.clone().unwrap_or_default()
     }
 
+    // Internal helper for module loading and import policy flow; it handles https resolve enabled.
     fn https_resolve_enabled(&self) -> bool {
         self.module_loader_cfg().https_resolve
     }
 
+    // Internal helper for module loading and import policy flow; it handles http resolve enabled.
     fn http_resolve_enabled(&self) -> bool {
         self.module_loader_cfg().http_resolve
     }
 
+    // Returns configured remote payload byte limit.
     fn max_payload_bytes(&self) -> i64 {
         self.module_loader_cfg().max_payload_bytes
     }
 
+    // Transpiles ts enabled as part of module resolution, policy, and remote loading.
     fn transpile_ts_enabled(&self) -> bool {
         self.module_loader_cfg().transpile_ts
     }
 
+    // Extracts lowercased extension from module URL path.
     fn module_ext(u: &Url) -> Option<String> {
         let p = u.path().to_ascii_lowercase();
         p.rsplit('.').next().map(|s| s.to_string())
     }
 
+    // Checks whether a module URL points to a `.wasm` file.
+    fn is_wasm_url(u: &Url) -> bool {
+        Self::module_ext(u).as_deref() == Some("wasm")
+    }
+
+    // Checks whether a raw module specifier references a `.wasm` path.
+    fn is_wasm_specifier(specifier: &str) -> bool {
+        if let Ok(u) = Url::parse(specifier) {
+            return Self::is_wasm_url(&u);
+        }
+        let base = specifier.split('#').next().unwrap_or(specifier);
+        let path_only = base.split('?').next().unwrap_or(base);
+        path_only.to_ascii_lowercase().ends_with(".wasm")
+    }
+
+    // Enforces `limits.wasm` for module loading paths.
+    fn ensure_wasm_allowed(&self, module_specifier: &Url) -> Result<(), JsErrorBox> {
+        if self.wasm || !Self::is_wasm_url(module_specifier) {
+            return Ok(());
+        }
+        Err(JsErrorBox::generic(format!(
+            "WASM module loading is disabled by limits.wasm: {}",
+            module_specifier
+        )))
+    }
+
+    // Checks whether ts like ext and returns the boolean result for module resolution, policy, and remote loading.
     fn is_ts_like_ext(ext: &str) -> bool {
         matches!(ext, "ts" | "tsx" | "jsx")
     }
 
+    // Maps file extension to Deno AST media type for transpilation.
     fn media_type_for_ext(ext: &str) -> deno_ast::MediaType {
         match ext {
             "ts" => deno_ast::MediaType::TypeScript,
@@ -963,6 +1062,7 @@ impl DynamicModuleLoader {
         }
     }
 
+    // Computes cache file path for a remote module URL.
     fn remote_cache_path(&self, module_specifier: &Url) -> PathBuf {
         let cfg = self.module_loader_cfg();
         let base = cfg
@@ -977,6 +1077,7 @@ impl DynamicModuleLoader {
         base.join(format!("{h:016x}.{ext}"))
     }
 
+    // Fetches remote module text with payload guards and descriptive errors.
     async fn fetch_remote_text(
         module_specifier: &Url,
         max_payload_bytes: i64,
@@ -1035,6 +1136,7 @@ impl DynamicModuleLoader {
             .map_err(|e| JsErrorBox::generic(format!("Remote body decode failed: {e}")))
     }
 
+    // Determines module type from URL extension and runtime loading rules.
     fn module_type_for_url(module_specifier: &Url) -> ModuleType {
         let ext = Self::module_ext(module_specifier).unwrap_or_default();
         if ext == "json" {
@@ -1044,6 +1146,7 @@ impl DynamicModuleLoader {
         }
     }
 
+    // Transpiles options from cfg as part of module resolution, policy, and remote loading.
     fn transpile_options_from_cfg(
         cfg: &crate::worker::state::ModuleLoaderConfig,
     ) -> deno_ast::TranspileOptions {
@@ -1079,6 +1182,7 @@ impl DynamicModuleLoader {
         out
     }
 
+    // Returns optional transpiler cache directory from module-loader config.
     fn compiler_cache_dir_from_cfg(
         cfg: &crate::worker::state::ModuleLoaderConfig,
     ) -> Option<PathBuf> {
@@ -1088,6 +1192,7 @@ impl DynamicModuleLoader {
             .map(PathBuf::from)
     }
 
+    // Computes stable transpile cache path from source, specifier, and compiler config.
     fn transpile_cache_path(
         cache_dir: &PathBuf,
         module_specifier: &Url,
@@ -1108,6 +1213,7 @@ impl DynamicModuleLoader {
         cache_dir.join(format!("{h:016x}.js"))
     }
 
+    // Internal helper for module loading and import policy flow; it handles maybe transpile ts like.
     fn maybe_transpile_ts_like(
         &self,
         module_specifier: &Url,
@@ -1173,12 +1279,20 @@ Enable it with transpileTs: true. Specifier: {}",
 }
 
 impl ModuleLoader for DynamicModuleLoader {
+    // Resolves resolve according to rules used by module resolution, policy, and remote loading.
     fn resolve(
         &self,
         specifier: &str,
         referrer: &str,
         _kind: deno_core::ResolutionKind,
     ) -> Result<Url, JsErrorBox> {
+        if !self.wasm && Self::is_wasm_specifier(specifier) {
+            return Err(JsErrorBox::generic(format!(
+                "WASM module loading is disabled by limits.wasm: {}",
+                specifier
+            )));
+        }
+
         // Allow internal virtual URLs to pass through unchanged.
         if let Ok(u) = Url::parse(specifier) {
             if Self::is_internal_virtual_url(&u) {
@@ -1231,6 +1345,7 @@ impl ModuleLoader for DynamicModuleLoader {
         self.try_deno_resolve(specifier, referrer)
     }
 
+    // Loads load during module resolution, policy, and remote loading.
     fn load(
         &self,
         module_specifier: &Url,
@@ -1244,6 +1359,10 @@ impl ModuleLoader for DynamicModuleLoader {
                 .map(|r| r.specifier.as_str())
                 .unwrap_or("<none>")
         ));
+
+        if let Err(err) = self.ensure_wasm_allowed(module_specifier) {
+            return deno_core::ModuleLoadResponse::Sync(Err(err));
+        }
 
         // 1) Serve in-memory modules first
         if let Some((code, module_type)) = self.reg.get_for_load(module_specifier.as_str()) {
@@ -1370,16 +1489,19 @@ mod tests {
     use std::time::Duration;
     use tokio::sync::mpsc;
 
+    // Test helper used by module-loader unit tests.
     fn test_registry(limit: usize) -> ModuleRegistry {
         ModuleRegistry::with_persistent_limit_for_test(limit)
     }
 
+    // Test helper used by module-loader unit tests.
     fn test_loader(https_resolve: bool, permissions: serde_json::Value) -> DynamicModuleLoader {
         let (node_tx, _node_rx) = mpsc::channel(1);
         DynamicModuleLoader {
             reg: ModuleRegistry::new(Url::parse("file:///tmp/").expect("url")),
             node_tx,
             imports_policy: ImportsPolicy::Callback,
+            wasm: true,
             node_resolve: false,
             node_compat: false,
             sandbox_root: PathBuf::from("/tmp"),
@@ -1393,6 +1515,7 @@ mod tests {
         }
     }
 
+    // Internal helper for module loading and import policy flow; it handles run async.
     fn run_async<T>(fut: impl std::future::Future<Output = T>) -> T {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -1402,6 +1525,7 @@ mod tests {
     }
 
     #[test]
+    // Internal helper for module loading and import policy flow; it handles persistent entries are evicted after first load when over limit.
     fn persistent_entries_are_evicted_after_first_load_when_over_limit() {
         let reg = test_registry(2);
         let base = Url::parse("file:///tmp/").expect("url");
@@ -1423,6 +1547,7 @@ mod tests {
     }
 
     #[test]
+    // Internal helper for module loading and import policy flow; it handles never loaded persistent entries are not evicted.
     fn never_loaded_persistent_entries_are_not_evicted() {
         let reg = test_registry(1);
         let base = Url::parse("file:///tmp/").expect("url");
@@ -1444,6 +1569,7 @@ mod tests {
     }
 
     #[test]
+    // Internal helper for module loading and import policy flow; it handles remote load blocked when https resolve disabled.
     fn remote_load_blocked_when_https_resolve_disabled() {
         let loader = test_loader(false, serde_json::json!({ "import": true, "net": true }));
         let url = Url::parse("https://example.com/mod.ts").expect("url");
@@ -1451,6 +1577,7 @@ mod tests {
     }
 
     #[test]
+    // Internal helper for module loading and import policy flow; it handles remote load requires import and net permissions.
     fn remote_load_requires_import_and_net_permissions() {
         let loader = test_loader(true, serde_json::json!({ "import": true, "net": false }));
         let url = Url::parse("https://example.com/mod.ts").expect("url");
@@ -1464,6 +1591,7 @@ mod tests {
     }
 
     #[test]
+    // Internal helper for module loading and import policy flow; it handles import allow url does not match host prefix confusion.
     fn import_allow_url_does_not_match_host_prefix_confusion() {
         let loader = test_loader(
             true,
@@ -1481,6 +1609,7 @@ mod tests {
     }
 
     #[test]
+    // Internal helper for module loading and import policy flow; it handles import allow url honors path boundary.
     fn import_allow_url_honors_path_boundary() {
         let loader = test_loader(
             true,
@@ -1498,6 +1627,7 @@ mod tests {
     }
 
     #[test]
+    // Internal helper for module loading and import policy flow; it handles map jsr specifier maps jsr and std forms.
     fn map_jsr_specifier_maps_jsr_and_std_forms() {
         let a = DynamicModuleLoader::map_jsr_specifier("jsr:@std/assert");
         assert_eq!(a.as_deref(), Some("https://jsr.io/@std/assert"));
@@ -1510,6 +1640,7 @@ mod tests {
     }
 
     #[test]
+    // Internal helper for module loading and import policy flow; it handles original spec and referrer prefers decoded resolve url.
     fn original_spec_and_referrer_prefers_decoded_resolve_url() {
         let u = Url::parse(
             "denojs-worker://resolve?specifier=https%3A%2F%2Fexample.com%2Fa.ts&referrer=file%3A%2F%2F%2Ftmp%2Fmain.ts",
@@ -1521,6 +1652,7 @@ mod tests {
     }
 
     #[test]
+    // Internal helper for module loading and import policy flow; it handles original spec and referrer falls back to runtime referrer.
     fn original_spec_and_referrer_falls_back_to_runtime_referrer() {
         let module = Url::parse("file:///tmp/mod.ts").expect("url");
         let runtime_ref = deno_core::ModuleLoadReferrer {
@@ -1535,6 +1667,7 @@ mod tests {
     }
 
     #[test]
+    // Internal helper for module loading and import policy flow; it handles imports policy error only for deny all.
     fn imports_policy_error_only_for_deny_all() {
         let deny = DynamicModuleLoader {
             imports_policy: ImportsPolicy::DenyAll,
@@ -1561,6 +1694,7 @@ mod tests {
     }
 
     #[test]
+    // Internal helper for module loading and import policy flow; it handles callback imports blocked during eval sync tracks atomic state.
     fn callback_imports_blocked_during_eval_sync_tracks_atomic_state() {
         let active = Arc::new(AtomicBool::new(false));
         let loader = DynamicModuleLoader {
@@ -1574,6 +1708,7 @@ mod tests {
     }
 
     #[test]
+    // Checks whether wrap with redirect is true only for internal resolve scheme and returns the boolean result for module resolution, policy, and remote loading.
     fn should_wrap_with_redirect_is_true_only_for_internal_resolve_scheme() {
         let internal = Url::parse("denojs-worker://resolve?specifier=x").expect("url");
         let file = Url::parse("file:///tmp/mod.ts").expect("url");
@@ -1585,6 +1720,7 @@ mod tests {
     }
 
     #[test]
+    // Resolves allowed disk target resolves direct remote urls according to rules used by module resolution, policy, and remote loading.
     fn resolve_allowed_disk_target_resolves_direct_remote_urls() {
         let loader = test_loader(true, serde_json::json!({ "import": true, "net": true }));
         let out = loader
@@ -1594,6 +1730,7 @@ mod tests {
     }
 
     #[test]
+    // Resolves rewritten target supports absolute url and trim according to rules used by module resolution, policy, and remote loading.
     fn resolve_rewritten_target_supports_absolute_url_and_trim() {
         let loader = test_loader(true, serde_json::json!({ "import": true, "net": true }));
         let out = loader
@@ -1603,6 +1740,7 @@ mod tests {
     }
 
     #[test]
+    // Checks whether load remote non callback respects scheme and config and returns the boolean result for module resolution, policy, and remote loading.
     fn should_load_remote_non_callback_respects_scheme_and_config() {
         let https_only = DynamicModuleLoader {
             module_loader: Some(ModuleLoaderConfig {
@@ -1635,6 +1773,43 @@ mod tests {
     }
 
     #[test]
+    // Checks `limits.wasm` enforcement for wasm module URLs.
+    fn ensure_wasm_allowed_blocks_wasm_when_disabled() {
+        let disabled = DynamicModuleLoader {
+            wasm: false,
+            ..test_loader(true, serde_json::json!({ "import": true, "net": true }))
+        };
+        let enabled = DynamicModuleLoader {
+            wasm: true,
+            ..test_loader(true, serde_json::json!({ "import": true, "net": true }))
+        };
+
+        let wasm = Url::parse("file:///tmp/mod.wasm").expect("url");
+        let js = Url::parse("file:///tmp/mod.js").expect("url");
+
+        assert!(disabled.ensure_wasm_allowed(&wasm).is_err());
+        assert!(disabled.ensure_wasm_allowed(&js).is_ok());
+        assert!(enabled.ensure_wasm_allowed(&wasm).is_ok());
+    }
+
+    #[test]
+    // Checks resolve-time wasm blocking for disabled limits.wasm.
+    fn resolve_blocks_wasm_when_disabled() {
+        let disabled = DynamicModuleLoader {
+            wasm: false,
+            ..test_loader(true, serde_json::json!({ "import": true, "net": true }))
+        };
+        let out = deno_core::ModuleLoader::resolve(
+            &disabled,
+            "file:///tmp/mod.wasm",
+            "file:///tmp/main.ts",
+            deno_core::ResolutionKind::Import,
+        );
+        assert!(out.is_err());
+    }
+
+    #[test]
+    // Internal helper for module loading and import policy flow; it handles final module type for remote forces js for ts like ext.
     fn final_module_type_for_remote_forces_js_for_ts_like_ext() {
         assert_eq!(
             DynamicModuleLoader::final_module_type_for_remote("ts", ModuleType::Json),
@@ -1655,6 +1830,7 @@ mod tests {
     }
 
     #[test]
+    // Normalizes callback decision maps channel closed to block into a canonical form before it is used by module resolution, policy, and remote loading.
     fn normalize_callback_decision_maps_channel_closed_to_block() {
         let out = DynamicModuleLoader::normalize_callback_decision(
             CallbackDecisionWait::ChannelClosed,
@@ -1665,6 +1841,7 @@ mod tests {
     }
 
     #[test]
+    // Normalizes callback decision preserves decision variant into a canonical form before it is used by module resolution, policy, and remote loading.
     fn normalize_callback_decision_preserves_decision_variant() {
         let out = DynamicModuleLoader::normalize_callback_decision(
             CallbackDecisionWait::Decision(ImportDecision::Resolve(
@@ -1680,6 +1857,7 @@ mod tests {
     }
 
     #[test]
+    // Normalizes callback decision reports timeout with specifier into a canonical form before it is used by module resolution, policy, and remote loading.
     fn normalize_callback_decision_reports_timeout_with_specifier() {
         let err = DynamicModuleLoader::normalize_callback_decision(
             CallbackDecisionWait::TimedOut,
@@ -1692,6 +1870,7 @@ mod tests {
     }
 
     #[test]
+    // Internal helper for module loading and import policy flow; it handles source typed wrapper quotes virtual specifier.
     fn source_typed_wrapper_quotes_virtual_specifier() {
         let virt = "denojs-worker://virtual/__vm_42.js";
         let wrapper = DynamicModuleLoader::source_typed_wrapper(virt);
@@ -1702,6 +1881,7 @@ mod tests {
     }
 
     #[test]
+    // Resolves allow disk or error produces expected success and error according to rules used by module resolution, policy, and remote loading.
     fn resolve_allow_disk_or_error_produces_expected_success_and_error() {
         let loader = test_loader(true, serde_json::json!({ "import": true, "net": true }));
 
@@ -1717,6 +1897,7 @@ mod tests {
     }
 
     #[test]
+    // Resolves rewritten or error produces expected success and error according to rules used by module resolution, policy, and remote loading.
     fn resolve_rewritten_or_error_produces_expected_success_and_error() {
         let loader = test_loader(true, serde_json::json!({ "import": true, "net": true }));
 
@@ -1734,6 +1915,7 @@ mod tests {
     }
 
     #[test]
+    // Builds source typed module registers virtual module for js required by module resolution, policy, and remote loading.
     fn build_source_typed_module_registers_virtual_module_for_js() {
         let loader = test_loader(true, serde_json::json!({ "import": true, "net": true }));
         let requested = Url::parse("denojs-worker://resolve?specifier=x").expect("url");
@@ -1746,6 +1928,7 @@ mod tests {
     }
 
     #[test]
+    // Builds source typed module rejects ts when transpile disabled required by module resolution, policy, and remote loading.
     fn build_source_typed_module_rejects_ts_when_transpile_disabled() {
         let loader = DynamicModuleLoader {
             module_loader: Some(ModuleLoaderConfig {
@@ -1762,6 +1945,7 @@ mod tests {
     }
 
     #[test]
+    // Internal helper for module loading and import policy flow; it handles request import decision returns reply from node channel.
     fn request_import_decision_returns_reply_from_node_channel() {
         run_async(async {
             let (tx, mut rx) = mpsc::channel(1);
@@ -1785,6 +1969,7 @@ mod tests {
     }
 
     #[test]
+    // Internal helper for module loading and import policy flow; it handles request import decision channel closed maps to block.
     fn request_import_decision_channel_closed_maps_to_block() {
         run_async(async {
             let (tx, mut rx) = mpsc::channel(1);
@@ -1808,6 +1993,7 @@ mod tests {
     }
 
     #[test]
+    // Internal helper for module loading and import policy flow; it handles request import decision timeout returns error.
     fn request_import_decision_timeout_returns_error() {
         run_async(async {
             let (tx, mut rx) = mpsc::channel(1);
@@ -1833,6 +2019,7 @@ mod tests {
     }
 
     #[test]
+    // Internal helper for module loading and import policy flow; it handles request import decision unavailable when channel closed.
     fn request_import_decision_unavailable_when_channel_closed() {
         run_async(async {
             let (tx, rx) = mpsc::channel(1);

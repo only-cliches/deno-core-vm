@@ -10,6 +10,7 @@ mod node_imports;
 
 pub use deno_commands::handle_deno_msg;
 
+/// Dispatch node msg.
 pub fn dispatch_node_msg(worker_id: usize, msg: NodeMsg) {
     // Snapshot callback/function roots under lock, then release the lock before
     // scheduling onto the Neon channel to avoid lock inversion with callbacks.

@@ -399,12 +399,14 @@ type StreamFrame = {
     credit?: number;
 };
 
+/** Checks whether a payload matches the structured stream-frame envelope shape. */
 function isStreamFrame(v: unknown): v is StreamFrame {
     if (!v || typeof v !== "object") return false;
     const obj = v as Record<string, unknown>;
     return obj[STREAM_BRIDGE_TAG] === true && typeof obj.id === "string" && typeof obj.t === "string";
 }
 
+/** Converts outgoing stream chunks to an efficient Uint8Array/Buffer view without copying when possible. */
 function toBinaryChunk(chunk: Uint8Array | ArrayBuffer): Uint8Array {
     if (chunk instanceof Uint8Array) {
         if (typeof Buffer !== "undefined" && !Buffer.isBuffer(chunk)) {
@@ -419,6 +421,7 @@ function toBinaryChunk(chunk: Uint8Array | ArrayBuffer): Uint8Array {
     return u8;
 }
 
+/** Coerces unknown binary-like values into a Uint8Array view for envelope parsing. */
 function asUint8View(value: unknown): Uint8Array | null {
     if (typeof Uint8Array === "undefined") return null;
     if (value instanceof Uint8Array) return value;
@@ -434,6 +437,7 @@ function asUint8View(value: unknown): Uint8Array | null {
     return null;
 }
 
+/** Encodes a logical stream frame into the binary bridge envelope format. */
 function encodeStreamFrameEnvelope(frame: Omit<StreamFrame, typeof STREAM_BRIDGE_TAG>): Uint8Array {
     const typeCode = STREAM_FRAME_TYPE_TO_CODE[frame.t];
     if (!typeCode) {
@@ -488,6 +492,7 @@ function encodeStreamFrameEnvelope(frame: Omit<StreamFrame, typeof STREAM_BRIDGE
     return out;
 }
 
+/** Decodes a binary bridge envelope back into a logical stream frame object. */
 function decodeStreamFrameEnvelope(payload: unknown): StreamFrame | null {
     const u8 = asUint8View(payload);
     if (!u8) return null;
@@ -530,6 +535,7 @@ function decodeStreamFrameEnvelope(payload: unknown): StreamFrame | null {
     return frame;
 }
 
+/** Generates a high-entropy stream key used when callers do not provide one. */
 function generateSecureRandomStreamKey(): string {
     try {
         if (typeof globalThis.crypto?.randomUUID === "function") {
@@ -563,18 +569,22 @@ class StreamReaderImpl implements DenoWorkerStreamReader {
     private onChunkConsumed?: (bytes: number) => void;
     private discarded = false;
 
+    /** Registers a callback used to send local cancel notifications to the remote writer. */
     setRemoteCancel(fn: (reason?: string) => void): void {
         this.remoteCancel = fn;
     }
 
+    /** Registers a callback invoked once this reader has been locally discarded. */
     setOnLocalDiscard(fn: () => void): void {
         this.onLocalDiscard = fn;
     }
 
+    /** Registers a callback fired after each consumed chunk for credit replenishment. */
     setOnChunkConsumed(fn: (bytes: number) => void): void {
         this.onChunkConsumed = fn;
     }
 
+    /** Marks the reader as locally discarded exactly once and fires discard hooks. */
     private markLocalDiscarded(): void {
         if (this.discarded) return;
         this.discarded = true;
@@ -585,11 +595,13 @@ class StreamReaderImpl implements DenoWorkerStreamReader {
         }
     }
 
+    /** Queues an incoming data chunk for `read()` consumers. */
     pushChunk(chunk: Uint8Array): void {
         if (this.closed || this.done) return;
         this.pushEvent({ kind: "chunk", chunk });
     }
 
+    /** Marks the remote side as closed and resolves pending reads as done. */
     closeRemote(): void {
         if (this.closed) return;
         this.closed = true;
@@ -597,6 +609,7 @@ class StreamReaderImpl implements DenoWorkerStreamReader {
         this.pushEvent({ kind: "close" });
     }
 
+    /** Marks the remote side as failed and rejects pending reads with the error. */
     errorRemote(error: unknown): void {
         if (this.closed) return;
         this.closed = true;
@@ -604,6 +617,7 @@ class StreamReaderImpl implements DenoWorkerStreamReader {
         this.pushEvent({ kind: "error", error });
     }
 
+    /** Delivers an event to waiters immediately or appends it to the internal queue. */
     private pushEvent(ev: StreamReadEvent): void {
         if (this.waiting.length > 0) {
             const next = this.waiting.shift()!;
@@ -622,6 +636,7 @@ class StreamReaderImpl implements DenoWorkerStreamReader {
         this.queue.push(ev);
     }
 
+    /** Reads the next stream chunk or terminal event from this reader. */
     async read(): Promise<IteratorResult<Uint8Array>> {
         if (this.done) return { done: true, value: undefined as any };
         if (this.queue.length > 0) {
@@ -644,6 +659,7 @@ class StreamReaderImpl implements DenoWorkerStreamReader {
         });
     }
 
+    /** Cancels local consumption and notifies the remote side with an optional reason. */
     async cancel(reason?: string): Promise<void> {
         if (!this.done && !this.closed) {
             this.closed = true;
@@ -662,6 +678,7 @@ class StreamReaderImpl implements DenoWorkerStreamReader {
         }
     }
 
+    /** Exposes this reader as an async iterator yielding incoming binary chunks. */
     [Symbol.asyncIterator](): AsyncIterableIterator<Uint8Array> {
         const self = this;
         return {
@@ -725,21 +742,25 @@ export class DenoWorker {
     private handleBridgeInstallPromise: Promise<void> | null = null;
     private readonly activeHandleIds = new Set<string>();
     private readonly maxHandle: number;
+    /** Stream transport API for creating writers and accepting incoming readers. */
     readonly stream: DenoWorkerStreamApi = {
         create: (key?: string) => this.streamCreate(key),
         accept: (key: string) => this.streamAccept(key),
     };
+    /** Handle API for binding to runtime values by path or evaluated source. */
     readonly handle: DenoWorkerHandleApi = {
         get: (path: string, options?: DenoWorkerHandleExecOptions) => this.handleGet(path, options),
         tryGet: (path: string, options?: DenoWorkerHandleExecOptions) => this.handleTryGet(path, options),
         eval: (source: string, options?: Omit<EvalOptions, "args" | "type">) => this.handleEval(source, options),
     };
 
+    /** Allocates the next unique handle id scoped to the current native epoch. */
     private nextHandleId(): string {
         this.handleCounter += 1;
         return `h:${this.nativeEpoch}:${this.handleCounter}`;
     }
 
+    /** Enforces the configured maximum number of simultaneously active handles. */
     private ensureHandleCapacity(): void {
         if (this.activeHandleIds.size < this.maxHandle) return;
         const e: any = new Error(`handle limit reached (${this.maxHandle})`);
@@ -747,12 +768,14 @@ export class DenoWorker {
         throw e;
     }
 
+    /** Invalidates all host handle wrappers after close/restart and clears handle bookkeeping. */
     private invalidateHandles(): void {
         this.handleGeneration += 1;
         this.handleBridgeInstallPromise = null;
         this.activeHandleIds.clear();
     }
 
+    /** Installs the runtime-side handle bridge once per epoch, with shared in-flight installation. */
     private async ensureHandleBridgeInstalled(): Promise<void> {
         if (this.handleBridgeInstallPromise) return this.handleBridgeInstallPromise;
         const pending = this.eval(HANDLE_RUNTIME_INSTALL_SOURCE).then(() => undefined);
@@ -765,6 +788,7 @@ export class DenoWorker {
         }
     }
 
+    /** Runs a handle operation by dispatching payload through the runtime handle bridge entrypoint. */
     private async runHandleOp(
         payload: Record<string, unknown>,
         options?: Omit<EvalOptions, "args" | "type">,
@@ -777,6 +801,7 @@ export class DenoWorker {
         });
     }
 
+    /** Builds a host-side handle object bound to a runtime handle id and generation. */
     private createHandle(
         id: string,
         generation: number,
@@ -974,6 +999,7 @@ export class DenoWorker {
         return handle as DenoWorkerHandle;
     }
 
+    /** Fast-path check for binary payloads that can be forwarded directly to native `setGlobal`. */
     private isBinaryLikeValue(value: any): boolean {
         if (typeof Buffer !== "undefined" && Buffer.isBuffer(value)) return true;
         if (typeof ArrayBuffer !== "undefined" && value instanceof ArrayBuffer) return true;
@@ -989,6 +1015,7 @@ export class DenoWorker {
         return false;
     }
 
+    /** Recursively serializes globals while preserving special types and avoiding cycles. */
     private serializeGlobalValue(value: any, seen?: WeakSet<object>): any {
         if (value === undefined) return null;
         if (value === null) return null;
@@ -1025,6 +1052,7 @@ export class DenoWorker {
         return out;
     }
 
+    /** Sets a global on native runtime after host-side serialization and in-flight tracking. */
     private async setGlobalInternal(key: string, value: any): Promise<void> {
         try {
             const payload = this.isBinaryLikeValue(value) ? value : this.serializeGlobalValue(value);
@@ -1034,6 +1062,7 @@ export class DenoWorker {
         }
     }
 
+    /** Initializes constructor-time globals and tracks startup readiness/error state. */
     private initializeStartup(globals?: Record<string, any>): void {
         const entries = globals && typeof globals === "object" ? Object.entries(globals) : [];
         if (entries.length === 0) {
@@ -1061,6 +1090,7 @@ export class DenoWorker {
             });
     }
 
+    /** Emits lifecycle callbacks to configured hooks and runtime subscribers. */
     private invokeHook(phase: DenoWorkerLifecyclePhase, extra?: Partial<DenoWorkerLifecycleContext>): void {
         const ctx: DenoWorkerLifecycleContext = {
             phase,
@@ -1089,6 +1119,7 @@ export class DenoWorker {
         }
     }
 
+    /** Constructs a new native worker instance and routes creation failures through crash hooks. */
     private createNative(requested: boolean): NativeWorker {
         try {
             return (nativeAddon as any).DenoWorker(normalizeWorkerOptions(this.creationOptions)) as NativeWorker;
@@ -1107,6 +1138,7 @@ export class DenoWorker {
         }
     }
 
+    /** Wires native message/close events to wrapper message routing, stream handling, and lifecycle flow. */
     private bindNativeEvents(native: NativeWorker, epoch: number): void {
         native.on("message", (msg: any) => {
             if (epoch !== this.nativeEpoch) return;
@@ -1140,6 +1172,7 @@ export class DenoWorker {
         });
     }
 
+    /** Calls all registered close listeners once. */
     private emitCloseHandlers(): void {
         if (this.closeHandlers.size === 0) return;
         for (const cb of [...this.closeHandlers]) {
@@ -1151,21 +1184,25 @@ export class DenoWorker {
         }
     }
 
+    /** Ensures close listeners are emitted only a single time per worker lifecycle. */
     private emitCloseHandlersIfNeeded(): void {
         if (this.closeNotified) return;
         this.closeNotified = true;
         this.emitCloseHandlers();
     }
 
+    /** Allocates the next unique stream id for either native or wrapper-initiated streams. */
     private nextStreamId(prefix: "n" | "w" = "n"): string {
         this.streamCounter += 1;
         return `${prefix}:${this.nativeEpoch}:${this.streamCounter}`;
     }
 
+    /** Sends one logical stream frame to runtime after envelope encoding. */
     private emitStreamFrame(frame: Omit<StreamFrame, typeof STREAM_BRIDGE_TAG>): void {
         this.postMessageRaw(encodeStreamFrameEnvelope(frame));
     }
 
+    /** Sends a batch of logical stream frames using native bulk-post when available. */
     private emitStreamFrames(frames: Array<Omit<StreamFrame, typeof STREAM_BRIDGE_TAG>>): void {
         if (frames.length === 0) return;
         const raw = frames.map((f) => encodeStreamFrameEnvelope(f));
@@ -1179,6 +1216,7 @@ export class DenoWorker {
         for (const frame of raw) this.postMessageRaw(frame);
     }
 
+    /** Accumulates consumed-byte credits for a stream and schedules credit frame flushes. */
     private queueCreditFrame(id: string, bytes: number): void {
         if (!Number.isFinite(bytes) || bytes <= 0) return;
         const prev = this.pendingCreditFrames.get(id) || 0;
@@ -1195,6 +1233,7 @@ export class DenoWorker {
         });
     }
 
+    /** Flushes queued stream credit updates to the remote writer side. */
     private flushCreditFrames(): void {
         if (this.pendingCreditFrames.size === 0 || this.isClosed()) return;
         const frames: Array<Omit<StreamFrame, typeof STREAM_BRIDGE_TAG>> = [];
@@ -1206,6 +1245,7 @@ export class DenoWorker {
         this.emitStreamFrames(frames);
     }
 
+    /** Adds writer credit and resolves any waiters now meeting their required minimum. */
     private addWriterCredit(id: string, credit: number): void {
         if (!Number.isFinite(credit) || credit <= 0) return;
         const next = (this.streamWriterCredits.get(id) || 0) + Math.trunc(credit);
@@ -1221,12 +1261,14 @@ export class DenoWorker {
         else this.streamWriterWaiters.delete(id);
     }
 
+    /** Deducts consumed writer credit after chunk transmission. */
     private consumeWriterCredit(id: string, amount: number): void {
         const have = this.streamWriterCredits.get(id) || 0;
         const next = have - amount;
         this.streamWriterCredits.set(id, next > 0 ? next : 0);
     }
 
+    /** Waits until a stream has at least `minBytes` of writable credit. */
     private waitForWriterCredit(id: string, minBytes: number): Promise<void> {
         if ((this.streamWriterCredits.get(id) || 0) >= minBytes) return Promise.resolve();
         const pending = new Promise<void>((resolve, reject) => {
@@ -1239,6 +1281,7 @@ export class DenoWorker {
         return pending;
     }
 
+    /** Registers a newly opened stream key/id pair and guards against duplicates. */
     private registerStream(name: string, id: string): void {
         if (this.streamById.has(id)) {
             throw new Error(`Duplicate stream id: ${id}`);
@@ -1250,6 +1293,7 @@ export class DenoWorker {
         this.streamNameToId.set(name, id);
     }
 
+    /** Marks local discard state for a stream and emits discard frame to remote side. */
     private markLocalDiscard(id: string): void {
         const meta = this.streamById.get(id);
         if (!meta || meta.localDiscarded) return;
@@ -1262,6 +1306,7 @@ export class DenoWorker {
         this.tryReleaseStream(id);
     }
 
+    /** Marks that remote side acknowledged discard for a stream. */
     private markRemoteDiscard(id: string): void {
         const meta = this.streamById.get(id);
         if (!meta || meta.remoteDiscarded) return;
@@ -1269,6 +1314,7 @@ export class DenoWorker {
         this.tryReleaseStream(id);
     }
 
+    /** Releases stream bookkeeping once both local and remote discard markers are observed. */
     private tryReleaseStream(id: string): void {
         const meta = this.streamById.get(id);
         if (!meta) return;
@@ -1287,12 +1333,14 @@ export class DenoWorker {
         if (current === id) this.streamNameToId.delete(meta.name);
     }
 
+    /** Rejects an incoming stream open request by emitting error+discard control frames. */
     private rejectIncomingOpen(id: string, name: string, reason: string): void {
         this.pendingIncomingStreamFrames.delete(id);
         this.emitStreamFrame({ t: "error", id, error: reason });
         this.emitStreamFrame({ t: "discard", id });
     }
 
+    /** Delivers an accepted stream to a pending accept waiter or stores it in backlog. */
     private queueAcceptedStream(name: string, reader: DenoWorkerStreamReader): void {
         const waiter = this.streamPendingAccepts.get(name);
         if (waiter) {
@@ -1303,6 +1351,7 @@ export class DenoWorker {
         this.streamBacklog.set(name, reader);
     }
 
+    /** Temporarily buffers out-of-order stream frames until corresponding `open` is processed. */
     private queuePendingIncomingStreamFrame(frame: StreamFrame): void {
         const queued = this.pendingIncomingStreamFrames.get(frame.id) || [];
         if (queued.length >= 256) queued.shift();
@@ -1310,6 +1359,7 @@ export class DenoWorker {
         this.pendingIncomingStreamFrames.set(frame.id, queued);
     }
 
+    /** Handles incoming stream control/data frames and routes them to the appropriate reader state. */
     private handleIncomingStreamFrame(payload: unknown): boolean {
         if (!isStreamFrame(payload)) return false;
         const frame = payload;
@@ -1405,6 +1455,7 @@ export class DenoWorker {
         }
     }
 
+    /** Fails and clears all tracked stream state, notifying readers/writers/accept waiters. */
     private failAllStreams(reason: string): void {
         for (const reader of this.streamIncoming.values()) {
             reader.errorRemote(new Error(reason));
@@ -1427,6 +1478,7 @@ export class DenoWorker {
         this.streamPendingAccepts.clear();
     }
 
+    /** Tracks in-flight async operations so they can be force-rejected during shutdown. */
     private trackInFlight<T>(promise: Promise<T>): Promise<T> {
         let settled = false;
         let rejectTracked: (reason: unknown) => void = () => {};
@@ -1465,6 +1517,7 @@ export class DenoWorker {
         return wrapped;
     }
 
+    /** Rejects all currently tracked in-flight wrapper operations with a shared reason. */
     private rejectInFlight(reason: unknown): void {
         const pending = [...this.inFlightRejectors];
         this.inFlightRejectors.clear();
@@ -1588,6 +1641,7 @@ export class DenoWorker {
         this.postMessageRaw(payload);
     }
 
+    /** Posts a pre-serialized payload directly to native message channel. */
     private postMessageRaw(msg: any): void {
         if (this.isClosed()) {
             throw new Error("DenoWorker.postMessage failed: worker is closed");
@@ -1647,6 +1701,7 @@ export class DenoWorker {
         return this.native.postMessage(payload);
     }
 
+    /** Creates an outgoing stream writer and manages writer-side flow-control + lifecycle. */
     private streamCreate(key?: string): DenoWorkerStreamWriter {
         const provided = key != null;
         const streamKey = provided ? String(key || "").trim() : "";
@@ -1788,6 +1843,7 @@ export class DenoWorker {
         };
     }
 
+    /** Waits for an incoming stream reader for the provided key (or returns queued backlog immediately). */
     private async streamAccept(key: string): Promise<DenoWorkerStreamReader> {
         const streamName = String(key || "").trim();
         if (!streamName) {
@@ -1994,6 +2050,7 @@ export class DenoWorker {
         await this.setGlobalInternal(key, value);
     }
 
+    /** Creates a handle rooted at an existing runtime path (throws when path is absent). */
     private async handleGet(path: string, options?: DenoWorkerHandleExecOptions): Promise<DenoWorkerHandle> {
         const p = String(path ?? "").trim();
         if (!p) throw new Error("handle.get(path) requires a non-empty path");
@@ -2007,6 +2064,7 @@ export class DenoWorker {
         return this.createHandle(id, this.handleGeneration, rootType, defaultExecOptions);
     }
 
+    /** Creates a handle for an existing runtime path and returns `undefined` when path is missing. */
     private async handleTryGet(path: string, options?: DenoWorkerHandleExecOptions): Promise<DenoWorkerHandle | undefined> {
         try {
             return await this.handleGet(path, options);
@@ -2017,6 +2075,7 @@ export class DenoWorker {
         }
     }
 
+    /** Creates a new runtime handle by evaluating source and using its result as handle root. */
     private async handleEval(source: string, options?: Omit<EvalOptions, "args" | "type">): Promise<DenoWorkerHandle> {
         const src = String(source ?? "");
         if (!src.trim()) throw new Error("handle.eval(source) requires non-empty source");

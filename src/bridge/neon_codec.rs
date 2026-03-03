@@ -16,6 +16,7 @@ thread_local! {
     static BYTE_VEC_POOL: RefCell<Vec<Vec<u8>>> = const { RefCell::new(Vec::new()) };
 }
 
+// Rent byte vec.
 fn rent_byte_vec(min_capacity: usize) -> Vec<u8> {
     BYTE_VEC_POOL.with(|pool| {
         let mut pool = pool.borrow_mut();
@@ -29,6 +30,7 @@ fn rent_byte_vec(min_capacity: usize) -> Vec<u8> {
     })
 }
 
+// Give back byte vec.
 fn give_back_byte_vec(mut v: Vec<u8>) {
     // Keep pooled buffers bounded; 1 MiB covers common transfer chunks.
     if v.capacity() > 1024 * 1024 {
@@ -43,6 +45,7 @@ fn give_back_byte_vec(mut v: Vec<u8>) {
     });
 }
 
+// Returns string prop from state used by bridge encoding/decoding between Rust, V8, and Neon.
 fn get_string_prop<'a, C: Context<'a>>(
     cx: &mut C,
     obj: Handle<'a, JsObject>,
@@ -53,6 +56,7 @@ fn get_string_prop<'a, C: Context<'a>>(
     Some(s.value(cx))
 }
 
+// Object to string tag.
 fn object_to_string_tag<'a, C: Context<'a>>(cx: &mut C, v: Handle<'a, JsValue>) -> Option<String> {
     let out: Handle<JsString> = cx
         .try_catch(|cx| {
@@ -81,6 +85,7 @@ fn object_to_string_tag<'a, C: Context<'a>>(cx: &mut C, v: Handle<'a, JsValue>) 
     Some(out.value(cx))
 }
 
+/// Reflect construct.
 pub(crate) fn reflect_construct<'a, C: Context<'a>>(
     cx: &mut C,
     ctor: Handle<'a, JsFunction>,
@@ -136,6 +141,7 @@ fn is_regexp_like<'a, C: Context<'a>>(cx: &mut C, v: Handle<'a, JsValue>) -> boo
     has_source && has_flags && has_exec
 }
 
+// Attempts to json stringify with replacer and returns a fallible result for bridge encoding/decoding between Rust, V8, and Neon.
 fn try_json_stringify_with_replacer<'a, C: Context<'a>>(
     cx: &mut C,
     value: Handle<'a, JsValue>,
@@ -523,6 +529,7 @@ fn try_json_stringify_with_replacer<'a, C: Context<'a>>(
     serde_json::from_str::<serde_json::Value>(&s.value(cx)).ok()
 }
 
+// Attempts to v8 serialize bytes and returns a fallible result for bridge encoding/decoding between Rust, V8, and Neon.
 fn try_v8_serialize_bytes<'a, C: Context<'a>>(
     cx: &mut C,
     value: Handle<'a, JsValue>,
@@ -554,6 +561,7 @@ fn try_v8_serialize_bytes<'a, C: Context<'a>>(
     .ok()
 }
 
+/// Constructs neon value from source input for bridge encoding/decoding between Rust, V8, and Neon.
 pub fn from_neon_value<'a, C: Context<'a>>(
     cx: &mut C,
     value: Handle<'a, JsValue>,
@@ -772,6 +780,7 @@ pub fn from_neon_value<'a, C: Context<'a>>(
     Ok(JsValueBridge::Undefined)
 }
 
+// Make arraybuffer from bytes.
 fn make_arraybuffer_from_bytes<'a, C: Context<'a>>(
     cx: &mut C,
     bytes: &[u8],
@@ -852,6 +861,7 @@ fn make_arraybuffer_from_bytes<'a, C: Context<'a>>(
     Ok(ab_obj.upcast())
 }
 
+// Make shared arraybuffer from bytes.
 fn make_shared_arraybuffer_from_bytes<'a, C: Context<'a>>(
     cx: &mut C,
     bytes: &[u8],
@@ -889,6 +899,7 @@ fn make_shared_arraybuffer_from_bytes<'a, C: Context<'a>>(
     Ok(sab_obj.upcast())
 }
 
+// Buffer view to neon.
 fn buffer_view_to_neon<'a, C: Context<'a>>(
     cx: &mut C,
     kind: &str,
@@ -953,6 +964,7 @@ fn buffer_view_to_neon<'a, C: Context<'a>>(
     reflect_construct(cx, u8_ctor, &[ab_v, bo_v, len_v])
 }
 
+// Json to neon.
 fn json_to_neon<'a, C: Context<'a>>(
     cx: &mut C,
     v: &serde_json::Value,
@@ -1240,6 +1252,7 @@ fn json_to_neon<'a, C: Context<'a>>(
     }
 }
 
+/// Converts neon value into output representation for bridge encoding/decoding between Rust, V8, and Neon.
 pub fn to_neon_value<'a, C: Context<'a>>(
     cx: &mut C,
     value: &JsValueBridge,
@@ -1493,6 +1506,7 @@ pub fn to_neon_value<'a, C: Context<'a>>(
     }
 }
 
+/// Evaluates result to neon within the execution flow for bridge encoding/decoding between Rust, V8, and Neon.
 pub fn eval_result_to_neon<'a>(
     cx: &mut FunctionContext<'a>,
     reply: EvalReply,

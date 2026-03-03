@@ -18,14 +18,17 @@ lazy_static! {
     pub(crate) static ref NEXT_ID: AtomicUsize = AtomicUsize::new(1);
 }
 
+/// Parses eval options from input data and validates it for runtime bridge internals.
 pub(crate) fn parse_eval_options<'a>(cx: &mut FunctionContext<'a>, idx: i32) -> EvalOptions {
     EvalOptions::from_neon(cx, idx).unwrap_or_default()
 }
 
+/// Mk err.
 pub(crate) fn mk_err(message: impl Into<String>) -> JsValueBridge {
     crate::bridge::errors::error("Error", message)
 }
 
+/// Queue deno msg or reject with backpressure.
 pub(crate) fn queue_deno_msg_or_reject_with_backpressure(
     tx: tokio::sync::mpsc::Sender<DenoMsg>,
     msg: DenoMsg,
@@ -44,6 +47,7 @@ pub(crate) fn queue_deno_msg_or_reject_with_backpressure(
     }
 }
 
+/// Deno control tx for worker.
 pub(crate) fn deno_control_tx_for_worker(
     worker_id: usize,
 ) -> Option<tokio::sync::mpsc::Sender<DenoMsg>> {
@@ -53,6 +57,7 @@ pub(crate) fn deno_control_tx_for_worker(
         .and_then(|map| map.get(&worker_id).map(|w| w.deno_tx.clone()))
 }
 
+/// Deno data tx for worker.
 pub(crate) fn deno_data_tx_for_worker(worker_id: usize) -> Option<tokio::sync::mpsc::Sender<DenoMsg>> {
     WORKERS
         .read()
@@ -60,6 +65,7 @@ pub(crate) fn deno_data_tx_for_worker(worker_id: usize) -> Option<tokio::sync::m
         .and_then(|map| map.get(&worker_id).map(|w| w.deno_data_tx.clone()))
 }
 
+/// Queue deno msg or reject.
 pub(crate) fn queue_deno_msg_or_reject<F>(worker_id: usize, settler: PromiseSettler, mk_msg: F)
 where
     F: FnOnce(PromiseSettler) -> DenoMsg,
@@ -89,6 +95,7 @@ where
 }
 
 #[neon::main]
+// Main.
 fn main(mut cx: ModuleContext) -> NeonResult<()> {
     cx.export_function("DenoWorker", native_api::create_worker)?;
     Ok(())

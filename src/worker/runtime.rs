@@ -77,6 +77,7 @@ extension!(
     esm = ["src/worker/bootstrap.js"],
 );
 
+// Cfg items.
 fn cfg_items(v: &serde_json::Value) -> Option<Vec<String>> {
     v.as_array().map(|arr| {
         arr.iter()
@@ -85,6 +86,7 @@ fn cfg_items(v: &serde_json::Value) -> Option<Vec<String>> {
     })
 }
 
+// Applies perm field updates used by worker runtime lifecycle and thread orchestration.
 fn apply_perm_field(
     cfg: &serde_json::Value,
     key: &str,
@@ -113,6 +115,7 @@ fn apply_perm_field(
     });
 }
 
+// Permissions from limits.
 fn permissions_from_limits(limits: &RuntimeLimits, root: &Path) -> PermissionsContainer {
     let desc_parser: std::sync::Arc<dyn PermissionDescriptorParser> =
         std::sync::Arc::new(RuntimePermissionDescriptorParser::new(RealSys));
@@ -162,6 +165,7 @@ fn permissions_from_limits(limits: &RuntimeLimits, root: &Path) -> PermissionsCo
     PermissionsContainer::new(desc_parser, perms)
 }
 
+// Inspector addr.
 fn inspector_addr(host: &str, port: u16) -> std::net::SocketAddr {
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
@@ -177,6 +181,7 @@ fn inspector_addr(host: &str, port: u16) -> std::net::SocketAddr {
     SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), port)
 }
 
+// Inspector http response.
 fn inspector_http_response(method: &str, path: &str, port: u16) -> (&'static str, String) {
     if method == "GET" && path == "/json/version" {
         return (
@@ -195,6 +200,7 @@ fn inspector_http_response(method: &str, path: &str, port: u16) -> (&'static str
     ("404 Not Found", r#"{"error":"not found"}"#.to_string())
 }
 
+// Parses http method path from input data and validates it for worker runtime lifecycle and thread orchestration.
 fn parse_http_method_path(req: &str) -> (String, String) {
     let first_line = req.lines().next().unwrap_or("");
     let mut parts = first_line.split_whitespace();
@@ -203,12 +209,14 @@ fn parse_http_method_path(req: &str) -> (String, String) {
     (method, path)
 }
 
+// Creates params from limits used by worker runtime lifecycle and thread orchestration.
 fn create_params_from_limits(limits: &RuntimeLimits) -> Option<deno_core::v8::CreateParams> {
     let max_mem = limits.max_memory_bytes?;
     let max_heap = usize::try_from(max_mem).unwrap_or(usize::MAX);
     Some(deno_core::v8::Isolate::create_params().heap_limits(0, max_heap))
 }
 
+// Emit startup warning.
 fn emit_startup_warning(worker: &mut MainWorker, message: &str) {
     let msg_json = serde_json::to_string(message).unwrap_or_else(|_| "\"startup warning\"".into());
     let script = format!(
@@ -218,6 +226,7 @@ fn emit_startup_warning(worker: &mut MainWorker, message: &str) {
     eprintln!("[deno-director] {message}");
 }
 
+// Mark worker closed.
 fn mark_worker_closed(worker_id: usize) {
     if let Ok(map) = crate::WORKERS.read() {
         if let Some(w) = map.get(&worker_id) {
@@ -226,6 +235,7 @@ fn mark_worker_closed(worker_id: usize) {
     }
 }
 
+/// Spawns worker thread as part of worker runtime lifecycle and thread orchestration.
 pub fn spawn_worker_thread(
     worker_id: usize,
     limits: RuntimeLimits,
@@ -261,6 +271,7 @@ pub fn spawn_worker_thread(
                 }
 
                 let handle = std::thread::spawn(move || {
+                    // Writes http for worker runtime lifecycle and thread orchestration.
                     fn write_http(mut stream: &std::net::TcpStream, status: &str, body: &str) {
                         let hdr = format!(
                             "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -348,6 +359,7 @@ pub fn spawn_worker_thread(
                 reg: module_reg.clone(),
                 node_tx: node_tx.clone(),
                 imports_policy: limits.imports.clone(),
+                wasm: limits.wasm,
                 node_resolve: limits.node_resolve,
                 node_compat: limits.node_compat,
                 sandbox_root: cwd_path.clone(),
@@ -547,6 +559,7 @@ mod tests {
     use std::collections::{HashMap, HashSet};
 
     #[test]
+    // Env access defaults to deny.
     fn env_access_defaults_to_deny() {
         let limits = RuntimeLimits::default();
         assert!(matches!(
@@ -556,6 +569,7 @@ mod tests {
     }
 
     #[test]
+    // Env access honors true and false.
     fn env_access_honors_true_and_false() {
         let mut allow = RuntimeLimits::default();
         allow.permissions = Some(serde_json::json!({ "env": true }));
@@ -573,6 +587,7 @@ mod tests {
     }
 
     #[test]
+    // Env access honors allow list.
     fn env_access_honors_allow_list() {
         let mut limits = RuntimeLimits::default();
         limits.permissions = Some(serde_json::json!({ "env": ["A", "B"] }));
@@ -588,6 +603,7 @@ mod tests {
     }
 
     #[test]
+    // Merges env snapshot overlays and filters invalid keys while preserving invariants required by worker runtime lifecycle and thread orchestration.
     fn merge_env_snapshot_overlays_and_filters_invalid_keys() {
         let mut base = HashMap::new();
         base.insert("A".to_string(), "1".to_string());
@@ -609,6 +625,7 @@ mod tests {
     }
 
     #[test]
+    // Cfg items keeps only string entries.
     fn cfg_items_keeps_only_string_entries() {
         let v = serde_json::json!(["a", 1, true, "b", null, {"x":1}]);
         let out = cfg_items(&v).expect("array");
@@ -616,6 +633,7 @@ mod tests {
     }
 
     #[test]
+    // Applies perm field honors bool and list forms updates used by worker runtime lifecycle and thread orchestration.
     fn apply_perm_field_honors_bool_and_list_forms() {
         let cfg = serde_json::json!({
             "read": true,
@@ -645,6 +663,7 @@ mod tests {
     }
 
     #[test]
+    // Applies perm field ignores missing or non array non bool updates used by worker runtime lifecycle and thread orchestration.
     fn apply_perm_field_ignores_missing_or_non_array_non_bool() {
         let cfg = serde_json::json!({
             "env": "invalid",
@@ -662,6 +681,7 @@ mod tests {
     }
 
     #[test]
+    // Inspector addr accepts ip and normalizes localhost.
     fn inspector_addr_accepts_ip_and_normalizes_localhost() {
         let ipv4 = inspector_addr("127.0.0.1", 9229);
         assert_eq!(ipv4.ip().to_string(), "127.0.0.1");
@@ -677,6 +697,7 @@ mod tests {
     }
 
     #[test]
+    // Inspector addr falls back to loopback for invalid host.
     fn inspector_addr_falls_back_to_loopback_for_invalid_host() {
         let out = inspector_addr("not-a-valid-hostname", 9222);
         assert_eq!(out.ip().to_string(), "127.0.0.1");
@@ -684,6 +705,7 @@ mod tests {
     }
 
     #[test]
+    // Inspector http response serves version endpoint.
     fn inspector_http_response_serves_version_endpoint() {
         let (status, body) = inspector_http_response("GET", "/json/version", 9229);
         assert_eq!(status, "200 OK");
@@ -692,6 +714,7 @@ mod tests {
     }
 
     #[test]
+    // Inspector http response serves list endpoint with port.
     fn inspector_http_response_serves_list_endpoint_with_port() {
         let (status, body) = inspector_http_response("GET", "/json/list", 9333);
         assert_eq!(status, "200 OK");
@@ -703,6 +726,7 @@ mod tests {
     }
 
     #[test]
+    // Inspector http response returns 404 for unknown paths or methods.
     fn inspector_http_response_returns_404_for_unknown_paths_or_methods() {
         let (status_path, body_path) = inspector_http_response("GET", "/unknown", 9229);
         assert_eq!(status_path, "404 Not Found");
@@ -714,6 +738,7 @@ mod tests {
     }
 
     #[test]
+    // Parses http method path extracts method and path from input data and validates it for worker runtime lifecycle and thread orchestration.
     fn parse_http_method_path_extracts_method_and_path() {
         let req = "GET /json/list HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n";
         let (method, path) = parse_http_method_path(req);
@@ -722,6 +747,7 @@ mod tests {
     }
 
     #[test]
+    // Parses http method path handles invalid or empty requests from input data and validates it for worker runtime lifecycle and thread orchestration.
     fn parse_http_method_path_handles_invalid_or_empty_requests() {
         let (m1, p1) = parse_http_method_path("");
         assert_eq!(m1, "");
@@ -733,11 +759,13 @@ mod tests {
     }
 
     #[test]
+    // Mark worker closed is noop for unknown worker id.
     fn mark_worker_closed_is_noop_for_unknown_worker_id() {
         mark_worker_closed(usize::MAX);
     }
 
     #[test]
+    // Creates params from limits only when max memory is set used by worker runtime lifecycle and thread orchestration.
     fn create_params_from_limits_only_when_max_memory_is_set() {
         let none = RuntimeLimits::default();
         assert!(create_params_from_limits(&none).is_none());

@@ -75,6 +75,7 @@ export class DenoDirector {
         this.template = new DenoWorkerTemplate(options?.template);
     }
 
+    /** Adds a runtime id to the label index for quick `getByLabel` lookups. */
     private indexLabel(id: string, label: string | undefined): void {
         if (!label) return;
         let ids = this.labelIndex.get(label);
@@ -85,6 +86,7 @@ export class DenoDirector {
         ids.add(id);
     }
 
+    /** Removes a runtime id from label index and prunes empty label buckets. */
     private unindexLabel(id: string, label: string | undefined): void {
         if (!label) return;
         const ids = this.labelIndex.get(label);
@@ -93,6 +95,7 @@ export class DenoDirector {
         if (ids.size === 0) this.labelIndex.delete(label);
     }
 
+    /** Removes a runtime record and its indexes by id. */
     private unregisterById(id: string): boolean {
         const rec = this.byId.get(id);
         if (!rec) return false;
@@ -101,17 +104,20 @@ export class DenoDirector {
         return true;
     }
 
+    /** Throws when the candidate runtime id is already registered. */
     private ensureUniqueId(id: string): void {
         if (this.byId.has(id)) {
             throw new Error(`Runtime id already exists: ${id}`);
         }
     }
 
+    /** Resolves either a runtime object or an id into a managed runtime instance. */
     private coerceRuntime(runtimeOrId: DenoDirectedRuntime | string): DenoDirectedRuntime | undefined {
         if (typeof runtimeOrId !== "string") return runtimeOrId;
         return this.byId.get(runtimeOrId)?.runtime;
     }
 
+    /** Attaches immutable orchestration metadata to the runtime instance. */
     private attachMeta(runtime: any, meta: DenoRuntimeMeta): DenoDirectedRuntime {
         Object.defineProperty(runtime, "meta", {
             value: meta,

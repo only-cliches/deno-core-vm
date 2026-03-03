@@ -41,6 +41,7 @@ struct EvalTimerService {
 }
 
 impl EvalTimerService {
+    // Global.
     fn global() -> &'static EvalTimerService {
         static TIMER: OnceLock<EvalTimerService> = OnceLock::new();
         TIMER.get_or_init(|| {
@@ -103,6 +104,7 @@ impl EvalTimerService {
         })
     }
 
+    // Arm.
     fn arm(&self, timeout_ms: u64, cancel: Arc<AtomicBool>, isolate_handle: v8::IsolateHandle) -> u64 {
         let timer_id = self.next_timer_id.fetch_add(1, Ordering::Relaxed);
         let deadline = Instant::now() + Duration::from_millis(timeout_ms);
@@ -115,11 +117,13 @@ impl EvalTimerService {
         timer_id
     }
 
+    // Disarm.
     fn disarm(&self, timer_id: u64) {
         let _ = self.tx.send(EvalTimerCmd::Disarm { timer_id });
     }
 }
 
+// Transpiles ts enabled as part of runtime eval, module execution, and timeout handling.
 fn transpile_ts_enabled(limits: &RuntimeLimits) -> bool {
     limits
         .module_loader
@@ -128,6 +132,7 @@ fn transpile_ts_enabled(limits: &RuntimeLimits) -> bool {
         .unwrap_or(false)
 }
 
+// Transpiles options from limits as part of runtime eval, module execution, and timeout handling.
 fn transpile_options_from_limits(limits: &RuntimeLimits) -> deno_ast::TranspileOptions {
     let mut out = deno_ast::TranspileOptions::default();
     let Some(cfg) = limits.module_loader.as_ref() else {
@@ -167,6 +172,7 @@ fn transpile_options_from_limits(limits: &RuntimeLimits) -> deno_ast::TranspileO
     out
 }
 
+// Media type for eval filename.
 fn media_type_for_eval_filename(filename: &str) -> deno_ast::MediaType {
     let ext = filename
         .rsplit('.')
@@ -181,6 +187,7 @@ fn media_type_for_eval_filename(filename: &str) -> deno_ast::MediaType {
     }
 }
 
+// Specifier for eval filename.
 fn specifier_for_eval_filename(filename: &str, media: deno_ast::MediaType) -> Url {
     if let Ok(u) = Url::parse(filename) {
         return u;
@@ -196,6 +203,7 @@ fn specifier_for_eval_filename(filename: &str, media: deno_ast::MediaType) -> Ur
         .expect("internal eval transpile specifier should parse")
 }
 
+// Maybe transpile eval source.
 fn maybe_transpile_eval_source(
     limits: &RuntimeLimits,
     filename: &str,
@@ -253,6 +261,7 @@ fn maybe_transpile_eval_source(
     Ok(transpiled)
 }
 
+// Transpiles cache path from limits as part of runtime eval, module execution, and timeout handling.
 fn transpile_cache_path_from_limits(
     limits: &RuntimeLimits,
     filename: &str,
@@ -282,6 +291,7 @@ fn transpile_cache_path_from_limits(
     Some(PathBuf::from(cache_dir).join(format!("{h:016x}.js")))
 }
 
+// Mk err.
 fn mk_err(name: &str, message: String) -> JsValueBridge {
     JsValueBridge::Error {
         name: name.to_string(),
@@ -292,6 +302,7 @@ fn mk_err(name: &str, message: String) -> JsValueBridge {
     }
 }
 
+// Rejection to bridge fallback.
 fn rejection_to_bridge_fallback<'s, 'p>(
     ps: &mut v8::PinScope<'s, 'p>,
     v: v8::Local<'s, v8::Value>,
@@ -416,6 +427,7 @@ fn execute_script_catching(
     Ok(v8::Global::new(scope, v_val))
 }
 
+// Ensure runtime env bridge.
 fn ensure_runtime_env_bridge(worker: &mut MainWorker) {
     let _ = worker.js_runtime.execute_script(
         "<runtime_env_bridge>",
@@ -428,6 +440,7 @@ fn ensure_runtime_env_bridge(worker: &mut MainWorker) {
     );
 }
 
+/// Evaluates in runtime within the execution flow for runtime eval, module execution, and timeout handling.
 pub async fn eval_in_runtime(
     worker: &mut MainWorker,
     limits: &RuntimeLimits,
@@ -499,6 +512,7 @@ pub async fn eval_in_runtime(
     }
 }
 
+// Evaluates script or callable within the execution flow for runtime eval, module execution, and timeout handling.
 async fn eval_script_or_callable(
     worker: &mut MainWorker,
     source: &str,
@@ -534,6 +548,7 @@ async fn eval_script_or_callable(
     settle_until_non_promise(worker, global).await
 }
 
+// Evaluates module within the execution flow for runtime eval, module execution, and timeout handling.
 async fn eval_module(
     worker: &mut MainWorker,
     source: &str,
@@ -626,6 +641,7 @@ async fn eval_module(
     settle_until_non_promise(worker, out).await
 }
 
+// Attempts to call if function and returns a fallible result for runtime eval, module execution, and timeout handling.
 fn try_call_if_function(
     worker: &mut MainWorker,
     value: deno_core::v8::Global<v8::Value>,
@@ -655,6 +671,7 @@ fn try_call_if_function(
     Ok(v8::Global::new(scope, out))
 }
 
+// Settle until non promise.
 async fn settle_until_non_promise(
     worker: &mut MainWorker,
     mut value: deno_core::v8::Global<v8::Value>,
@@ -716,6 +733,7 @@ mod tests {
     use super::{media_type_for_eval_filename, transpile_cache_path_from_limits};
     use crate::worker::state::{ModuleLoaderConfig, RuntimeLimits, TsCompilerConfig};
 
+    // Limits with cache.
     fn limits_with_cache(
         cache_dir: Option<&str>,
         jsx: Option<&str>,
@@ -737,6 +755,7 @@ mod tests {
     }
 
     #[test]
+    // Transpiles cache path is none without cache dir as part of runtime eval, module execution, and timeout handling.
     fn transpile_cache_path_is_none_without_cache_dir() {
         let limits = limits_with_cache(None, Some("react"), None);
         let media = media_type_for_eval_filename("x.ts");
@@ -745,6 +764,7 @@ mod tests {
     }
 
     #[test]
+    // Transpiles cache path is stable for same inputs as part of runtime eval, module execution, and timeout handling.
     fn transpile_cache_path_is_stable_for_same_inputs() {
         let limits = limits_with_cache(Some("/tmp/cache"), Some("react-jsx"), Some("h"));
         let media = media_type_for_eval_filename("x.tsx");
@@ -759,6 +779,7 @@ mod tests {
     }
 
     #[test]
+    // Transpiles cache path changes with source or compiler flags as part of runtime eval, module execution, and timeout handling.
     fn transpile_cache_path_changes_with_source_or_compiler_flags() {
         let base = limits_with_cache(Some("/tmp/cache"), Some("react"), None);
         let changed_source = limits_with_cache(Some("/tmp/cache"), Some("react"), None);

@@ -1499,6 +1499,7 @@ function bufferViewFromWire(obj) {
   const GRAPH_REF_KEY = "__denojs_worker_graph_ref";
   const GRAPH_KIND_KEY = "__denojs_worker_graph_kind";
   const GRAPH_VALUE_KEY = "__denojs_worker_graph_value";
+  const FORBIDDEN_PROTO_KEYS = new Set(["__proto__", "constructor", "prototype"]);
 
   globalThis.__hydrate = function (v) {
     const graphMap = new Map();
@@ -1537,7 +1538,10 @@ function bufferViewFromWire(obj) {
         const out = {};
         graphMap.set(id, out);
         if (raw && typeof raw === "object") {
-          for (const [k, val] of Object.entries(raw)) out[k] = hydrateInner(val);
+          for (const [k, val] of Object.entries(raw)) {
+            if (FORBIDDEN_PROTO_KEYS.has(k)) continue;
+            out[k] = hydrateInner(val);
+          }
         }
         return out;
       }
@@ -1672,7 +1676,10 @@ function bufferViewFromWire(obj) {
       }
 
       const out = {};
-      for (const [k, val] of Object.entries(vv)) out[k] = hydrateInner(val);
+      for (const [k, val] of Object.entries(vv)) {
+        if (FORBIDDEN_PROTO_KEYS.has(k)) continue;
+        out[k] = hydrateInner(val);
+      }
       return out;
     }
 

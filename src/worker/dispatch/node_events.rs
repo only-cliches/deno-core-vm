@@ -3,6 +3,7 @@ use neon::prelude::*;
 use crate::bridge::types::JsValueBridge;
 use crate::worker::state::NodeCallbacks;
 
+/// Handle emit message.
 pub fn handle_emit_message(
     cx: &mut TaskContext,
     callbacks: &NodeCallbacks,
@@ -27,6 +28,7 @@ pub fn handle_emit_message(
     Ok(())
 }
 
+/// Handle emit close.
 pub fn handle_emit_close(
     cx: &mut TaskContext,
     worker_id: usize,

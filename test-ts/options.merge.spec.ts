@@ -4,13 +4,14 @@ describe("options.mergeWorkerOptions", () => {
   test("deep merges limits instead of replacing object", () => {
     const merged = mergeWorkerOptions(
       { limits: { maxEvalMs: 25, maxHandle: 2 } },
-      { limits: { maxMemoryBytes: 1024 * 1024 } },
+      { limits: { maxMemoryBytes: 1024 * 1024, wasm: false } },
     );
 
     expect(merged?.limits).toMatchObject({
       maxEvalMs: 25,
       maxHandle: 2,
       maxMemoryBytes: 1024 * 1024,
+      wasm: false,
     });
   });
 

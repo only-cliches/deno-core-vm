@@ -63,6 +63,7 @@ pub struct EvalOptions {
 }
 
 impl Default for EvalOptions {
+    // Provides default default values used by bridge encoding/decoding between Rust, V8, and Neon.
     fn default() -> Self {
         Self {
             filename: "Unnamed Script".to_string(),
@@ -75,6 +76,7 @@ impl Default for EvalOptions {
 }
 
 impl EvalOptions {
+    /// Constructs neon from source input for bridge encoding/decoding between Rust, V8, and Neon.
     pub fn from_neon<'a>(cx: &mut FunctionContext<'a>, idx: i32) -> Result<Self, Throw> {
         let mut out = EvalOptions::default();
 
@@ -129,6 +131,7 @@ impl EvalOptions {
 }
 
 impl JsValueBridge {
+    /// Js error to bridge.
     pub fn js_error_to_bridge(e: Box<deno_core::error::JsError>) -> Self {
         Self::Error {
             name: "Error".into(),
@@ -139,6 +142,7 @@ impl JsValueBridge {
         }
     }
 
+    /// Any error to bridge.
     pub fn any_error_to_bridge(e: deno_core::error::AnyError) -> Self {
         Self::Error {
             name: "Error".into(),
@@ -149,6 +153,7 @@ impl JsValueBridge {
         }
     }
 
+    /// Simple err.
     pub fn simple_err(msg: String) -> Self {
         Self::Error {
             name: "Error".into(),

@@ -63,6 +63,7 @@ pub enum DenoMsg {
 }
 
 impl DenoMsg {
+    /// Checks whether data plane and returns the boolean result for runtime bridge internals.
     pub fn is_data_plane(&self) -> bool {
         matches!(self, DenoMsg::PostMessage { .. })
     }

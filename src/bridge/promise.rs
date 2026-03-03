@@ -10,6 +10,7 @@ struct DeferredGuard {
     deferred: Option<neon::types::Deferred>,
 }
 
+// Safe to neon.
 fn safe_to_neon<'a, C: Context<'a>>(
     cx: &mut C,
     value: &crate::bridge::types::JsValueBridge,
@@ -21,18 +22,21 @@ fn safe_to_neon<'a, C: Context<'a>>(
 }
 
 impl DeferredGuard {
+    // Creates a new instance initialized for value bridge serialization and conversion.
     fn new(deferred: neon::types::Deferred) -> Self {
         Self {
             deferred: Some(deferred),
         }
     }
 
+    // Take.
     fn take(&mut self) -> neon::types::Deferred {
         self.deferred.take().expect("deferred already taken")
     }
 }
 
 impl Drop for DeferredGuard {
+    // Drop.
     fn drop(&mut self) {
         if let Some(d) = self.deferred.take() {
             // Last-resort: avoid "Deferred dropped without being settled"
@@ -53,6 +57,7 @@ pub struct PromiseSettler {
 }
 
 impl PromiseSettler {
+    /// Creates a new instance initialized for value bridge serialization and conversion.
     pub fn new(deferred: neon::types::Deferred, channel: Channel) -> Self {
         Self {
             deferred: Some(deferred),
@@ -61,15 +66,18 @@ impl PromiseSettler {
         }
     }
 
+    /// With date ctor.
     pub fn with_date_ctor(mut self, ctor: Root<JsFunction>) -> Self {
         self.date_ctor = Some(Arc::new(ctor));
         self
     }
 
+    // Take deferred.
     fn take_deferred(&mut self) -> Option<neon::types::Deferred> {
         self.deferred.take()
     }
 
+    // Send task.
     fn send_task<F>(&self, deferred: neon::types::Deferred, f: F)
     where
         F: for<'a> FnOnce(&mut TaskContext<'a>, neon::types::Deferred) + Send + 'static,
@@ -104,6 +112,7 @@ impl PromiseSettler {
         });
     }
 
+    /// Resolves with value via channel according to rules used by bridge encoding/decoding between Rust, V8, and Neon.
     pub fn resolve_with_value_via_channel(mut self, value: JsValueBridge) {
         let Some(deferred) = self.take_deferred() else {
             return;
@@ -132,6 +141,7 @@ impl PromiseSettler {
         });
     }
 
+    /// Reject with value via channel.
     pub fn reject_with_value_via_channel(mut self, value: JsValueBridge) {
         let Some(deferred) = self.take_deferred() else {
             return;
@@ -178,6 +188,7 @@ impl PromiseSettler {
         deferred.resolve(cx, v);
     }
 
+    /// Reject with value in cx.
     pub fn reject_with_value_in_cx<'a, C: Context<'a>>(
         mut self,
         cx: &mut C,
@@ -198,6 +209,7 @@ impl PromiseSettler {
         deferred.reject(cx, v);
     }
 
+    /// Resolves with json in cx according to rules used by bridge encoding/decoding between Rust, V8, and Neon.
     pub fn resolve_with_json_in_cx<'a, C: Context<'a>>(mut self, cx: &mut C, json_text: &str) {
         let Some(deferred) = self.take_deferred() else {
             return;
@@ -229,6 +241,7 @@ impl PromiseSettler {
         }
     }
 
+    /// Reject with error in cx.
     pub fn reject_with_error_in_cx<'a, C: Context<'a>>(
         mut self,
         cx: &mut C,
@@ -249,6 +262,7 @@ impl PromiseSettler {
 }
 
 impl Drop for PromiseSettler {
+    // Drop.
     fn drop(&mut self) {
         let Some(deferred) = self.deferred.take() else {
             return;
