@@ -20,6 +20,7 @@ All notable changes to this project will be documented in this file.
 - Added test harness + cleanup utilities for Jest (`test-ts/helpers.worker-harness.ts`, `test-ts/jest.setup.ts`).
 - Added guard script to block new `as any` usage in tests (`codex/check-test-any.sh`).
 - Added runtime `inspectPort` surface to expose the actual bound inspector port (including ephemeral assignment when `inspect.port = 0`).
+- Added messaging regression coverage to ensure plain-object Node->worker control messages still round-trip with ack responses (prevents `nodeToWorkerReset`-style stalls).
 
 ### Changed
 - Migrated remote module toggle from `moduleLoader.denoRemote` to `moduleLoader.httpsResolve`.
@@ -42,7 +43,9 @@ All notable changes to this project will be documented in this file.
 - Replaced per-eval timeout thread spawning with a dedicated timer watchdog thread and channel-based scheduling.
 - Switched global worker registry locking from `Mutex<HashMap<...>>` to `RwLock<HashMap<...>>` to reduce read-path contention.
 - Reordered V8 object serialization fallback to prefer structured clone (`ValueSerializer`) before JSON stringification.
-- Reordered Node->Deno Neon codec structured-value fallback to prefer native `__v8.serialize` before JSON stringify/replacer fallback.
+- Updated Node->Deno Neon codec structured-value fallback:
+  - plain objects/arrays remain on JSON wire for transport compatibility,
+  - non-plain structured values prefer native `__v8.serialize` before JSON stringify/replacer fallback.
 - Updated inspect option normalization/parsing to allow `port: 0` for OS-assigned ephemeral debugging ports.
 - Reduced bridge conversion overhead for plain Deno objects/arrays by short-circuiting `serde_v8` output directly to `JsValueBridge::Json` when no wire markers are present (avoids an extra `wire::from_wire_json` pass).
 

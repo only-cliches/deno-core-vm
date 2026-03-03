@@ -132,4 +132,45 @@ describe("deno_worker: messaging", () => {
     expect(echoed.b.a).toBe(echoed);
     expect(echoed.same).toBe(echoed.b);
   });
+
+  it("delivers plain-object control messages Node -> worker without stalls (regression)", async () => {
+    dw = createTestWorker();
+
+    await dw.eval(`
+      on("message", (msg) => {
+        if (msg && typeof msg === "object" && msg.__bench_cmd === "nodeToWorkerReset") {
+          postMessage({
+            __bench_ack: true,
+            kind: "nodeToWorkerReset",
+            targetMsgs: msg.targetMsgs ?? null,
+          });
+        }
+      });
+    `);
+
+    const ackPromise = new Promise<any>((resolve, reject) => {
+      const t = setTimeout(() => {
+        reject(new Error("timed out waiting for nodeToWorkerReset ack"));
+      }, 3000);
+
+      dw.on("message", (msg: any) => {
+        if (msg && msg.__bench_ack === true && msg.kind === "nodeToWorkerReset") {
+          clearTimeout(t);
+          resolve(msg);
+        }
+      });
+    });
+
+    dw.postMessage({
+      __bench_cmd: "nodeToWorkerReset",
+      targetMsgs: 4,
+      ackEvery: 0,
+    });
+
+    await expect(ackPromise).resolves.toMatchObject({
+      __bench_ack: true,
+      kind: "nodeToWorkerReset",
+      targetMsgs: 4,
+    });
+  });
 });

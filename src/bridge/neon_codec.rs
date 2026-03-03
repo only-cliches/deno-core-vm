@@ -718,9 +718,20 @@ pub fn from_neon_value<'a, C: Context<'a>>(
         }
     }
 
-    // Structured values (objects/arrays): prefer V8 structured clone first,
-    // then JSON-with-tags via replacer fallback for non-cloneable host objects.
+    // Structured values (objects/arrays):
+    // - Plain Object/Array stay on JSON wire for robust Node<->Deno transport compatibility.
+    // - Non-plain structured objects try V8 structured clone first, then JSON fallback.
     if value.is_a::<JsArray, _>(cx) || value.is_a::<JsObject, _>(cx) {
+        let tag = object_to_string_tag(cx, value);
+        let is_plain = matches!(tag.as_deref(), Some("[object Object]" | "[object Array]"));
+
+        if is_plain {
+            if let Some(j) = try_json_stringify_with_replacer(cx, value) {
+                return Ok(JsValueBridge::Json(j));
+            }
+            return Ok(JsValueBridge::Undefined);
+        }
+
         let v8_attempt: Option<JsValueBridge> = cx
             .try_catch(|cx| {
                 let v8obj = cx.global::<JsObject>("__v8")?;
