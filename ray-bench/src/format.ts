@@ -66,14 +66,15 @@ export function printPlainTable(
                 continue;
             }
             const best = bestByWorker.get(wc);
-            const marker = best != null && Math.abs(t - best) < 1e-9 ? " *" : "";
-            row.push(`${formatMs(t)}${marker}`);
+            const marker = best != null && Math.abs(t - best) < 1e-9 ? "* " : "";
+            row.push(`${marker}${formatMs(t)}`);
         }
         return row;
     });
 
     const widths = headers.map((h, i) => Math.max(h.length, ...rows.map((r) => (r[i] == null ? 0 : r[i].length))));
     const numericStart = 3;
+    for (let i = numericStart; i < widths.length; i += 1) widths[i] = Math.max(widths[i], 12);
     const padCell = (text: string, idx: number) =>
         idx >= numericStart ? text.padStart(widths[idx]) : text.padEnd(widths[idx]);
     const joinRow = (cells: string[]) => `| ${cells.map((c, i) => padCell(c, i)).join(" | ")} |`;
