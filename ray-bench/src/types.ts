@@ -1,4 +1,4 @@
-export type WorkerCount = 4 | 8 | 12 | 16 | 32;
+export type WorkerCount = 1 | 4 | 8 | 12 | 16 | 32;
 
 export type ScenarioKey =
     | "node-fn"

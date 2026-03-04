@@ -3,9 +3,10 @@
 All notable changes to this project will be documented in this file.
 
 
-## [0.9.1]
+## [0.9.1] Mar 4, 2026
 ### Changes
 - Moved `wasm` option from `limits` to `permissions` worker config object.
+- Added `ray-bench`.
 
 ## [0.9.0] Mar 3, 2026
 

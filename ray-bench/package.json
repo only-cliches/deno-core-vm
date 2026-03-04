@@ -5,10 +5,10 @@
   "main": "src/bench.ts",
   "scripts": {
     "bench": "npx tsx src/bench.ts",
-    "bench:quick": "npx tsx src/bench.ts --width 256 --height 256 --tile 8 --workers 4,8,12,16 --warmup 1 --iterations 3 --format plain",
-    "bench:full": "npx tsx src/bench.ts --width 1024 --height 1024 --tile 4 --workers 4,8,12,16 --warmup 1 --iterations 3 --format plain",
-    "bench:signal": "npx tsx src/bench.ts --width 2048 --height 2048 --tile 64 --workers 4,8,12,16 --warmup 1 --iterations 3 --format plain",
-    "bench:signal:max": "npx tsx src/bench.ts --width 4096 --height 4096 --tile 128 --workers 4,8,12,16 --warmup 1 --iterations 3 --format plain"
+    "bench:256": "npx tsx src/bench.ts --width 256 --height 256 --tile 12 --workers 4,8,12,16 --warmup 2 --iterations 3 --format plain",
+    "bench:1024": "npx tsx src/bench.ts --width 1024 --height 1024 --tile 12 --workers 1,4,8,12 --warmup 2 --iterations 3 --format plain",
+    "bench:2048": "npx tsx src/bench.ts --width 2048 --height 2048 --tile 12 --workers 1,4,8,12 --warmup 2 --iterations 3 --format plain",
+    "bench:4096": "npx tsx src/bench.ts --width 4096 --height 4096 --tile 12 --workers 1,4,8,12 --warmup 2 --iterations 3 --format plain"
   },
   "keywords": [],
   "author": "",

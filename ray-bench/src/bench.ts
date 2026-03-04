@@ -11,7 +11,7 @@ function parseArgs(): BenchConfig {
         width: 1024,
         height: 1024,
         tileHeight: 16,
-        workerCounts: [4, 8, 12, 16, 32],
+        workerCounts: [1, 4, 8, 12, 16, 32],
         iterations: 1,
         warmup: 0,
         scenarios: [...scenarioOrder],
@@ -29,7 +29,7 @@ function parseArgs(): BenchConfig {
             out.workerCounts = args[++i]
                 .split(",")
                 .map((v) => Number(v.trim()))
-                .filter((v): v is 4 | 8 | 12 | 16 | 32 => v === 4 || v === 8 || v === 12 || v === 16 || v === 32);
+                .filter((v): v is 1 | 4 | 8 | 12 | 16 | 32 => v === 1 || v === 4 || v === 8 || v === 12 || v === 16 || v === 32);
         } else if (arg === "--scenarios") {
             const wanted = new Set(args[++i].split(",").map((v) => v.trim()));
             out.scenarios = scenarioOrder.filter((k) => wanted.has(k));
