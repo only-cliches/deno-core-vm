@@ -6,9 +6,9 @@
   "scripts": {
     "bench": "npx tsx src/bench.ts",
     "bench:quick": "npx tsx src/bench.ts --width 256 --height 256 --tile 32 --workers 8 --iterations 1",
-    "bench:full": "npx tsx src/bench.ts --width 1024 --height 1024 --tile 16 --workers 8,16,32 --iterations 1",
-    "bench:signal": "npx tsx src/bench.ts --width 2048 --height 2048 --tile 64 --workers 8,16,32 --warmup 1 --iterations 3 --format plain",
-    "bench:signal:max": "npx tsx src/bench.ts --width 4096 --height 4096 --tile 128 --workers 8,16,32 --warmup 1 --iterations 3 --format plain"
+    "bench:full": "npx tsx src/bench.ts --width 1024 --height 1024 --tile 16 --workers 4,8,12,16,32 --iterations 1",
+    "bench:signal": "npx tsx src/bench.ts --width 2048 --height 2048 --tile 64 --workers 4,8,12,16,32 --warmup 1 --iterations 3 --format plain",
+    "bench:signal:max": "npx tsx src/bench.ts --width 4096 --height 4096 --tile 128 --workers 4,8,12,16,32 --warmup 1 --iterations 3 --format plain"
   },
   "keywords": [],
   "author": "",
