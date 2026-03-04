@@ -215,9 +215,6 @@ function normalizeLimitsOption(x: unknown): unknown {
     if (typeof o.maxMemoryBytes === "number" && Number.isFinite(o.maxMemoryBytes) && o.maxMemoryBytes > 0) {
         out.maxMemoryBytes = Math.trunc(o.maxMemoryBytes);
     }
-    if (typeof o.wasm === "boolean") {
-        out.wasm = o.wasm;
-    }
 
     return Object.keys(out).length ? out : undefined;
 }
@@ -237,7 +234,6 @@ export function normalizeWorkerOptions(options?: DenoWorkerOptions): DenoWorkerW
     if (limits) {
         if (typeof limits.maxEvalMs === "number") o.maxEvalMs = limits.maxEvalMs;
         if (typeof limits.maxMemoryBytes === "number") o.maxMemoryBytes = limits.maxMemoryBytes;
-        if (typeof limits.wasm === "boolean") o.wasm = limits.wasm;
     }
 
     if (typeof o.nodeCompat !== "boolean") delete o.nodeCompat;

@@ -108,6 +108,8 @@ export type DenoPermissions = {
     import?: DenoPermissionValue;
     /** High-resolution timing access. */
     hrtime?: boolean;
+    /** WebAssembly module loading access. When `false`, importing `.wasm` modules is rejected. Default: `true`. */
+    wasm?: boolean;
 };
 
 export type DenoConsoleMethod = "log" | "info" | "warn" | "error" | "debug" | "trace";
@@ -379,14 +381,6 @@ export type DenoWorkerLimits = {
      * Max recommended: `2147483648` (2 GiB).
      */
     maxMemoryBytes?: number;
-    /**
-     * Description: toggles WebAssembly module loading by `.wasm` specifier.
-     * When `false`, importing `.wasm` modules is rejected by the loader.
-     * Default: `true`.
-     * Min recommended: n/a.
-     * Max recommended: n/a.
-     */
-    wasm?: boolean;
 };
 
 /**

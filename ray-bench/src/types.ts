@@ -48,7 +48,9 @@ export type ScenarioDef = {
     main: "Node";
     ipc: string;
     worker: "Node" | "Node Worker" | "Deno";
-    run: (tasks: RenderTask[], workerCount: number) => Promise<number>;
+    setup?: (workerCount: number) => Promise<any>;
+    run: (tasks: RenderTask[], workerCount: number, context?: any) => Promise<number>;
+    teardown?: (context: any) => Promise<void>;
 };
 
 export const scenarioOrder: ScenarioKey[] = [

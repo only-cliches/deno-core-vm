@@ -145,7 +145,7 @@ async function runNodeAsyncFn(tasks: RenderTask[], workerCount: number): Promise
     return mergeChecksums(await Promise.all(promises));
 }
 
-async function runNodePostMessage(tasks: RenderTask[], workerCount: number): Promise<number> {
+async function setupNodePostMessage(workerCount: number): Promise<any> {
     const workers = Array.from({ length: workerCount }, () => new NodeWorker(nodeWorkerScript, { eval: true }));
     const pending = new Map<number, { resolve: (r: RenderResult) => void; reject: (e: unknown) => void }>();
     let nextId = 1;
@@ -160,20 +160,25 @@ async function runNodePostMessage(tasks: RenderTask[], workerCount: number): Pro
         });
     }
 
-    try {
-        const promises = tasks.map((task, i) => {
-            const w = workers[i % workerCount];
-            const id = nextId++;
-            return new Promise<RenderResult>((resolve, reject) => {
-                pending.set(id, { resolve, reject });
-                w.postMessage({ type: "render", id, task });
-            });
+    return { workers, pending, nextId: () => nextId++ };
+}
+
+async function runNodePostMessage(tasks: RenderTask[], workerCount: number, ctx: any): Promise<number> {
+    const { workers, pending, nextId } = ctx;
+    const promises = tasks.map((task, i) => {
+        const w = workers[i % workerCount];
+        const id = nextId();
+        return new Promise<RenderResult>((resolve, reject) => {
+            pending.set(id, { resolve, reject });
+            w.postMessage({ type: "render", id, task });
         });
-        const out = await Promise.all(promises);
-        return mergeChecksums(out);
-    } finally {
-        await Promise.all(workers.map((w) => w.terminate()));
-    }
+    });
+    const out = await Promise.all(promises);
+    return mergeChecksums(out);
+}
+
+async function teardownNodePostMessage(ctx: any): Promise<void> {
+    await Promise.all(ctx.workers.map((w: NodeWorker) => w.terminate()));
 }
 
 function readBody(req: IncomingMessage): Promise<string> {
@@ -193,7 +198,7 @@ function writeJson(res: ServerResponse, statusCode: number, value: unknown): voi
     res.end(data);
 }
 
-async function runNodeHttp(tasks: RenderTask[], workerCount: number): Promise<number> {
+async function setupNodeHttp(workerCount: number): Promise<any> {
     const servers = await Promise.all(
         Array.from({ length: workerCount }, async () => {
             const server = createServer(async (req, res) => {
@@ -218,252 +223,247 @@ async function runNodeHttp(tasks: RenderTask[], workerCount: number): Promise<nu
             return { server, port: address.port };
         }),
     );
-
-    try {
-        const promises = tasks.map(async (task, i) => {
-            const port = servers[i % workerCount].port;
-            const resp = await fetch(`http://127.0.0.1:${port}/render`, {
-                method: "POST",
-                headers: { "content-type": "application/json" },
-                body: JSON.stringify(task),
-            });
-            if (!resp.ok) throw new Error(`HTTP render failed (${resp.status})`);
-            return (await resp.json()) as RenderResult;
-        });
-
-        return mergeChecksums(await Promise.all(promises));
-    } finally {
-        await Promise.all(
-            servers.map(
-                ({ server }) =>
-                    new Promise<void>((resolve, reject) => {
-                        server.close((err) => (err ? reject(err) : resolve()));
-                    }),
-            ),
-        );
-    }
+    return { servers };
 }
 
-async function runDenoPostMessage(tasks: RenderTask[], workerCount: number): Promise<number> {
+async function runNodeHttp(tasks: RenderTask[], workerCount: number, ctx: any): Promise<number> {
+    const { servers } = ctx;
+    const promises = tasks.map(async (task, i) => {
+        const port = servers[i % workerCount].port;
+        const resp = await fetch(`http://127.0.0.1:${port}/render`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(task),
+        });
+        if (!resp.ok) throw new Error(`HTTP render failed (${resp.status})`);
+        return (await resp.json()) as RenderResult;
+    });
+
+    return mergeChecksums(await Promise.all(promises));
+}
+
+async function teardownNodeHttp(ctx: any): Promise<void> {
+    await Promise.all(
+        ctx.servers.map(
+            ({ server }: any) =>
+                new Promise<void>((resolve, reject) => {
+                    server.close((err: any) => (err ? reject(err) : resolve()));
+                }),
+        ),
+    );
+}
+
+async function setupDenoPostMessage(workerCount: number): Promise<any> {
     const workers = Array.from({ length: workerCount }, () => new DenoWorker());
     const pending = new Map<number, { resolve: (r: RenderResult) => void; reject: (e: unknown) => void }>();
     let nextId = 1;
 
-    try {
-        await Promise.all(workers.map((w) => w.eval(denoPostMessageScript())));
+    await Promise.all(workers.map((w) => w.eval(denoPostMessageScript())));
 
-        workers.forEach((w) => {
-            w.on("message", (msg: any) => {
-                if (!msg || typeof msg.id !== "number") return;
-                const entry = pending.get(msg.id);
-                if (!entry) return;
-                pending.delete(msg.id);
-                entry.resolve(msg.result as RenderResult);
-            });
+    workers.forEach((w) => {
+        w.on("message", (msg: any) => {
+            if (!msg || typeof msg.id !== "number") return;
+            const entry = pending.get(msg.id);
+            if (!entry) return;
+            pending.delete(msg.id);
+            entry.resolve(msg.result as RenderResult);
         });
+    });
 
-        const promises = tasks.map((task, i) => {
-            const w = workers[i % workerCount];
-            const id = nextId++;
-            return new Promise<RenderResult>((resolve, reject) => {
-                pending.set(id, { resolve, reject });
-                w.postMessage({ type: "render", id, task });
-                setTimeout(() => {
-                    if (pending.delete(id)) reject(new Error(`Deno postMessage timeout for task ${task.id}`));
-                }, 30_000).unref();
-            });
+    return { workers, pending, nextId: () => nextId++ };
+}
+
+async function runDenoPostMessage(tasks: RenderTask[], workerCount: number, ctx: any): Promise<number> {
+    const { workers, pending, nextId } = ctx;
+    const promises = tasks.map((task, i) => {
+        const w = workers[i % workerCount];
+        const id = nextId();
+        return new Promise<RenderResult>((resolve, reject) => {
+            pending.set(id, { resolve, reject });
+            w.postMessage({ type: "render", id, task });
+            setTimeout(() => {
+                if (pending.delete(id)) reject(new Error(`Deno postMessage timeout for task ${task.id}`));
+            }, 30_000).unref();
         });
+    });
 
-        return mergeChecksums(await Promise.all(promises));
-    } finally {
-        pending.clear();
-        await Promise.all(workers.map((w) => w.close({ force: true })));
-    }
+    return mergeChecksums(await Promise.all(promises));
 }
 
-async function runDenoEval(tasks: RenderTask[], workerCount: number): Promise<number> {
-    const workers = Array.from({ length: workerCount }, () => new DenoWorker());
-
-    try {
-        await Promise.all(workers.map((w) => w.eval(denoBootstrapScript())));
-
-        const promises = tasks.map((task, i) =>
-            workers[i % workerCount].eval("(task) => globalThis.__computeTask(task)", { args: [task] }) as Promise<RenderResult>,
-        );
-        return mergeChecksums(await Promise.all(promises));
-    } finally {
-        await Promise.all(workers.map((w) => w.close({ force: true })));
-    }
+async function teardownDenoPostMessage(ctx: any): Promise<void> {
+    ctx.pending.clear();
+    await Promise.all(ctx.workers.map((w: DenoWorker) => w.close({ force: true })));
 }
 
-async function runDenoEvalSync(tasks: RenderTask[], workerCount: number): Promise<number> {
+async function setupDenoEval(workerCount: number): Promise<any> {
     const workers = Array.from({ length: workerCount }, () => new DenoWorker());
-
-    try {
-        await Promise.all(workers.map((w) => w.eval(denoBootstrapScript())));
-
-        const out: RenderResult[] = [];
-        for (let i = 0; i < tasks.length; i += 1) {
-            const w = workers[i % workerCount];
-            out.push(w.evalSync("(task) => globalThis.__computeTask(task)", { args: [tasks[i]] }) as RenderResult);
-        }
-        return mergeChecksums(out);
-    } finally {
-        await Promise.all(workers.map((w) => w.close({ force: true })));
-    }
+    await Promise.all(workers.map((w) => w.eval(denoBootstrapScript())));
+    return { workers };
 }
 
-async function runDenoHandle(tasks: RenderTask[], workerCount: number): Promise<number> {
-    const workers = Array.from({ length: workerCount }, () => new DenoWorker());
-
-    try {
-        await Promise.all(workers.map((w) => w.eval(denoBootstrapScript())));
-        const handles = await Promise.all(workers.map((w) => w.handle.eval("(task) => globalThis.__computeTask(task)")));
-
-        const promises = tasks.map((task, i) => handles[i % workerCount].call([task]) as Promise<RenderResult>);
-        const out = await Promise.all(promises);
-
-        await Promise.all(handles.map((h) => h.dispose()));
-        return mergeChecksums(out);
-    } finally {
-        await Promise.all(workers.map((w) => w.close({ force: true })));
-    }
+async function runDenoEval(tasks: RenderTask[], workerCount: number, ctx: any): Promise<number> {
+    const { workers } = ctx;
+    const promises = tasks.map((task, i) =>
+        workers[i % workerCount].eval("(task) => globalThis.__computeTask(task)", { args: [task] }) as Promise<RenderResult>,
+    );
+    return mergeChecksums(await Promise.all(promises));
 }
 
-async function runDenoStreamPersistent(tasks: RenderTask[], workerCount: number): Promise<number> {
+async function teardownDenoEval(ctx: any): Promise<void> {
+    await Promise.all(ctx.workers.map((w: DenoWorker) => w.close({ force: true })));
+}
+
+async function runDenoEvalSync(tasks: RenderTask[], workerCount: number, ctx: any): Promise<number> {
+    const { workers } = ctx;
+    const out: RenderResult[] = [];
+    for (let i = 0; i < tasks.length; i += 1) {
+        const w = workers[i % workerCount];
+        out.push(w.evalSync("(task) => globalThis.__computeTask(task)", { args: [tasks[i]] }) as RenderResult);
+    }
+    return mergeChecksums(out);
+}
+
+async function setupDenoHandle(workerCount: number): Promise<any> {
     const workers = Array.from({ length: workerCount }, () => new DenoWorker());
+    await Promise.all(workers.map((w) => w.eval(denoBootstrapScript())));
+    const handles = await Promise.all(workers.map((w) => w.handle.eval("(task) => globalThis.__computeTask(task)")));
+    return { workers, handles };
+}
+
+async function runDenoHandle(tasks: RenderTask[], workerCount: number, ctx: any): Promise<number> {
+    const { handles } = ctx;
+    const promises = tasks.map((task, i) => handles[i % workerCount].call([task]) as Promise<RenderResult>);
+    const out = await Promise.all(promises);
+    return mergeChecksums(out);
+}
+
+async function teardownDenoHandle(ctx: any): Promise<void> {
+    await Promise.all(ctx.handles.map((h: any) => h.dispose()));
+    await Promise.all(ctx.workers.map((w: DenoWorker) => w.close({ force: true })));
+}
+
+async function runDenoStreamPersistent(tasks: RenderTask[], workerCount: number, ctx: any): Promise<number> {
+    const { workers } = ctx;
     const results = new Map<number, RenderResult>();
     const byWorker = groupTasksByWorker(tasks, workerCount);
     const active = byWorker.map((workerTasks, idx) => ({ workerTasks, idx })).filter((x) => x.workerTasks.length > 0);
 
-    try {
-        await Promise.all(workers.map((w) => w.eval(denoBootstrapScript())));
+    await Promise.all(
+        active.map(async ({ idx, workerTasks }) => {
+            const w = workers[idx];
+            const streamKey = `rb:stream:reused:${idx}:${Date.now()}:${Math.random()}`;
+            const readerPromise = w.stream.accept(streamKey);
+            const workerPromise = w.eval(
+                `
+                async (renderTasks, responseKey) => {
+                    const out = hostStreams.create(responseKey);
+                    try {
+                        const enc = new TextEncoder();
+                        for (const task of renderTasks) {
+                            const result = globalThis.__computeTask(task);
+                            await out.write(enc.encode(JSON.stringify(result) + "\\n"));
+                        }
+                    } finally {
+                        await out.close();
+                    }
+                }
+                `,
+                { args: [workerTasks, streamKey] },
+            );
 
-        await Promise.all(
-            active.map(async ({ idx, workerTasks }) => {
-                const w = workers[idx];
-                const streamKey = `rb:stream:reused:${idx}:${Date.now()}:${Math.random()}`;
-                const readerPromise = w.stream.accept(streamKey);
+            const reader = await readerPromise;
+            const chunks: Uint8Array[] = [];
+            for await (const c of reader) chunks.push(c);
+            await workerPromise;
+
+            const total = chunks.reduce((n, c) => n + c.byteLength, 0);
+            const merged = new Uint8Array(total);
+            let off = 0;
+            for (const c of chunks) {
+                merged.set(c, off);
+                off += c.byteLength;
+            }
+            const lines = new TextDecoder()
+                .decode(merged)
+                .split("\n")
+                .map((x) => x.trim())
+                .filter((x) => x.length > 0);
+            for (const line of lines) {
+                const r = JSON.parse(line) as RenderResult;
+                results.set(r.id, r);
+            }
+        }),
+    );
+
+    const out = tasks.map((t) => {
+        const r = results.get(t.id);
+        if (!r) throw new Error(`Missing stream result for task ${t.id}`);
+        return r;
+    });
+    return mergeChecksums(out);
+}
+
+async function runDenoStreamPerRequest(tasks: RenderTask[], workerCount: number, ctx: any): Promise<number> {
+    const { workers } = ctx;
+    const results = new Map<number, RenderResult>();
+    let keyCounter = 0;
+    const nextKey = (prefix: string) => `${prefix}:${Date.now()}:${Math.random()}:${keyCounter++}`;
+
+    const byWorker = groupTasksByWorker(tasks, workerCount);
+
+    await Promise.all(
+        byWorker.map(async (workerTasks, workerIdx) => {
+            const w = workers[workerIdx];
+            for (const task of workerTasks) {
+                const resKey = nextKey(`rb:res:${workerIdx}`);
+                const readerPromise = w.stream.accept(resKey);
                 const workerPromise = w.eval(
                     `
-                    async (renderTasks, responseKey) => {
+                    async (renderTask, responseKey) => {
                         const out = hostStreams.create(responseKey);
                         try {
-                            const enc = new TextEncoder();
-                            for (const task of renderTasks) {
-                                const result = globalThis.__computeTask(task);
-                                await out.write(enc.encode(JSON.stringify(result) + "\\n"));
-                            }
+                            const result = globalThis.__computeTask(renderTask);
+                            await out.write(new TextEncoder().encode(JSON.stringify(result)));
                         } finally {
                             await out.close();
                         }
                     }
                     `,
-                    { args: [workerTasks, streamKey] },
+                    { args: [task, resKey] },
                 );
 
                 const reader = await readerPromise;
                 const chunks: Uint8Array[] = [];
                 for await (const c of reader) chunks.push(c);
-                await workerPromise;
-
-                const total = chunks.reduce((n, c) => n + c.byteLength, 0);
-                const merged = new Uint8Array(total);
+                const merged = new Uint8Array(chunks.reduce((n, c) => n + c.byteLength, 0));
                 let off = 0;
                 for (const c of chunks) {
                     merged.set(c, off);
                     off += c.byteLength;
                 }
-                const lines = new TextDecoder()
-                    .decode(merged)
-                    .split("\n")
-                    .map((x) => x.trim())
-                    .filter((x) => x.length > 0);
-                for (const line of lines) {
-                    const r = JSON.parse(line) as RenderResult;
-                    results.set(r.id, r);
-                }
-            }),
-        );
+                await workerPromise;
+                const decoded = JSON.parse(new TextDecoder().decode(merged)) as RenderResult;
+                results.set(decoded.id, decoded);
+            }
+        }),
+    );
 
-        const out = tasks.map((t) => {
-            const r = results.get(t.id);
-            if (!r) throw new Error(`Missing stream result for task ${t.id}`);
-            return r;
-        });
-        return mergeChecksums(out);
-    } finally {
-        await Promise.all(workers.map((w) => w.close({ force: true })));
-    }
+    const out = tasks.map((t) => {
+        const r = results.get(t.id);
+        if (!r) throw new Error(`Missing stream per-request result for task ${t.id}`);
+        return r;
+    });
+    return mergeChecksums(out);
 }
 
-async function runDenoStreamPerRequest(tasks: RenderTask[], workerCount: number): Promise<number> {
-    const workers = Array.from({ length: workerCount }, () => new DenoWorker());
-    const results = new Map<number, RenderResult>();
-    let keyCounter = 0;
-    const nextKey = (prefix: string) => `${prefix}:${Date.now()}:${Math.random()}:${keyCounter++}`;
-
-    try {
-        await Promise.all(workers.map((w) => w.eval(denoBootstrapScript())));
-        const byWorker = groupTasksByWorker(tasks, workerCount);
-
-        await Promise.all(
-            byWorker.map(async (workerTasks, workerIdx) => {
-                const w = workers[workerIdx];
-                for (const task of workerTasks) {
-                    const resKey = nextKey(`rb:res:${workerIdx}`);
-                    const readerPromise = w.stream.accept(resKey);
-                    const workerPromise = w.eval(
-                        `
-                        async (renderTask, responseKey) => {
-                            const out = hostStreams.create(responseKey);
-                            try {
-                                const result = globalThis.__computeTask(renderTask);
-                                await out.write(new TextEncoder().encode(JSON.stringify(result)));
-                            } finally {
-                                await out.close();
-                            }
-                        }
-                        `,
-                        { args: [task, resKey] },
-                    );
-
-                    const reader = await readerPromise;
-                    const chunks: Uint8Array[] = [];
-                    for await (const c of reader) chunks.push(c);
-                    const merged = new Uint8Array(chunks.reduce((n, c) => n + c.byteLength, 0));
-                    let off = 0;
-                    for (const c of chunks) {
-                        merged.set(c, off);
-                        off += c.byteLength;
-                    }
-                    await workerPromise;
-                    const decoded = JSON.parse(new TextDecoder().decode(merged)) as RenderResult;
-                    results.set(decoded.id, decoded);
-                }
-            }),
-        );
-
-        const out = tasks.map((t) => {
-            const r = results.get(t.id);
-            if (!r) throw new Error(`Missing stream per-request result for task ${t.id}`);
-            return r;
-        });
-        return mergeChecksums(out);
-    } finally {
-        await Promise.all(workers.map((w) => w.close({ force: true })));
-    }
-}
-
-async function runDenoPostMessageBatched(tasks: RenderTask[], workerCount: number): Promise<number> {
+async function setupDenoPostMessageBatched(workerCount: number): Promise<any> {
     const workers = Array.from({ length: workerCount }, () => new DenoWorker());
     const pending = new Map<number, { resolve: (r: RenderResult[]) => void; reject: (e: unknown) => void }>();
     let nextBatchId = 1;
 
-    try {
-        await Promise.all(
-            workers.map((w) =>
-                w.eval(`
+    await Promise.all(
+        workers.map((w) =>
+            w.eval(`
 ${denoBootstrapScript()}
 on("message", (msg) => {
     if (!msg || msg.type !== "render-batch" || !Array.isArray(msg.tasks)) return;
@@ -471,99 +471,97 @@ on("message", (msg) => {
     hostPostMessage({ batchId: msg.batchId, results });
 });
 `),
-            ),
-        );
+        ),
+    );
 
-        workers.forEach((w) => {
-            w.on("message", (msg: any) => {
-                if (!msg || typeof msg.batchId !== "number") return;
-                const entry = pending.get(msg.batchId);
-                if (!entry) return;
-                pending.delete(msg.batchId);
-                entry.resolve(msg.results as RenderResult[]);
-            });
+    workers.forEach((w) => {
+        w.on("message", (msg: any) => {
+            if (!msg || typeof msg.batchId !== "number") return;
+            const entry = pending.get(msg.batchId);
+            if (!entry) return;
+            pending.delete(msg.batchId);
+            entry.resolve(msg.results as RenderResult[]);
         });
+    });
 
-        const byWorker = groupTasksByWorker(tasks, workerCount);
-        const batchSize = 4;
-        const allPromises: Promise<RenderResult[]>[] = [];
-        for (let i = 0; i < workerCount; i += 1) {
-            const worker = workers[i];
-            const batches = chunk(byWorker[i], batchSize);
-            const messages = batches.map((batch) => ({ type: "render-batch", batchId: nextBatchId++, tasks: batch }));
-            const promises = messages.map(
-                (m) =>
-                    new Promise<RenderResult[]>((resolve, reject) => {
-                        pending.set(m.batchId, { resolve, reject });
-                        setTimeout(() => {
-                            if (pending.delete(m.batchId)) reject(new Error(`Deno batch timeout ${m.batchId}`));
-                        }, 30_000).unref();
-                    }),
-            );
-            if (messages.length > 0) worker.postMessages(messages);
-            allPromises.push(...promises);
-        }
-
-        const flat = (await Promise.all(allPromises)).flat();
-        if (flat.length !== tasks.length) throw new Error(`Missing batched postMessage results (${flat.length}/${tasks.length})`);
-
-        const byId = new Map<number, RenderResult>();
-        for (const r of flat) byId.set(r.id, r);
-        const out = tasks.map((t) => {
-            const r = byId.get(t.id);
-            if (!r) throw new Error(`Missing batched postMessage result for task ${t.id}`);
-            return r;
-        });
-        return mergeChecksums(out);
-    } finally {
-        pending.clear();
-        await Promise.all(workers.map((w) => w.close({ force: true })));
-    }
+    return { workers, pending, nextBatchId: () => nextBatchId++ };
 }
 
-async function runDenoHandleApply(tasks: RenderTask[], workerCount: number): Promise<number> {
-    const workers = Array.from({ length: workerCount }, () => new DenoWorker());
-
-    try {
-        await Promise.all(workers.map((w) => w.eval(denoBootstrapScript())));
-        const handles = await Promise.all(
-            workers.map((w) => w.handle.eval("(task) => globalThis.__computeTask(task)")),
+async function runDenoPostMessageBatched(tasks: RenderTask[], workerCount: number, ctx: any): Promise<number> {
+    const { workers, pending, nextBatchId } = ctx;
+    const byWorker = groupTasksByWorker(tasks, workerCount);
+    const batchSize = 4;
+    const allPromises: Promise<RenderResult[]>[] = [];
+    for (let i = 0; i < workerCount; i += 1) {
+        const worker = workers[i];
+        const batches = chunk(byWorker[i], batchSize);
+        const messages = batches.map((batch) => ({ type: "render-batch", batchId: nextBatchId(), tasks: batch }));
+        const promises = messages.map(
+            (m) =>
+                new Promise<RenderResult[]>((resolve, reject) => {
+                    pending.set(m.batchId, { resolve, reject });
+                    setTimeout(() => {
+                        if (pending.delete(m.batchId)) reject(new Error(`Deno batch timeout ${m.batchId}`));
+                    }, 30_000).unref();
+                }),
         );
-        const byWorker = groupTasksByWorker(tasks, workerCount);
-        const batchSize = 4;
-        const byId = new Map<number, RenderResult>();
-
-        await Promise.all(
-            byWorker.map(async (workerTasks, idx) => {
-                const h = handles[idx];
-                const batches = chunk(workerTasks, batchSize);
-                for (const b of batches) {
-                    const ops = b.map((task) => ({ op: "call", args: [task] }));
-                    const res = (await h.apply(ops as any)) as RenderResult[];
-                    for (const r of res) byId.set(r.id, r);
-                }
-            }),
-        );
-
-        await Promise.all(handles.map((h) => h.dispose()));
-        const out = tasks.map((t) => {
-            const r = byId.get(t.id);
-            if (!r) throw new Error(`Missing handle.apply result for task ${t.id}`);
-            return r;
-        });
-        return mergeChecksums(out);
-    } finally {
-        await Promise.all(workers.map((w) => w.close({ force: true })));
+        if (messages.length > 0) worker.postMessages(messages);
+        allPromises.push(...promises);
     }
+
+    const flat = (await Promise.all(allPromises)).flat();
+    if (flat.length !== tasks.length) throw new Error(`Missing batched postMessage results (${flat.length}/${tasks.length})`);
+
+    const byId = new Map<number, RenderResult>();
+    for (const r of flat) byId.set(r.id, r);
+    const out = tasks.map((t) => {
+        const r = byId.get(t.id);
+        if (!r) throw new Error(`Missing batched postMessage result for task ${t.id}`);
+        return r;
+    });
+    return mergeChecksums(out);
 }
 
-async function runDenoEvalBinary(tasks: RenderTask[], workerCount: number): Promise<number> {
+async function setupDenoHandleApply(workerCount: number): Promise<any> {
     const workers = Array.from({ length: workerCount }, () => new DenoWorker());
+    await Promise.all(workers.map((w) => w.eval(denoBootstrapScript())));
+    const handles = await Promise.all(
+        workers.map((w) => w.handle.eval("(task) => globalThis.__computeTask(task)")),
+    );
+    return { workers, handles };
+}
 
-    try {
-        await Promise.all(
-            workers.map((w) =>
-                w.eval(`
+async function runDenoHandleApply(tasks: RenderTask[], workerCount: number, ctx: any): Promise<number> {
+    const { handles } = ctx;
+    const byWorker = groupTasksByWorker(tasks, workerCount);
+    const batchSize = 4;
+    const byId = new Map<number, RenderResult>();
+
+    await Promise.all(
+        byWorker.map(async (workerTasks, idx) => {
+            const h = handles[idx];
+            const batches = chunk(workerTasks, batchSize);
+            for (const b of batches) {
+                const ops = b.map((task) => ({ op: "call", args: [task] }));
+                const res = (await h.apply(ops as any)) as RenderResult[];
+                for (const r of res) byId.set(r.id, r);
+            }
+        }),
+    );
+
+    const out = tasks.map((t) => {
+        const r = byId.get(t.id);
+        if (!r) throw new Error(`Missing handle.apply result for task ${t.id}`);
+        return r;
+    });
+    return mergeChecksums(out);
+}
+
+async function setupDenoEvalBinary(workerCount: number): Promise<any> {
+    const workers = Array.from({ length: workerCount }, () => new DenoWorker());
+    await Promise.all(
+        workers.map((w) =>
+            w.eval(`
 ${denoBootstrapScript()}
 globalThis.__computeTaskPacked = (packed) => {
     const task = {
@@ -578,16 +576,17 @@ globalThis.__computeTaskPacked = (packed) => {
     return globalThis.__computeTask(task);
 };
 `),
-            ),
-        );
+        ),
+    );
+    return { workers };
+}
 
-        const promises = tasks.map((task, i) =>
-            workers[i % workerCount].eval("(packed) => globalThis.__computeTaskPacked(packed)", { args: [packTask(task)] }) as Promise<RenderResult>,
-        );
-        return mergeChecksums(await Promise.all(promises));
-    } finally {
-        await Promise.all(workers.map((w) => w.close({ force: true })));
-    }
+async function runDenoEvalBinary(tasks: RenderTask[], workerCount: number, ctx: any): Promise<number> {
+    const { workers } = ctx;
+    const promises = tasks.map((task, i) =>
+        workers[i % workerCount].eval("(packed) => globalThis.__computeTaskPacked(packed)", { args: [packTask(task)] }) as Promise<RenderResult>,
+    );
+    return mergeChecksums(await Promise.all(promises));
 }
 
 export const allScenarios: ScenarioDef[] = [
@@ -613,7 +612,9 @@ export const allScenarios: ScenarioDef[] = [
         main: "Node",
         ipc: "postMessage",
         worker: "Node Worker",
+        setup: setupNodePostMessage,
         run: runNodePostMessage,
+        teardown: teardownNodePostMessage,
     },
     {
         key: "node-http",
@@ -621,7 +622,9 @@ export const allScenarios: ScenarioDef[] = [
         main: "Node",
         ipc: "HTTP",
         worker: "Node",
+        setup: setupNodeHttp,
         run: runNodeHttp,
+        teardown: teardownNodeHttp,
     },
     {
         key: "deno-postmessage",
@@ -629,7 +632,9 @@ export const allScenarios: ScenarioDef[] = [
         main: "Node",
         ipc: "postMessage",
         worker: "Deno",
+        setup: setupDenoPostMessage,
         run: runDenoPostMessage,
+        teardown: teardownDenoPostMessage,
     },
     {
         key: "deno-streams",
@@ -637,7 +642,9 @@ export const allScenarios: ScenarioDef[] = [
         main: "Node",
         ipc: "streams",
         worker: "Deno",
+        setup: setupDenoEval,
         run: runDenoStreamPerRequest,
+        teardown: teardownDenoEval,
     },
     {
         key: "deno-streams-reused",
@@ -645,7 +652,9 @@ export const allScenarios: ScenarioDef[] = [
         main: "Node",
         ipc: "streams(reused)",
         worker: "Deno",
+        setup: setupDenoEval,
         run: runDenoStreamPersistent,
+        teardown: teardownDenoEval,
     },
     {
         key: "deno-eval",
@@ -653,7 +662,9 @@ export const allScenarios: ScenarioDef[] = [
         main: "Node",
         ipc: "worker.eval",
         worker: "Deno",
+        setup: setupDenoEval,
         run: runDenoEval,
+        teardown: teardownDenoEval,
     },
     {
         key: "deno-evalsync",
@@ -661,7 +672,9 @@ export const allScenarios: ScenarioDef[] = [
         main: "Node",
         ipc: "worker.evalSync",
         worker: "Deno",
+        setup: setupDenoEval,
         run: runDenoEvalSync,
+        teardown: teardownDenoEval,
     },
     {
         key: "deno-handle",
@@ -669,7 +682,9 @@ export const allScenarios: ScenarioDef[] = [
         main: "Node",
         ipc: "worker.handle",
         worker: "Deno",
+        setup: setupDenoHandle,
         run: runDenoHandle,
+        teardown: teardownDenoHandle,
     },
     {
         key: "deno-postmessage-batched",
@@ -677,7 +692,9 @@ export const allScenarios: ScenarioDef[] = [
         main: "Node",
         ipc: "postMessages(batch)",
         worker: "Deno",
+        setup: setupDenoPostMessageBatched,
         run: runDenoPostMessageBatched,
+        teardown: teardownDenoPostMessage,
     },
     {
         key: "deno-handle-apply",
@@ -685,7 +702,9 @@ export const allScenarios: ScenarioDef[] = [
         main: "Node",
         ipc: "worker.handle.apply",
         worker: "Deno",
+        setup: setupDenoHandleApply,
         run: runDenoHandleApply,
+        teardown: teardownDenoHandle,
     },
     {
         key: "deno-eval-binary",
@@ -693,6 +712,8 @@ export const allScenarios: ScenarioDef[] = [
         main: "Node",
         ipc: "worker.eval(binary)",
         worker: "Deno",
+        setup: setupDenoEvalBinary,
         run: runDenoEvalBinary,
+        teardown: teardownDenoEval,
     },
 ];

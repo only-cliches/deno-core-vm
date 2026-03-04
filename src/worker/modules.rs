@@ -1036,13 +1036,13 @@ impl DynamicModuleLoader {
         path_only.to_ascii_lowercase().ends_with(".wasm")
     }
 
-    // Enforces `limits.wasm` for module loading paths.
+    // Enforces `permissions.wasm` for module loading paths.
     fn ensure_wasm_allowed(&self, module_specifier: &Url) -> Result<(), JsErrorBox> {
         if self.wasm || !Self::is_wasm_url(module_specifier) {
             return Ok(());
         }
         Err(JsErrorBox::generic(format!(
-            "WASM module loading is disabled by limits.wasm: {}",
+            "WASM module loading is disabled by permissions.wasm: {}",
             module_specifier
         )))
     }
@@ -1288,7 +1288,7 @@ impl ModuleLoader for DynamicModuleLoader {
     ) -> Result<Url, JsErrorBox> {
         if !self.wasm && Self::is_wasm_specifier(specifier) {
             return Err(JsErrorBox::generic(format!(
-                "WASM module loading is disabled by limits.wasm: {}",
+                "WASM module loading is disabled by permissions.wasm: {}",
                 specifier
             )));
         }
@@ -1773,7 +1773,7 @@ mod tests {
     }
 
     #[test]
-    // Checks `limits.wasm` enforcement for wasm module URLs.
+    // Checks `permissions.wasm` enforcement for wasm module URLs.
     fn ensure_wasm_allowed_blocks_wasm_when_disabled() {
         let disabled = DynamicModuleLoader {
             wasm: false,
@@ -1793,7 +1793,7 @@ mod tests {
     }
 
     #[test]
-    // Checks resolve-time wasm blocking for disabled limits.wasm.
+    // Checks resolve-time wasm blocking for disabled permissions.wasm.
     fn resolve_blocks_wasm_when_disabled() {
         let disabled = DynamicModuleLoader {
             wasm: false,

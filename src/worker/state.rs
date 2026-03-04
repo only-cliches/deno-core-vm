@@ -512,6 +512,9 @@ impl WorkerCreateOptions {
             if !v.is_a::<JsNull, _>(cx) && !v.is_a::<JsUndefined, _>(cx) {
                 if let Ok(bridged) = from_neon_value(cx, v) {
                     if let JsValueBridge::Json(j) = bridged {
+                        if let Some(w) = j.get("wasm").and_then(|v| v.as_bool()) {
+                            out.runtime_options.wasm = w;
+                        }
                         out.runtime_options.permissions = Some(j);
                     }
                 }
@@ -577,13 +580,6 @@ impl WorkerCreateOptions {
                 if mb.is_finite() && mb > 0.0 {
                     out.runtime_options.max_memory_bytes = Some(mb as u64);
                 }
-            }
-        }
-
-        // `wasm`.
-        if let Ok(v) = obj.get::<JsValue, _, _>(cx, "wasm") {
-            if let Ok(b) = v.downcast::<JsBoolean, _>(cx) {
-                out.runtime_options.wasm = b.value(cx);
             }
         }
 

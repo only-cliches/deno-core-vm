@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+
+## [0.9.1]
+### Changes
+- Moved `wasm` option from `limits` to `permissions` worker config object.
+
 ## [0.9.0] Mar 3, 2026
 
 ### Added

@@ -68,37 +68,45 @@ async function main(): Promise<void> {
         for (const wc of config.workerCounts) {
             console.log(`running: ${scenario.label} @ ${wc} workers`);
 
-            for (let i = 0; i < config.warmup; i += 1) {
-                await scenario.run(tasks, wc);
-            }
+            const context = scenario.setup ? await scenario.setup(wc) : undefined;
 
-            const iterTimes: number[] = [];
-            let checksum: number | undefined;
+            try {
+                for (let i = 0; i < config.warmup; i += 1) {
+                    await scenario.run(tasks, wc, context);
+                }
 
-            for (let i = 0; i < config.iterations; i += 1) {
-                const t0 = performance.now();
-                const current = await scenario.run(tasks, wc);
-                const dt = performance.now() - t0;
-                iterTimes.push(dt);
-                if (checksum == null) checksum = current;
-                else if (checksum !== current) {
+                const iterTimes: number[] = [];
+                let checksum: number | undefined;
+
+                for (let i = 0; i < config.iterations; i += 1) {
+                    const t0 = performance.now();
+                    const current = await scenario.run(tasks, wc, context);
+                    const dt = performance.now() - t0;
+                    iterTimes.push(dt);
+                    if (checksum == null) checksum = current;
+                    else if (checksum !== current) {
+                        throw new Error(
+                            `Inconsistent checksum within scenario ${scenario.key} workers=${wc}: ${checksum} vs ${current}`,
+                        );
+                    }
+                }
+
+                if (checksum == null) throw new Error("Missing checksum");
+                if (baselineChecksum == null) baselineChecksum = checksum;
+                if (checksum !== baselineChecksum) {
                     throw new Error(
-                        `Inconsistent checksum within scenario ${scenario.key} workers=${wc}: ${checksum} vs ${current}`,
+                        `Checksum mismatch for ${scenario.key} workers=${wc}: expected ${baselineChecksum}, got ${checksum}`,
                     );
                 }
-            }
 
-            if (checksum == null) throw new Error("Missing checksum");
-            if (baselineChecksum == null) baselineChecksum = checksum;
-            if (checksum !== baselineChecksum) {
-                throw new Error(
-                    `Checksum mismatch for ${scenario.key} workers=${wc}: expected ${baselineChecksum}, got ${checksum}`,
-                );
+                const med = median(iterTimes);
+                times.set(`${scenario.key}:${wc}`, med);
+                console.log(`done: ${scenario.label} @ ${wc} -> ${formatMs(med)} (checksum=${checksum})`);
+            } finally {
+                if (scenario.teardown) {
+                    await scenario.teardown(context);
+                }
             }
-
-            const med = median(iterTimes);
-            times.set(`${scenario.key}:${wc}`, med);
-            console.log(`done: ${scenario.label} @ ${wc} -> ${formatMs(med)} (checksum=${checksum})`);
         }
     }
 
