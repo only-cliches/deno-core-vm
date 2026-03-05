@@ -63,9 +63,18 @@ pub enum DenoMsg {
         stream_id: String,
         payload: JsValueBridge,
     },
+    PostStreamChunkRaw {
+        stream_id: u32,
+        payload: JsValueBridge,
+        credit: Option<u32>,
+    },
     PostStreamChunks {
         stream_id: String,
         payloads: Vec<JsValueBridge>,
+    },
+    PostStreamChunksRaw {
+        stream_id: u32,
+        payload: JsValueBridge,
     },
     PostStreamControl {
         kind: String,
@@ -88,7 +97,9 @@ impl DenoMsg {
             DenoMsg::PostMessage { .. }
                 | DenoMsg::PostMessageTyped { .. }
                 | DenoMsg::PostStreamChunk { .. }
+                | DenoMsg::PostStreamChunkRaw { .. }
                 | DenoMsg::PostStreamChunks { .. }
+                | DenoMsg::PostStreamChunksRaw { .. }
                 | DenoMsg::PostStreamControl { .. }
         )
     }

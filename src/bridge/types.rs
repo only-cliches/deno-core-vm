@@ -1,5 +1,6 @@
 use neon::{prelude::*, result::Throw};
 use serde::{Deserialize, Serialize};
+use bytes::Bytes;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "t", content = "v")]
@@ -21,7 +22,7 @@ pub enum JsValueBridge {
     // Binary values
     BufferView {
         kind: String, // "ArrayBuffer" | "Uint8Array" | "Int32Array" | "DataView" | ...
-        bytes: Vec<u8>,
+        bytes: Bytes,
         byte_offset: usize,
         length: usize, // for typed arrays: element length; for DataView: byteLength; for ArrayBuffer: byteLength
     },

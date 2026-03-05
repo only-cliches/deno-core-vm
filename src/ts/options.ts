@@ -199,6 +199,13 @@ function normalizeBridgeOption(x: unknown): unknown {
     if (typeof o.streamBacklogLimit === "number" && Number.isFinite(o.streamBacklogLimit) && o.streamBacklogLimit >= 1) {
         out.streamBacklogLimit = Math.trunc(o.streamBacklogLimit);
     }
+    if (
+        typeof o.streamHighWaterMarkBytes === "number" &&
+        Number.isFinite(o.streamHighWaterMarkBytes) &&
+        o.streamHighWaterMarkBytes >= 1
+    ) {
+        out.streamHighWaterMarkBytes = Math.trunc(o.streamHighWaterMarkBytes);
+    }
 
     return Object.keys(out).length ? out : undefined;
 }

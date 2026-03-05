@@ -2,6 +2,7 @@ use deno_runtime::deno_core::v8;
 use deno_runtime::worker::MainWorker;
 use neon::prelude::*;
 use tokio::sync::mpsc;
+use bytes::Bytes;
 
 use crate::bridge::types::{EvalOptions, JsValueBridge};
 use crate::worker::eval::eval_in_runtime;
@@ -28,8 +29,16 @@ pub async fn handle_deno_msg(
         DenoMsg::PostStreamChunk { stream_id, payload } => {
             handle_post_stream_chunk_msg(worker, stream_id, payload)
         }
+        DenoMsg::PostStreamChunkRaw {
+            stream_id,
+            payload,
+            credit,
+        } => handle_post_stream_chunk_raw_msg(worker, stream_id, payload, credit),
         DenoMsg::PostStreamChunks { stream_id, payloads } => {
             handle_post_stream_chunks_msg(worker, stream_id, payloads)
+        }
+        DenoMsg::PostStreamChunksRaw { stream_id, payload } => {
+            handle_post_stream_chunks_raw_msg(worker, stream_id, payload)
         }
         DenoMsg::PostStreamControl {
             kind,
@@ -53,6 +62,21 @@ pub async fn handle_deno_msg(
             .await
         }
     }
+}
+
+fn payload_to_chunk_bytes(payload: &JsValueBridge) -> Option<&[u8]> {
+    let JsValueBridge::BufferView {
+        bytes,
+        byte_offset,
+        length,
+        ..
+    } = payload
+    else {
+        return None;
+    };
+    let start = (*byte_offset).min(bytes.len());
+    let end = start.checked_add(*length)?.min(bytes.len());
+    Some(&bytes.as_ref()[start..end])
 }
 
 // Handle close msg.
@@ -327,6 +351,34 @@ fn handle_post_stream_chunks_msg(
     stream_id: String,
     payloads: Vec<JsValueBridge>,
 ) -> bool {
+    // Vectorize into one binary payload when all chunks are binary payloads.
+    let mut merged = Vec::<u8>::new();
+    let mut all_binary = !payloads.is_empty();
+    for payload in &payloads {
+        let Some(chunk) = payload_to_chunk_bytes(payload) else {
+            all_binary = false;
+            break;
+        };
+        merged.extend_from_slice(&(chunk.len() as u32).to_be_bytes());
+        merged.extend_from_slice(chunk);
+    }
+    if all_binary {
+        let id_num = stream_id.parse::<u32>().unwrap_or(0);
+        if id_num > 0 {
+            let merged_len = merged.len();
+            return handle_post_stream_chunks_raw_msg(
+                worker,
+                id_num,
+                JsValueBridge::BufferView {
+                    kind: "Uint8Array".into(),
+                    bytes: Bytes::from(merged),
+                    byte_offset: 0,
+                    length: merged_len,
+                },
+            );
+        }
+    }
+
     let dispatched = {
         deno_core::scope!(scope, &mut worker.js_runtime);
         let Some(key) = v8::String::new(scope, "__dispatchNodeStreamChunks") else {
@@ -359,6 +411,77 @@ fn handle_post_stream_chunks_msg(
         for payload in payloads {
             let _ = handle_post_stream_chunk_msg(worker, stream_id.clone(), payload);
         }
+    }
+    false
+}
+
+fn handle_post_stream_chunk_raw_msg(
+    worker: &mut MainWorker,
+    stream_id: u32,
+    payload: JsValueBridge,
+    credit: Option<u32>,
+) -> bool {
+    let dispatched = {
+        deno_core::scope!(scope, &mut worker.js_runtime);
+        let Some(key) = v8::String::new(scope, "__dispatchNodeStreamChunkRaw") else {
+            return false;
+        };
+        let ctx = scope.get_current_context();
+        let global = ctx.global(scope);
+        let Some(fn_any) = global.get(scope, key.into()) else {
+            return false;
+        };
+        let Ok(dispatch_fn) = v8::Local::<v8::Function>::try_from(fn_any) else {
+            return false;
+        };
+        let id_val = v8::Integer::new_from_unsigned(scope, stream_id);
+        let Ok(payload_val) = crate::bridge::v8_codec::to_v8(scope, &payload) else {
+            return false;
+        };
+        let credit_val: v8::Local<v8::Value> = match credit {
+            Some(v) => v8::Integer::new_from_unsigned(scope, v).into(),
+            None => v8::undefined(scope).into(),
+        };
+        dispatch_fn
+            .call(scope, global.into(), &[id_val.into(), payload_val, credit_val])
+            .is_some()
+    };
+
+    if !dispatched {
+        return handle_post_stream_chunk_msg(worker, stream_id.to_string(), payload);
+    }
+    false
+}
+
+fn handle_post_stream_chunks_raw_msg(
+    worker: &mut MainWorker,
+    stream_id: u32,
+    payload: JsValueBridge,
+) -> bool {
+    let dispatched = {
+        deno_core::scope!(scope, &mut worker.js_runtime);
+        let Some(key) = v8::String::new(scope, "__dispatchNodeStreamChunkVectorized") else {
+            return false;
+        };
+        let ctx = scope.get_current_context();
+        let global = ctx.global(scope);
+        let Some(fn_any) = global.get(scope, key.into()) else {
+            return false;
+        };
+        let Ok(dispatch_fn) = v8::Local::<v8::Function>::try_from(fn_any) else {
+            return false;
+        };
+        let id_val = v8::Integer::new_from_unsigned(scope, stream_id);
+        let Ok(payload_val) = crate::bridge::v8_codec::to_v8(scope, &payload) else {
+            return false;
+        };
+        dispatch_fn
+            .call(scope, global.into(), &[id_val.into(), payload_val])
+            .is_some()
+    };
+
+    if !dispatched {
+        return handle_post_stream_chunk_raw_msg(worker, stream_id, payload, None);
     }
     false
 }

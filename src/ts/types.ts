@@ -328,6 +328,12 @@ export type DenoWorkerBridgeOption =
              * - higher peak memory under key-fanout bursts
              */
             streamBacklogLimit?: number;
+            /**
+             * Reader-side high water mark in bytes used before additional credit is deferred.
+             *
+             * Default: same value as `streamWindowBytes`.
+             */
+            streamHighWaterMarkBytes?: number;
       };
 
 /**
@@ -879,8 +885,12 @@ export type NativeWorker = {
     postMessageTyped?: (type: string, id: number, payload: any) => boolean;
     /** Fast-path stream chunk transport keyed by stream id. */
     postStreamChunk?: (streamId: string, payload: any) => boolean;
+    /** Fast-path stream chunk transport keyed by numeric stream id with optional piggyback credit. */
+    postStreamChunkRaw?: (streamId: number, payload: any, credit?: number) => boolean;
     /** Fast-path batched stream chunk transport keyed by stream id. */
     postStreamChunks?: (streamId: string, payloads: any[]) => number;
+    /** Fast-path vectorized stream chunk transport keyed by numeric stream id. */
+    postStreamChunksRaw?: (streamId: number, payload: any) => boolean;
     /** Fast-path stream control transport for open/close/error/cancel/discard/credit. */
     postStreamControl?: (kind: string, streamId: string, aux?: string) => boolean;
     /** Batch post messages; returns accepted count. */

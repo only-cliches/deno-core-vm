@@ -46,7 +46,9 @@ pub(crate) fn queue_deno_msg_or_reject_with_backpressure(
             | DenoMsg::PostMessage { .. }
             | DenoMsg::PostMessageTyped { .. }
             | DenoMsg::PostStreamChunk { .. }
+            | DenoMsg::PostStreamChunkRaw { .. }
             | DenoMsg::PostStreamChunks { .. }
+            | DenoMsg::PostStreamChunksRaw { .. }
             | DenoMsg::PostStreamControl { .. } => {}
         }
     }
@@ -98,7 +100,9 @@ where
             | DenoMsg::PostMessage { .. }
             | DenoMsg::PostMessageTyped { .. }
             | DenoMsg::PostStreamChunk { .. }
+            | DenoMsg::PostStreamChunkRaw { .. }
             | DenoMsg::PostStreamChunks { .. }
+            | DenoMsg::PostStreamChunksRaw { .. }
             | DenoMsg::PostStreamControl { .. } => {}
         }
     }

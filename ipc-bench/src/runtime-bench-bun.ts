@@ -5,13 +5,14 @@ type Config = {
     messages: number;
     warmup: number;
     iterations: number;
-    transfer: "binary" | "json";
+    transfer: "binary" | "json" | "string";
     restarts: number;
     json: boolean;
 };
 
 type Ack = { id?: number; size: number; checksum: number };
 type JsonPayload = { blob: string; salt: number };
+type TransferPayload = Uint8Array | JsonPayload | string;
 
 function parseArgs(): Config {
     const args = Bun.argv.slice(2);
@@ -31,7 +32,10 @@ function parseArgs(): Config {
         else if (a === "--messages") out.messages = Number(args[++i]);
         else if (a === "--warmup") out.warmup = Number(args[++i]);
         else if (a === "--iterations") out.iterations = Number(args[++i]);
-        else if (a === "--transfer") out.transfer = args[++i] === "json" ? "json" : "binary";
+        else if (a === "--transfer") {
+            const mode = args[++i];
+            out.transfer = mode === "json" || mode === "string" ? mode : "binary";
+        }
         else if (a === "--restarts") out.restarts = Number(args[++i]);
         else if (a === "--json") out.json = true;
     }
@@ -55,6 +59,10 @@ function makeJsonPayload(size: number): JsonPayload {
     return { blob: "x".repeat(size), salt: ((size * 17) ^ 0x9e3779b1) >>> 0 };
 }
 
+function makeStringPayload(size: number): string {
+    return "x".repeat(size);
+}
+
 function ackChecksum(payload: Uint8Array): number {
     const first = payload.length > 0 ? payload[0] : 0;
     const last = payload.length > 0 ? payload[payload.length - 1] : 0;
@@ -66,6 +74,25 @@ function ackChecksumJson(payload: JsonPayload): number {
     const first = payload.blob.length > 0 ? payload.blob.charCodeAt(0) & 0xff : 0;
     const last = payload.blob.length > 0 ? payload.blob.charCodeAt(payload.blob.length - 1) & 0xff : 0;
     return ((size >>> 0) ^ first ^ (last << 8) ^ (payload.salt >>> 0)) >>> 0;
+}
+
+function ackChecksumString(payload: string): number {
+    const size = Buffer.byteLength(payload, "utf8");
+    const first = payload.length > 0 ? payload.charCodeAt(0) & 0xff : 0;
+    const last = payload.length > 0 ? payload.charCodeAt(payload.length - 1) & 0xff : 0;
+    return ((size >>> 0) ^ first ^ (last << 8)) >>> 0;
+}
+
+function payloadBytes(payload: TransferPayload): number {
+    if (payload instanceof Uint8Array) return payload.length;
+    if (typeof payload === "string") return Buffer.byteLength(payload, "utf8");
+    return Buffer.byteLength(payload.blob, "utf8");
+}
+
+function payloadChecksum(payload: TransferPayload): number {
+    if (payload instanceof Uint8Array) return ackChecksum(payload);
+    if (typeof payload === "string") return ackChecksumString(payload);
+    return ackChecksumJson(payload);
 }
 
 function mergeChecksums(values: number[]): number {
@@ -123,6 +150,14 @@ self.onmessage = (ev) => {
     self.postMessage({ id: msg.id, size: p.length >>> 0, checksum });
     return;
   }
+  if (typeof p === "string") {
+    const size = new TextEncoder().encode(p).length;
+    const first = p.length > 0 ? (p.charCodeAt(0) & 0xff) : 0;
+    const last = p.length > 0 ? (p.charCodeAt(p.length - 1) & 0xff) : 0;
+    const checksum = ((size >>> 0) ^ first ^ (last << 8)) >>> 0;
+    self.postMessage({ id: msg.id, size: size >>> 0, checksum });
+    return;
+  }
   if (p && typeof p === "object" && typeof p.blob === "string") {
     const blob = p.blob;
     const size = blob.length >>> 0;
@@ -137,7 +172,7 @@ self.onmessage = (ev) => {
 }
 
 async function runPostMessage(
-    payload: Uint8Array | JsonPayload,
+    payload: TransferPayload,
     messages: number,
     warmup: number,
     iterations: number,
@@ -145,8 +180,8 @@ async function runPostMessage(
     restarts: number,
 ): Promise<number> {
     const counts = splitCounts(messages, restarts + 1);
-    const payloadBytes = payload instanceof Uint8Array ? payload.length : payload.blob.length;
-    const expectedAck = payload instanceof Uint8Array ? ackChecksum(payload) : ackChecksumJson(payload);
+    const unitBytes = payloadBytes(payload);
+    const expectedAck = payloadChecksum(payload);
     const workerUrl = URL.createObjectURL(new Blob([createWorkerScript()], { type: "application/javascript" }));
     const worker = new Worker(workerUrl, { type: "module" });
     const pending = new Map<number, { resolve: (ack: Ack) => void; reject: (err: unknown) => void }>();
@@ -179,7 +214,7 @@ async function runPostMessage(
         if (restarts <= 0) return await oneSegment(messages);
         for (const c of counts) {
             const sum = await oneSegment(c);
-            const expectedSegment = expectedFoldForCount(expectedAck, payloadBytes, c);
+            const expectedSegment = expectedFoldForCount(expectedAck, unitBytes, c);
             if (sum !== expectedSegment) {
                 throw new Error(`Checksum mismatch in bun postMessage segment(count=${c}): expected ${expectedSegment}, got ${sum}`);
             }
@@ -205,7 +240,7 @@ async function runPostMessage(
 }
 
 async function runHttp(
-    payload: Uint8Array | JsonPayload,
+    payload: TransferPayload,
     messages: number,
     warmup: number,
     iterations: number,
@@ -213,8 +248,8 @@ async function runHttp(
     restarts: number,
 ): Promise<number> {
     const counts = splitCounts(messages, restarts + 1);
-    const payloadBytes = payload instanceof Uint8Array ? payload.length : payload.blob.length;
-    const expectedAck = payload instanceof Uint8Array ? ackChecksum(payload) : ackChecksumJson(payload);
+    const unitBytes = payloadBytes(payload);
+    const expectedAck = payloadChecksum(payload);
     const server = Bun.serve({
         hostname: "127.0.0.1",
         port: 0,
@@ -231,6 +266,14 @@ async function runHttp(
                 const checksum = ((size >>> 0) ^ first ^ (last << 8) ^ ((p.salt || 0) >>> 0)) >>> 0;
                 return Response.json({ size: size >>> 0, checksum });
             }
+            if (ct.includes("text/plain")) {
+                const text = await req.text();
+                const size = Buffer.byteLength(text, "utf8");
+                const first = text.length > 0 ? text.charCodeAt(0) & 0xff : 0;
+                const last = text.length > 0 ? text.charCodeAt(text.length - 1) & 0xff : 0;
+                const checksum = ((size >>> 0) ^ first ^ (last << 8)) >>> 0;
+                return Response.json({ size: size >>> 0, checksum });
+            }
             const buf = new Uint8Array(await req.arrayBuffer());
             const first = buf.length > 0 ? buf[0] : 0;
             const last = buf.length > 0 ? buf[buf.length - 1] : 0;
@@ -240,11 +283,12 @@ async function runHttp(
     });
     const oneSegment = async (count: number): Promise<number> => {
         const oneRun = async (): Promise<number> => {
-            const isJson = !(payload instanceof Uint8Array);
+            const isJson = !(payload instanceof Uint8Array) && typeof payload !== "string";
+            const isString = typeof payload === "string";
             const promises = Array.from({ length: count }, async () => {
                 const resp = await fetch(`http://127.0.0.1:${server.port}/echo`, {
                     method: "POST",
-                    headers: { "content-type": isJson ? "application/json" : "application/octet-stream" },
+                    headers: { "content-type": isJson ? "application/json" : isString ? "text/plain" : "application/octet-stream" },
                     body: isJson ? JSON.stringify(payload) : payload,
                 });
                 if (!resp.ok) throw new Error(`HTTP echo failed (${resp.status})`);
@@ -260,7 +304,7 @@ async function runHttp(
         if (restarts <= 0) return await oneSegment(messages);
         for (const c of counts) {
             const sum = await oneSegment(c);
-            const expectedSegment = expectedFoldForCount(expectedAck, payloadBytes, c);
+            const expectedSegment = expectedFoldForCount(expectedAck, unitBytes, c);
             if (sum !== expectedSegment) {
                 throw new Error(`Checksum mismatch in bun HTTP segment(count=${c}): expected ${expectedSegment}, got ${sum}`);
             }
@@ -286,8 +330,9 @@ async function runHttp(
 
 async function main(): Promise<void> {
     const config = parseArgs();
-    const payload = config.transfer === "json" ? makeJsonPayload(config.bytes) : makePayload(config.bytes);
-    const expectedAck = config.transfer === "json" ? ackChecksumJson(payload as JsonPayload) : ackChecksum(payload as Uint8Array);
+    const payload =
+        config.transfer === "json" ? makeJsonPayload(config.bytes) : config.transfer === "string" ? makeStringPayload(config.bytes) : makePayload(config.bytes);
+    const expectedAck = payloadChecksum(payload);
     const expectedFold = mergeChecksums(Array.from({ length: config.messages }, () => expectedAck ^ config.bytes));
     const totalBytes = config.bytes * config.messages;
 

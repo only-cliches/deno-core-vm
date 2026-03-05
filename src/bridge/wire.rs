@@ -4,6 +4,7 @@ use crate::bridge::tags::{
     V8_KEY,
 };
 use crate::bridge::types::JsValueBridge;
+use bytes::Bytes;
 
 // Decodes special number tag from wire/serialized form for bridge encoding/decoding between Rust, V8, and Neon.
 fn decode_special_number_tag(tag: &str) -> Option<f64> {
@@ -16,13 +17,13 @@ fn decode_special_number_tag(tag: &str) -> Option<f64> {
 }
 
 // Parses u8 array from input data and validates it for bridge encoding/decoding between Rust, V8, and Neon.
-fn parse_u8_array(items: &[serde_json::Value]) -> Option<Vec<u8>> {
+fn parse_u8_array(items: &[serde_json::Value]) -> Option<Bytes> {
     let mut out = Vec::with_capacity(items.len());
     for item in items {
         let n = item.as_u64()?;
         out.push((n & 0xFF) as u8);
     }
-    Some(out)
+    Some(Bytes::from(out))
 }
 
 // Decodes error object from wire/serialized form for bridge encoding/decoding between Rust, V8, and Neon.
@@ -120,7 +121,7 @@ fn decode_v8_serialized_object(
     let Some(bytes) = parse_u8_array(bytes_arr) else {
         return Some(Err(()));
     };
-    Some(Ok(JsValueBridge::V8Serialized(bytes)))
+    Some(Ok(JsValueBridge::V8Serialized(bytes.to_vec())))
 }
 
 // Decodes map entries from wire/serialized form for bridge encoding/decoding between Rust, V8, and Neon.

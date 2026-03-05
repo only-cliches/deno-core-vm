@@ -56,12 +56,12 @@ const STREAM_FRAME_CODE_TO_TYPE: Record<number, StreamFrameType> = {
     7: "credit",
 };
 
-// Default stream flow-control window (16 MiB): balanced for high throughput
-// without unbounded in-flight memory per stream.
+// Default stream flow-control window.
 const STREAM_DEFAULT_WINDOW_BYTES = 16 * 1024 * 1024;
 // Default credit flush threshold (256 KiB): avoids chatty credit updates while
 // keeping writers responsive under sustained transfer.
 const STREAM_CREDIT_FLUSH_THRESHOLD = 256 * 1024;
+const STREAM_READER_DEFAULT_HIGH_WATER_MARK_BYTES = STREAM_DEFAULT_WINDOW_BYTES;
 const STREAM_BACKLOG_DEFAULT_LIMIT = 256;
 const STREAM_SLOT_POOL_MIN = 16;
 const STREAM_SLOT_POOL_MAX = 1024;
@@ -565,6 +565,23 @@ function createChunkEnvelopeEncoder(id: string): (chunk: Uint8Array) => Uint8Arr
     };
 }
 
+class HeaderCache {
+    private readonly chunkEnvelopeById = new Map<string, (chunk: Uint8Array) => Uint8Array>();
+
+    chunkEncoder(id: string): (chunk: Uint8Array) => Uint8Array {
+        let encoder = this.chunkEnvelopeById.get(id);
+        if (!encoder) {
+            encoder = createChunkEnvelopeEncoder(id);
+            this.chunkEnvelopeById.set(id, encoder);
+        }
+        return encoder;
+    }
+
+    clear(id: string): void {
+        this.chunkEnvelopeById.delete(id);
+    }
+}
+
 /** Decodes a binary bridge envelope back into a logical stream frame object. */
 function decodeStreamFrameEnvelope(payload: unknown): StreamFrame | null {
     const u8 = asUint8View(payload);
@@ -641,6 +658,16 @@ class StreamReaderImpl implements DenoWorkerStreamReader {
     private onLocalDiscard?: () => void;
     private onChunkConsumed?: (bytes: number) => void;
     private discarded = false;
+    private bufferedBytes = 0;
+    private pendingCreditBytes = 0;
+    private readonly highWaterMarkBytes: number;
+
+    constructor(highWaterMarkBytes: number) {
+        this.highWaterMarkBytes =
+            Number.isFinite(highWaterMarkBytes) && highWaterMarkBytes >= 1
+                ? Math.trunc(highWaterMarkBytes)
+                : STREAM_READER_DEFAULT_HIGH_WATER_MARK_BYTES;
+    }
 
     /** Registers a callback used to send local cancel notifications to the remote writer. */
     setRemoteCancel(fn: (reason?: string) => void): void {
@@ -671,7 +698,21 @@ class StreamReaderImpl implements DenoWorkerStreamReader {
     /** Queues an incoming data chunk for `read()` consumers. */
     pushChunk(chunk: Uint8Array): void {
         if (this.closed || this.done) return;
+        this.bufferedBytes += chunk.byteLength;
         this.pushEvent({ kind: "chunk", chunk });
+    }
+
+    private onChunkDelivered(byteLength: number): void {
+        this.bufferedBytes = Math.max(0, this.bufferedBytes - byteLength);
+        this.pendingCreditBytes += byteLength;
+        if (this.bufferedBytes > this.highWaterMarkBytes) return;
+        if (this.pendingCreditBytes <= 0) return;
+        try {
+            this.onChunkConsumed?.(this.pendingCreditBytes);
+        } catch {
+            // ignore
+        }
+        this.pendingCreditBytes = 0;
     }
 
     /** Marks the remote side as closed and resolves pending reads as done. */
@@ -696,11 +737,7 @@ class StreamReaderImpl implements DenoWorkerStreamReader {
             const next = this.waiting.shift()!;
             if (ev.kind === "chunk") {
                 next.resolve({ done: false, value: ev.chunk });
-                try {
-                    this.onChunkConsumed?.(ev.chunk.byteLength);
-                } catch {
-                    // ignore
-                }
+                this.onChunkDelivered(ev.chunk.byteLength);
             }
             else if (ev.kind === "close") next.resolve({ done: true, value: undefined as any });
             else next.reject(ev.error);
@@ -715,11 +752,7 @@ class StreamReaderImpl implements DenoWorkerStreamReader {
         if (this.queue.length > 0) {
             const ev = this.queue.shift()!;
             if (ev.kind === "chunk") {
-                try {
-                    this.onChunkConsumed?.(ev.chunk.byteLength);
-                } catch {
-                    // ignore
-                }
+                this.onChunkDelivered(ev.chunk.byteLength);
                 return { done: false, value: ev.chunk };
             }
             this.done = true;
@@ -811,6 +844,8 @@ export class DenoWorker {
     private readonly streamWindowBytes: number;
     private readonly streamCreditFlushBytes: number;
     private readonly streamBacklogLimit: number;
+    private readonly streamReaderHighWaterMarkBytes: number;
+    private readonly streamHeaderCache = new HeaderCache();
     private handleGeneration = 1;
     private handleCounter = 0;
     private handleBridgeInstallPromise: Promise<void> | null = null;
@@ -1342,7 +1377,9 @@ export class DenoWorker {
     /** Allocates the next unique stream id for either native or wrapper-initiated streams. */
     private nextStreamId(prefix: "n" | "w" = "n"): string {
         this.streamCounter += 1;
-        return `${prefix}:${this.nativeEpoch}:${this.streamCounter}`;
+        const base = (this.nativeEpoch * 1_000_000 + this.streamCounter) >>> 0;
+        if (prefix === "w") return String((2_147_483_648 + base) >>> 0);
+        return String(base || 1);
     }
 
     /** Sends one logical stream frame to runtime after envelope encoding. */
@@ -1553,6 +1590,7 @@ export class DenoWorker {
         this.streamWriterWaiters.delete(id);
         const current = this.streamNameToId.get(meta.name);
         if (current === id) this.streamNameToId.delete(meta.name);
+        this.streamHeaderCache.clear(id);
         this.releaseStreamSlot(meta);
     }
 
@@ -1599,7 +1637,7 @@ export class DenoWorker {
                     return true;
                 }
                 this.registerStream(key, frame.id);
-                const reader = new StreamReaderImpl();
+                const reader = new StreamReaderImpl(this.streamReaderHighWaterMarkBytes);
                 reader.setRemoteCancel((reason?: string) => {
                     this.emitStreamFrame({
                         t: "cancel",
@@ -1697,6 +1735,7 @@ export class DenoWorker {
             for (const waiter of waiters) waiter.reject(new Error(reason));
         }
         this.streamWriterWaiters.clear();
+        for (const id of this.streamById.keys()) this.streamHeaderCache.clear(id);
 
         for (const waiter of this.streamPendingAccepts.values()) {
             waiter.reject(new Error(reason));
@@ -1775,6 +1814,7 @@ export class DenoWorker {
         const parsedWindow = Number(rawBridge?.streamWindowBytes);
         const parsedFlush = Number(rawBridge?.streamCreditFlushBytes);
         const parsedBacklogLimit = Number(rawBridge?.streamBacklogLimit);
+        const parsedHighWaterMark = Number(rawBridge?.streamHighWaterMarkBytes);
         this.streamWindowBytes =
             Number.isFinite(parsedWindow) && parsedWindow >= 1
                 ? Math.trunc(parsedWindow)
@@ -1787,6 +1827,10 @@ export class DenoWorker {
             Number.isFinite(parsedBacklogLimit) && parsedBacklogLimit >= 1
                 ? Math.trunc(parsedBacklogLimit)
                 : STREAM_BACKLOG_DEFAULT_LIMIT;
+        this.streamReaderHighWaterMarkBytes =
+            Number.isFinite(parsedHighWaterMark) && parsedHighWaterMark >= 1
+                ? Math.trunc(parsedHighWaterMark)
+                : this.streamWindowBytes;
         this.streamSlotPoolTarget = STREAM_SLOT_POOL_MIN;
         this.resizeStreamSlotPool(this.streamSlotPoolTarget);
         this.invokeHook("beforeStart", { options });
@@ -1974,10 +2018,16 @@ export class DenoWorker {
         const id = this.nextStreamId("n");
         const typedChunkType = `${STREAM_TYPED_CHUNK_PREFIX}${id}`;
         const canPostNativeChunk = typeof (this.native as any).postStreamChunk === "function";
-        const canPostNativeChunks = typeof (this.native as any).postStreamChunks === "function";
+        const canPostNativeChunkRaw = typeof (this.native as any).postStreamChunkRaw === "function";
+        const canPostNativeChunksRaw = typeof (this.native as any).postStreamChunksRaw === "function";
         const canPostTypedChunk = typeof this.native.postMessageTyped === "function";
         this.registerStream(finalKey, id);
-        const encodeChunkEnvelope = createChunkEnvelopeEncoder(id);
+        const encodeChunkEnvelope = this.streamHeaderCache.chunkEncoder(id);
+        const rawStreamId = Number(id);
+        const useRawStreamId =
+            Number.isFinite(rawStreamId) && rawStreamId >= 1 && rawStreamId <= 0xffffffff
+                ? Math.trunc(rawStreamId)
+                : null;
         let done = false;
         this.emitStreamFrame({ t: "open", id, key: finalKey });
         this.streamWriterCredits.set(id, this.streamWindowBytes);
@@ -2128,6 +2178,13 @@ export class DenoWorker {
             for (const payload of payloads) this.postMessageRaw(payload);
         };
         const postChunkFast = (chunk: Uint8Array): void => {
+            const piggybackCredit = this.pendingCreditFrames.get(id) || 0;
+            if (piggybackCredit > 0) this.pendingCreditFrames.delete(id);
+            if (canPostNativeChunkRaw && useRawStreamId !== null) {
+                const ok = (this.native as any).postStreamChunkRaw(useRawStreamId, chunk, piggybackCredit || undefined);
+                if (!ok) throw new Error("DenoWorker.postStreamChunkRaw failed: worker is closed");
+                return;
+            }
             if (canPostNativeChunk) {
                 const ok = (this.native as any).postStreamChunk(id, chunk);
                 if (!ok) throw new Error("DenoWorker.postStreamChunk failed: worker is closed");
@@ -2142,14 +2199,38 @@ export class DenoWorker {
             const payload = encodeChunkEnvelope(chunk);
             this.postMessageRaw(payload);
         };
+        const encodeVectorizedChunks = (chunks: Uint8Array[]): Uint8Array => {
+            let total = 0;
+            for (const chunk of chunks) total += 4 + chunk.byteLength;
+            const out = new Uint8Array(total);
+            let off = 0;
+            for (const chunk of chunks) {
+                const len = chunk.byteLength >>> 0;
+                out[off] = (len >>> 24) & 0xff;
+                out[off + 1] = (len >>> 16) & 0xff;
+                out[off + 2] = (len >>> 8) & 0xff;
+                out[off + 3] = len & 0xff;
+                off += 4;
+                out.set(chunk, off);
+                off += chunk.byteLength;
+            }
+            if (typeof Buffer !== "undefined") {
+                return Buffer.from(out.buffer, out.byteOffset, out.byteLength);
+            }
+            return out;
+        };
         const postChunksFast = (chunks: Uint8Array[]): void => {
             if (chunks.length === 0) return;
             if (chunks.length === 1) {
                 postChunkFast(chunks[0]);
                 return;
             }
-            // Coalesce many small chunks into one transport packet so runtime stream
-            // parser work scales with bytes, not chunk count.
+            if (canPostNativeChunksRaw && useRawStreamId !== null) {
+                const ok = (this.native as any).postStreamChunksRaw(useRawStreamId, encodeVectorizedChunks(chunks));
+                if (!ok) throw new Error("DenoWorker.postStreamChunksRaw failed: worker is closed");
+                return;
+            }
+            // Coalesce when vectorized/raw path is unavailable.
             let total = 0;
             for (const chunk of chunks) total += chunk.byteLength;
             const merged = new Uint8Array(total);
@@ -2175,7 +2256,9 @@ export class DenoWorker {
                 ensureOpen();
                 const u8 = toBinaryChunk(chunk);
                 const have = this.streamWriterCredits.get(id) || 0;
-                const useTypedChunk = (canPostNativeChunk || canPostTypedChunk) && u8.byteLength >= STREAM_TYPED_CHUNK_MIN_BYTES;
+                const useTypedChunk =
+                    (canPostNativeChunkRaw || canPostNativeChunk || canPostTypedChunk) &&
+                    u8.byteLength >= STREAM_TYPED_CHUNK_MIN_BYTES;
                 if (have >= u8.byteLength) {
                     this.consumeWriterCredit(id, u8.byteLength);
                     if (useTypedChunk) {
@@ -2209,7 +2292,7 @@ export class DenoWorker {
                         totalBytes += u8.byteLength;
                     }
                     const useTypedForAll =
-                        (canPostNativeChunk || canPostTypedChunk) &&
+                        (canPostNativeChunkRaw || canPostNativeChunk || canPostTypedChunk) &&
                         prepared.every((chunk) => chunk.byteLength >= STREAM_TYPED_CHUNK_MIN_BYTES);
                     if ((this.streamWriterCredits.get(id) || 0) >= totalBytes) {
                         this.consumeWriterCredit(id, totalBytes);
@@ -2228,7 +2311,7 @@ export class DenoWorker {
                         await this.waitForWriterCredit(id, chunk.byteLength);
                         this.consumeWriterCredit(id, chunk.byteLength);
                         const useTypedChunk =
-                            (canPostNativeChunk || canPostTypedChunk) &&
+                            (canPostNativeChunkRaw || canPostNativeChunk || canPostTypedChunk) &&
                             chunk.byteLength >= STREAM_TYPED_CHUNK_MIN_BYTES;
                         if (useTypedChunk) {
                             await queueFastChunk(chunk);

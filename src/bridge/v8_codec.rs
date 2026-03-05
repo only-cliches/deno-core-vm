@@ -1,6 +1,7 @@
 // src/bridge/v8_codec.rs
 use deno_runtime::deno_core::v8::{ValueDeserializerHelper, ValueSerializerHelper};
 use deno_runtime::deno_core::{serde_v8, v8};
+use bytes::Bytes;
 
 use crate::bridge::tags::{TYPE_FUNCTION, TYPE_KEY};
 use crate::bridge::types::JsValueBridge;
@@ -180,18 +181,19 @@ fn json_to_v8_plain<'s, 'p>(
 fn try_buffer_view_to_v8<'s, 'p>(
     ps: &mut v8::PinScope<'s, 'p>,
     kind: &str,
-    bytes: &[u8],
+    bytes: &Bytes,
     byte_offset: usize,
     length: usize,
 ) -> Option<v8::Local<'s, v8::Value>> {
+    let raw = bytes.as_ref();
     if kind == "SharedArrayBuffer" {
         return None;
     }
 
-    let ab = if bytes.is_empty() {
+    let ab = if raw.is_empty() {
         v8::ArrayBuffer::new(ps, 0)
     } else {
-        let bs = v8::ArrayBuffer::new_backing_store_from_vec(bytes.to_vec()).make_shared();
+        let bs = v8::ArrayBuffer::new_backing_store_from_vec(raw.to_vec()).make_shared();
         v8::ArrayBuffer::with_backing_store(ps, &bs)
     };
 
@@ -199,11 +201,11 @@ fn try_buffer_view_to_v8<'s, 'p>(
         return Some(ab.into());
     }
 
-    if byte_offset > bytes.len() {
+    if byte_offset > raw.len() {
         return None;
     }
     let end = byte_offset.checked_add(length)?;
-    if end > bytes.len() {
+    if end > raw.len() {
         return None;
     }
 
@@ -470,7 +472,7 @@ pub fn from_v8<'s, 'p>(
 
         return Ok(JsValueBridge::BufferView {
             kind: "ArrayBuffer".into(),
-            bytes: slice.to_vec(),
+            bytes: Bytes::copy_from_slice(slice),
             byte_offset: 0,
             length: len,
         });
@@ -493,7 +495,7 @@ pub fn from_v8<'s, 'p>(
 
         return Ok(JsValueBridge::BufferView {
             kind: "DataView".into(),
-            bytes: slice.to_vec(),
+            bytes: Bytes::copy_from_slice(slice),
             byte_offset,
             length: byte_len,
         });
@@ -534,7 +536,7 @@ pub fn from_v8<'s, 'p>(
 
         return Ok(JsValueBridge::BufferView {
             kind,
-            bytes: slice.to_vec(),
+            bytes: Bytes::copy_from_slice(slice),
             byte_offset,
             length,
         });

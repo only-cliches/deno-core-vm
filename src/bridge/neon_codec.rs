@@ -3,6 +3,7 @@ use neon::prelude::*;
 use neon::result::Throw;
 use neon::types::JsDate;
 use std::cell::RefCell;
+use bytes::Bytes;
 
 use super::types::JsValueBridge;
 use crate::bridge::tags::{
@@ -603,7 +604,7 @@ pub fn from_neon_value<'a, C: Context<'a>>(
         let len = bytes.len();
         return Ok(JsValueBridge::BufferView {
             kind: "Uint8Array".into(),
-            bytes,
+            bytes: Bytes::from(bytes),
             byte_offset: 0,
             length: len,
         });
@@ -722,7 +723,7 @@ pub fn from_neon_value<'a, C: Context<'a>>(
 
                         return Ok(JsValueBridge::BufferView {
                             kind,
-                            bytes,
+                            bytes: Bytes::from(bytes),
                             byte_offset,
                             length,
                         });
@@ -1302,7 +1303,7 @@ pub fn to_neon_value<'a, C: Context<'a>>(
             byte_offset,
             length,
         } => {
-            let out = buffer_view_to_neon(cx, kind, bytes, *byte_offset, *length)
+            let out = buffer_view_to_neon(cx, kind, bytes.as_ref(), *byte_offset, *length)
                 .unwrap_or_else(|_| cx.undefined().upcast());
             Ok(out)
         }

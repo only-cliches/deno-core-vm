@@ -29,7 +29,8 @@ type BenchConfig = {
 
 type Ack = { size: number; checksum: number };
 type JsonPayload = { blob: string; salt: number };
-type TransferPayload = Uint8Array | JsonPayload;
+type TransferPayload = Uint8Array | JsonPayload | string;
+type TransferMode = "binary" | "json" | "string";
 
 type ScenarioMeta = {
     key: ScenarioKey;
@@ -133,6 +134,10 @@ function makeJsonPayload(size: number): JsonPayload {
     return { blob: "x".repeat(size), salt: ((size * 17) ^ 0x9e3779b1) >>> 0 };
 }
 
+function makeStringPayload(size: number): string {
+    return "x".repeat(size);
+}
+
 function ackChecksum(payload: Uint8Array): number {
     const first = payload.length > 0 ? payload[0] : 0;
     const last = payload.length > 0 ? payload[payload.length - 1] : 0;
@@ -144,6 +149,25 @@ function ackChecksumJson(payload: JsonPayload): number {
     const first = payload.blob.length > 0 ? payload.blob.charCodeAt(0) & 0xff : 0;
     const last = payload.blob.length > 0 ? payload.blob.charCodeAt(payload.blob.length - 1) & 0xff : 0;
     return ((size >>> 0) ^ first ^ (last << 8) ^ (payload.salt >>> 0)) >>> 0;
+}
+
+function ackChecksumString(payload: string): number {
+    const size = Buffer.byteLength(payload, "utf8");
+    const first = payload.length > 0 ? payload.charCodeAt(0) & 0xff : 0;
+    const last = payload.length > 0 ? payload.charCodeAt(payload.length - 1) & 0xff : 0;
+    return ((size >>> 0) ^ first ^ (last << 8)) >>> 0;
+}
+
+function transferModeOf(payload: TransferPayload): TransferMode {
+    if (payload instanceof Uint8Array) return "binary";
+    if (typeof payload === "string") return "string";
+    return "json";
+}
+
+function payloadSizeBytes(payload: TransferPayload): number {
+    if (payload instanceof Uint8Array) return payload.length;
+    if (typeof payload === "string") return Buffer.byteLength(payload, "utf8");
+    return Buffer.byteLength(payload.blob, "utf8");
 }
 
 function mergeChecksums(values: number[]): number {
@@ -251,6 +275,14 @@ parentPort.on("message", (msg) => {
     parentPort.postMessage({ id: msg.id, size: p.length >>> 0, checksum });
     return;
   }
+  if (typeof p === "string") {
+    const size = Buffer.byteLength(p, "utf8");
+    const first = p.length > 0 ? (p.charCodeAt(0) & 0xff) : 0;
+    const last = p.length > 0 ? (p.charCodeAt(p.length - 1) & 0xff) : 0;
+    const checksum = ((size >>> 0) ^ first ^ (last << 8)) >>> 0;
+    parentPort.postMessage({ id: msg.id, size: size >>> 0, checksum });
+    return;
+  }
   if (p && typeof p === "object" && typeof p.blob === "string") {
     const blob = p.blob;
     const size = Buffer.byteLength(blob, "utf8");
@@ -273,6 +305,14 @@ on("message", (msg) => {
     const last = p.length > 0 ? p[p.length - 1] : 0;
     const checksum = ((p.length >>> 0) ^ first ^ (last << 8)) >>> 0;
     hostPostMessage({ id: msg.id, size: p.length >>> 0, checksum });
+    return;
+  }
+  if (typeof p === "string") {
+    const size = new TextEncoder().encode(p).length;
+    const first = p.length > 0 ? (p.charCodeAt(0) & 0xff) : 0;
+    const last = p.length > 0 ? (p.charCodeAt(p.length - 1) & 0xff) : 0;
+    const checksum = ((size >>> 0) ^ first ^ (last << 8)) >>> 0;
+    hostPostMessage({ id: msg.id, size: size >>> 0, checksum });
     return;
   }
   if (p && typeof p === "object" && typeof p.blob === "string") {
@@ -339,6 +379,12 @@ async function setupNodeHttp(workerCount: number): Promise<any> {
                     const first = parsed.blob && parsed.blob.length > 0 ? parsed.blob.charCodeAt(0) & 0xff : 0;
                     const last = parsed.blob && parsed.blob.length > 0 ? parsed.blob.charCodeAt(parsed.blob.length - 1) & 0xff : 0;
                     checksum = ((size >>> 0) ^ first ^ (last << 8) ^ ((parsed.salt || 0) >>> 0)) >>> 0;
+                } else if (ct.includes("text/plain")) {
+                    const text = body.toString("utf8");
+                    size = Buffer.byteLength(text, "utf8") >>> 0;
+                    const first = text.length > 0 ? text.charCodeAt(0) & 0xff : 0;
+                    const last = text.length > 0 ? text.charCodeAt(text.length - 1) & 0xff : 0;
+                    checksum = ((size >>> 0) ^ first ^ (last << 8)) >>> 0;
                 } else {
                     const first = body.length > 0 ? body[0] : 0;
                     const last = body.length > 0 ? body[body.length - 1] : 0;
@@ -364,12 +410,13 @@ async function setupNodeHttp(workerCount: number): Promise<any> {
 
 async function runNodeHttp(payload: TransferPayload, messages: number, workerCount: number, ctx: any): Promise<number> {
     const { servers, agents } = ctx;
-    const isJson = !(payload instanceof Uint8Array);
-    const body = isJson ? JSON.stringify(payload) : payload;
+    const mode = transferModeOf(payload);
+    const body = mode === "binary" ? payload : mode === "json" ? JSON.stringify(payload) : payload;
+    const contentType = mode === "binary" ? "application/octet-stream" : mode === "json" ? "application/json" : "text/plain";
     const promises = Array.from({ length: messages }, async (_, i) => {
         const idx = i % workerCount;
         const port = servers[idx].port;
-        return await postHttpAck(port, isJson ? "application/json" : "application/octet-stream", body, agents[idx]);
+        return await postHttpAck(port, contentType, body, agents[idx]);
     });
     const out = await Promise.all(promises);
     return mergeChecksums(out.map((a) => ((a.checksum ^ a.size) >>> 0)));
@@ -455,6 +502,12 @@ async function setupDenoEval(workerCount: number): Promise<any> {
                 const last = p.length > 0 ? p[p.length - 1] : 0;
                 return { size: p.length >>> 0, checksum: ((p.length >>> 0) ^ first ^ (last << 8)) >>> 0 };
             }
+            if (typeof p === "string") {
+                const size = new TextEncoder().encode(p).length;
+                const first = p.length > 0 ? (p.charCodeAt(0) & 0xff) : 0;
+                const last = p.length > 0 ? (p.charCodeAt(p.length - 1) & 0xff) : 0;
+                return { size: size >>> 0, checksum: ((size >>> 0) ^ first ^ (last << 8)) >>> 0 };
+            }
             const blob = p && typeof p.blob === "string" ? p.blob : "";
             const size = blob.length >>> 0;
             const first = blob.length > 0 ? (blob.charCodeAt(0) & 0xff) : 0;
@@ -490,6 +543,12 @@ async function setupDenoHandle(workerCount: number): Promise<any> {
                     const size = p.length >>> 0;
                     const first = p.length > 0 ? p[0] : 0;
                     const last = p.length > 0 ? p[p.length - 1] : 0;
+                    return { size, checksum: ((size >>> 0) ^ first ^ (last << 8)) >>> 0 };
+                }
+                if (typeof p === "string") {
+                    const size = new TextEncoder().encode(p).length;
+                    const first = p.length > 0 ? (p.charCodeAt(0) & 0xff) : 0;
+                    const last = p.length > 0 ? (p.charCodeAt(p.length - 1) & 0xff) : 0;
                     return { size, checksum: ((size >>> 0) ^ first ^ (last << 8)) >>> 0 };
                 }
                 const blob = p && typeof p.blob === "string" ? p.blob : "";
@@ -529,7 +588,7 @@ const denoStreamScript = `
       const id = readU32(buf, 0);
       const count = readU32(buf, 4);
       const unitBytes = readU32(buf, 8);
-      const mode = buf[12] >>> 0; // 0=binary, 1=json
+      const mode = buf[12] >>> 0; // 0=binary, 1=json, 2=string
       const payloadBytes = Math.imul(count >>> 0, unitBytes >>> 0) >>> 0;
       const total = (16 + payloadBytes) >>> 0;
       if (total < 16 || buf.length < total) break;
@@ -547,6 +606,12 @@ const denoStreamScript = `
           const last = blob.length > 0 ? (blob.charCodeAt(blob.length - 1) & 0xff) : 0;
           const salt = p && Number.isFinite(p.salt) ? (p.salt >>> 0) : 0;
           checksum = ((size >>> 0) ^ first ^ (last << 8) ^ salt) >>> 0;
+        } else if (mode === 2) {
+          const text = new TextDecoder().decode(payload.subarray(0, unitBytes));
+          size = new TextEncoder().encode(text).length;
+          const first = text.length > 0 ? (text.charCodeAt(0) & 0xff) : 0;
+          const last = text.length > 0 ? (text.charCodeAt(text.length - 1) & 0xff) : 0;
+          checksum = ((size >>> 0) ^ first ^ (last << 8)) >>> 0;
         } else {
           const first = payload[0] ?? 0;
           const last = payload[unitBytes - 1] ?? 0;
@@ -589,8 +654,8 @@ async function setupDenoStream(workerCount: number): Promise<any> {
 
 async function runDenoStream(payload: TransferPayload, messages: number, workerCount: number, ctx: any): Promise<number> {
     const { writers, pending, nextId } = ctx;
-    const isJson = !(payload instanceof Uint8Array);
-    const bytes = isJson ? Buffer.from(JSON.stringify(payload), "utf8") : payload;
+    const mode = transferModeOf(payload);
+    const bytes = mode === "binary" ? payload : Buffer.from(mode === "json" ? JSON.stringify(payload) : payload, "utf8");
     const promises = Array.from({ length: messages }, async (_, i) => {
         const writer = writers[i % workerCount];
         const id = nextId();
@@ -613,7 +678,7 @@ async function runDenoStream(payload: TransferPayload, messages: number, workerC
         frame[9] = (bytes.length >>> 8) & 0xff;
         frame[10] = (bytes.length >>> 16) & 0xff;
         frame[11] = (bytes.length >>> 24) & 0xff;
-        frame[12] = isJson ? 1 : 0;
+        frame[12] = mode === "binary" ? 0 : mode === "json" ? 1 : 2;
         frame[13] = 0;
         frame[14] = 0;
         frame[15] = 0;
@@ -732,7 +797,7 @@ async function runBunMain(
     messages: number,
     warmup: number,
     iterations: number,
-    transfer: "binary" | "json",
+    transfer: TransferMode,
     restarts: number,
 ): Promise<Record<string, number>> {
     const script = path.resolve(process.cwd(), "src/runtime-bench-bun.ts");
@@ -760,7 +825,7 @@ async function runDenoMain(
     messages: number,
     warmup: number,
     iterations: number,
-    transfer: "binary" | "json",
+    transfer: TransferMode,
     restarts: number,
 ): Promise<Record<string, number>> {
     const script = path.resolve(process.cwd(), "src/runtime-bench-deno.ts");
@@ -851,13 +916,17 @@ async function main(): Promise<void> {
     for (const payloadBytes of config.payloadBytesList) {
         const payload = makePayload(payloadBytes);
         const jsonPayload = makeJsonPayload(payloadBytes);
+        const stringPayload = makeStringPayload(payloadBytes);
         const expectedAck = ackChecksum(payload);
         const expectedAckJson = ackChecksumJson(jsonPayload);
+        const expectedAckString = ackChecksumString(stringPayload);
         const totalBytes = payloadBytes * config.messages;
         const expectedFold = mergeChecksums(Array.from({ length: config.messages }, () => expectedAck ^ payloadBytes));
         const expectedFoldJson = mergeChecksums(Array.from({ length: config.messages }, () => expectedAckJson ^ payloadBytes));
+        const expectedFoldString = mergeChecksums(Array.from({ length: config.messages }, () => expectedAckString ^ payloadBytes));
         const results = new Map<string, number>();
         const jsonResults = new Map<string, number>();
+        const stringResults = new Map<string, number>();
 
         console.log(`\nPayload: ${payloadBytes} bytes (${(payloadBytes / 1024).toFixed(1)} KiB), bytesPerRun=${totalBytes}`);
 
@@ -868,6 +937,7 @@ async function main(): Promise<void> {
             const persistentCtx = await scenario.setup(wc);
             try {
                 const runLocal = async (modePayload: TransferPayload, modeExpectedAck: number): Promise<number> => {
+                    const modePayloadBytes = payloadSizeBytes(modePayload);
                     if (config.restarts <= 0) {
                         return await scenario.run(modePayload, config.messages, wc, persistentCtx);
                     }
@@ -878,14 +948,14 @@ async function main(): Promise<void> {
                         }
                         const count = segmentCounts[i];
                         const sum = await scenario.run(modePayload, count, wc, persistentCtx);
-                        const expectedSegment = expectedFoldForCount(modeExpectedAck, payloadBytes, count);
+                        const expectedSegment = expectedFoldForCount(modeExpectedAck, modePayloadBytes, count);
                         if (sum !== expectedSegment) {
                             throw new Error(
                                 `Checksum mismatch for ${scenario.key} segment(count=${count}): expected ${expectedSegment}, got ${sum}`,
                             );
                         }
                     }
-                    return expectedFoldForCount(modeExpectedAck, payloadBytes, config.messages);
+                    return expectedFoldForCount(modeExpectedAck, modePayloadBytes, config.messages);
                 };
 
                 for (let i = 0; i < config.warmup; i += 1) {
@@ -934,6 +1004,29 @@ async function main(): Promise<void> {
                 const jsonSpeed = mbps(totalBytes, median(jsonDts));
                 jsonResults.set(scenario.key, jsonSpeed);
                 console.log(`done: ${scenario.label} (json) -> ${fmtMbps(jsonSpeed)}`);
+
+                for (let i = 0; i < config.warmup; i += 1) {
+                    await runLocal(stringPayload, expectedAckString);
+                }
+
+                const stringDts: number[] = [];
+                let stringChecksum: number | undefined;
+                for (let i = 0; i < config.iterations; i += 1) {
+                    const t0 = performance.now();
+                    const sum = await runLocal(stringPayload, expectedAckString);
+                    const dt = performance.now() - t0;
+                    stringDts.push(dt);
+                    if (stringChecksum == null) stringChecksum = sum;
+                    else if (stringChecksum !== sum) throw new Error(`Inconsistent string checksum in ${scenario.key}`);
+                }
+
+                if (stringChecksum == null) throw new Error("Missing string checksum");
+                if (stringChecksum !== expectedFoldString) {
+                    throw new Error(`String checksum mismatch for ${scenario.key}: expected ${expectedFoldString}, got ${stringChecksum}`);
+                }
+                const stringSpeed = mbps(totalBytes, median(stringDts));
+                stringResults.set(scenario.key, stringSpeed);
+                console.log(`done: ${scenario.label} (string) -> ${fmtMbps(stringSpeed)}`);
             } finally {
                 await scenario.teardown(persistentCtx);
             }
@@ -947,6 +1040,7 @@ async function main(): Promise<void> {
             } else {
                 const bunOut = await runBunMain(payloadBytes, config.messages, config.warmup, config.iterations, "binary", config.restarts);
                 const bunOutJson = await runBunMain(payloadBytes, config.messages, config.warmup, config.iterations, "json", config.restarts);
+                const bunOutString = await runBunMain(payloadBytes, config.messages, config.warmup, config.iterations, "string", config.restarts);
                 for (const s of selectedScenarios.filter((x) => x.main === "Bun")) {
                     const speed = bunOut[s.key];
                     if (speed == null) console.log(`skip: ${s.label} (missing result from bun runtime)`);
@@ -960,6 +1054,12 @@ async function main(): Promise<void> {
                         jsonResults.set(s.key, jsonSpeed);
                         console.log(`done: ${s.label} (json) -> ${fmtMbps(jsonSpeed)}`);
                     }
+                    const stringSpeed = bunOutString[s.key];
+                    if (stringSpeed == null) console.log(`skip: ${s.label} (string result missing from bun runtime)`);
+                    else {
+                        stringResults.set(s.key, stringSpeed);
+                        console.log(`done: ${s.label} (string) -> ${fmtMbps(stringSpeed)}`);
+                    }
                 }
             }
         }
@@ -972,6 +1072,7 @@ async function main(): Promise<void> {
             } else {
                 const denoOut = await runDenoMain(payloadBytes, config.messages, config.warmup, config.iterations, "binary", config.restarts);
                 const denoOutJson = await runDenoMain(payloadBytes, config.messages, config.warmup, config.iterations, "json", config.restarts);
+                const denoOutString = await runDenoMain(payloadBytes, config.messages, config.warmup, config.iterations, "string", config.restarts);
                 for (const s of selectedScenarios.filter((x) => x.main === "Deno")) {
                     const speed = denoOut[s.key];
                     if (speed == null) console.log(`skip: ${s.label} (missing result from deno runtime)`);
@@ -985,12 +1086,19 @@ async function main(): Promise<void> {
                         jsonResults.set(s.key, jsonSpeed);
                         console.log(`done: ${s.label} (json) -> ${fmtMbps(jsonSpeed)}`);
                     }
+                    const stringSpeed = denoOutString[s.key];
+                    if (stringSpeed == null) console.log(`skip: ${s.label} (string result missing from deno runtime)`);
+                    else {
+                        stringResults.set(s.key, stringSpeed);
+                        console.log(`done: ${s.label} (string) -> ${fmtMbps(stringSpeed)}`);
+                    }
                 }
             }
         }
 
         printTable("Binary Transfer", selectedScenarios, results);
         printTable("JSON Transfer", selectedScenarios, jsonResults);
+        printTable("String Transfer", selectedScenarios, stringResults);
     }
 }
 

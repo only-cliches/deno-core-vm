@@ -1,4 +1,5 @@
 use deno_runtime::deno_core::{JsBuffer, OpState, op2};
+use bytes::Bytes;
 use tokio::sync::oneshot;
 
 use crate::bridge::types::JsValueBridge;
@@ -25,7 +26,7 @@ fn bytes_to_u8_bridge(bytes: &[u8]) -> JsValueBridge {
     // JSON array materialization and can preserve binary throughput.
     JsValueBridge::BufferView {
         kind: "Uint8Array".into(),
-        bytes: bytes.to_vec(),
+        bytes: Bytes::copy_from_slice(bytes),
         byte_offset: 0,
         length: bytes.len(),
     }

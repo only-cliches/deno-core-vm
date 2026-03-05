@@ -169,6 +169,7 @@ impl Default for RuntimeLimits {
 pub struct BridgeConfig {
     pub stream_window_bytes: Option<u64>,
     pub stream_credit_flush_bytes: Option<u64>,
+    pub stream_high_water_mark_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -523,7 +524,7 @@ impl WorkerCreateOptions {
             }
         }
 
-        // `bridge`: { channelSize?, streamWindowBytes?, streamCreditFlushBytes? }.
+        // `bridge`: { channelSize?, streamWindowBytes?, streamCreditFlushBytes?, streamHighWaterMarkBytes? }.
         if let Ok(v) = obj.get::<JsValue, _, _>(cx, "bridge") {
             if let Ok(o) = v.downcast::<JsObject, _>(cx) {
                 let mut cfg = BridgeConfig::default();
@@ -554,6 +555,16 @@ impl WorkerCreateOptions {
                         let n = fn_.value(cx);
                         if n.is_finite() && n >= 1.0 {
                             cfg.stream_credit_flush_bytes = Some(n as u64);
+                            saw_bridge = true;
+                        }
+                    }
+                }
+
+                if let Ok(hv) = o.get::<JsValue, _, _>(cx, "streamHighWaterMarkBytes") {
+                    if let Ok(hn) = hv.downcast::<JsNumber, _>(cx) {
+                        let n = hn.value(cx);
+                        if n.is_finite() && n >= 1.0 {
+                            cfg.stream_high_water_mark_bytes = Some(n as u64);
                             saw_bridge = true;
                         }
                     }

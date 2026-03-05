@@ -630,6 +630,62 @@ pub fn create_worker(mut cx: FunctionContext) -> JsResult<JsObject> {
         api.set(&mut cx, "postStreamChunk", f)?;
     }
 
+    // postStreamChunkRaw(streamId, payload, credit?) -> boolean
+    {
+        let id2 = id;
+        let f = JsFunction::new(&mut cx, move |mut cx| {
+            let stream_id_num = cx.argument::<JsNumber>(0)?.value(&mut cx);
+            if !stream_id_num.is_finite() || stream_id_num < 1.0 || stream_id_num > (u32::MAX as f64) {
+                return cx.throw_error("postStreamChunkRaw streamId must be a finite uint32");
+            }
+            let payload_js = cx.argument::<JsValue>(1)?;
+            let payload = crate::bridge::neon_codec::from_neon_value(&mut cx, payload_js)?;
+            let credit = if cx.len() >= 3 {
+                let c = cx.argument::<JsValue>(2)?;
+                if c.is_a::<JsUndefined, _>(&mut cx) || c.is_a::<JsNull, _>(&mut cx) {
+                    None
+                } else if let Ok(n) = c.downcast::<JsNumber, _>(&mut cx) {
+                    let raw = n.value(&mut cx);
+                    if raw.is_finite() && raw >= 0.0 && raw <= (u32::MAX as f64) {
+                        Some(raw as u32)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            let tx = deno_data_tx_for_worker(id2);
+            let Some(tx) = tx else {
+                if strict_channel() {
+                    return cx.throw_error("Runtime is closed (postStreamChunkRaw)");
+                }
+                return Ok(cx.boolean(false));
+            };
+
+            let msg = DenoMsg::PostStreamChunkRaw {
+                stream_id: stream_id_num as u32,
+                payload,
+                credit,
+            };
+
+            match tx.blocking_send(msg) {
+                Ok(()) => Ok(cx.boolean(true)),
+                Err(_) => {
+                    if strict_channel() {
+                        cx.throw_error("Runtime is closed (postStreamChunkRaw)")
+                    } else {
+                        Ok(cx.boolean(false))
+                    }
+                }
+            }
+        })?;
+        api.set(&mut cx, "postStreamChunkRaw", f)?;
+    }
+
     // postStreamChunks(streamId, payloads) -> number
     {
         let id2 = id;
@@ -674,6 +730,43 @@ pub fn create_worker(mut cx: FunctionContext) -> JsResult<JsObject> {
             }
         })?;
         api.set(&mut cx, "postStreamChunks", f)?;
+    }
+
+    // postStreamChunksRaw(streamId, payload) -> boolean
+    {
+        let id2 = id;
+        let f = JsFunction::new(&mut cx, move |mut cx| {
+            let stream_id_num = cx.argument::<JsNumber>(0)?.value(&mut cx);
+            if !stream_id_num.is_finite() || stream_id_num < 1.0 || stream_id_num > (u32::MAX as f64) {
+                return cx.throw_error("postStreamChunksRaw streamId must be a finite uint32");
+            }
+            let payload_js = cx.argument::<JsValue>(1)?;
+            let payload = crate::bridge::neon_codec::from_neon_value(&mut cx, payload_js)?;
+
+            let tx = deno_data_tx_for_worker(id2);
+            let Some(tx) = tx else {
+                if strict_channel() {
+                    return cx.throw_error("Runtime is closed (postStreamChunksRaw)");
+                }
+                return Ok(cx.boolean(false));
+            };
+
+            let msg = DenoMsg::PostStreamChunksRaw {
+                stream_id: stream_id_num as u32,
+                payload,
+            };
+            match tx.blocking_send(msg) {
+                Ok(()) => Ok(cx.boolean(true)),
+                Err(_) => {
+                    if strict_channel() {
+                        cx.throw_error("Runtime is closed (postStreamChunksRaw)")
+                    } else {
+                        Ok(cx.boolean(false))
+                    }
+                }
+            }
+        })?;
+        api.set(&mut cx, "postStreamChunksRaw", f)?;
     }
 
     // postStreamControl(kind, streamId, aux?) -> boolean

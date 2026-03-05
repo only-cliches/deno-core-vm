@@ -578,8 +578,9 @@ const STREAM_FRAME_CODE_TO_TYPE = {
   6: "discard",
   7: "credit",
 };
-const STREAM_DEFAULT_WINDOW_BYTES = 16 * 1024 * 1024;
+const STREAM_DEFAULT_WINDOW_BYTES = 64 * 1024 * 1024;
 const STREAM_CREDIT_FLUSH_THRESHOLD = 256 * 1024;
+const STREAM_READER_DEFAULT_HIGH_WATER_MARK_BYTES = STREAM_DEFAULT_WINDOW_BYTES;
 let nextWorkerStreamId = 1;
 globalThis.__nodeIncomingStreams = new Map();
 globalThis.__nodePendingStreamAccepts = new Map();
@@ -596,6 +597,7 @@ function streamBridgeConfig() {
   const raw = globalThis.__denojs_worker_bridge;
   const parsedWindow = raw && Number(raw.streamWindowBytes);
   const parsedFlush = raw && Number(raw.streamCreditFlushBytes);
+  const parsedHighWater = raw && Number(raw.streamHighWaterMarkBytes);
   const streamWindowBytes =
     Number.isFinite(parsedWindow) && parsedWindow >= 1
       ? Math.trunc(parsedWindow)
@@ -604,7 +606,11 @@ function streamBridgeConfig() {
     Number.isFinite(parsedFlush) && parsedFlush >= 1
       ? Math.trunc(parsedFlush)
       : STREAM_CREDIT_FLUSH_THRESHOLD;
-  return { streamWindowBytes, streamCreditFlushBytes };
+  const streamHighWaterMarkBytes =
+    Number.isFinite(parsedHighWater) && parsedHighWater >= 1
+      ? Math.trunc(parsedHighWater)
+      : streamWindowBytes;
+  return { streamWindowBytes, streamCreditFlushBytes, streamHighWaterMarkBytes };
 }
 
 function isStreamFrame(payload) {
@@ -929,6 +935,9 @@ function queuePendingIncomingStreamFrame(frame) {
 function makeStreamReader(id) {
   const queue = [];
   const waiting = [];
+  let bufferedBytes = 0;
+  let pendingCreditBytes = 0;
+  const highWaterMarkBytes = streamBridgeConfig().streamHighWaterMarkBytes;
   let closed = false;
   let done = false;
   let discarded = false;
@@ -950,10 +959,15 @@ function makeStreamReader(id) {
       const w = waiting.shift();
       if (ev.kind === "chunk") {
         w.resolve({ done: false, value: ev.chunk });
-        try {
-          if (onChunkConsumed) onChunkConsumed(ev.chunk.byteLength);
-        } catch {
-          // ignore
+        bufferedBytes = Math.max(0, bufferedBytes - ev.chunk.byteLength);
+        pendingCreditBytes += ev.chunk.byteLength;
+        if (bufferedBytes <= highWaterMarkBytes && pendingCreditBytes > 0) {
+          try {
+            if (onChunkConsumed) onChunkConsumed(pendingCreditBytes);
+          } catch {
+            // ignore
+          }
+          pendingCreditBytes = 0;
         }
       }
       else if (ev.kind === "close") w.resolve({ done: true, value: undefined });
@@ -966,6 +980,7 @@ function makeStreamReader(id) {
   const reader = {
     pushChunk(chunk) {
       if (closed || done) return;
+      bufferedBytes += chunk.byteLength;
       push({ kind: "chunk", chunk });
     },
     closeRemote() {
@@ -991,10 +1006,15 @@ function makeStreamReader(id) {
       if (queue.length > 0) {
         const ev = queue.shift();
         if (ev.kind === "chunk") {
-          try {
-            if (onChunkConsumed) onChunkConsumed(ev.chunk.byteLength);
-          } catch {
-            // ignore
+          bufferedBytes = Math.max(0, bufferedBytes - ev.chunk.byteLength);
+          pendingCreditBytes += ev.chunk.byteLength;
+          if (bufferedBytes <= highWaterMarkBytes && pendingCreditBytes > 0) {
+            try {
+              if (onChunkConsumed) onChunkConsumed(pendingCreditBytes);
+            } catch {
+              // ignore
+            }
+            pendingCreditBytes = 0;
           }
           return { done: false, value: ev.chunk };
         }
@@ -1165,7 +1185,7 @@ const hostStreams = {
       throw new Error(`Stream key already in use: ${finalKey}`);
     }
 
-    const id = `w:${nextWorkerStreamId++}`;
+    const id = String(nextWorkerStreamId++);
     registerStream(finalKey, id);
     globalThis.__nodeStreamWriterCredits.set(id, streamBridgeConfig().streamWindowBytes);
     let done = false;
@@ -1419,6 +1439,28 @@ globalThis.__dispatchNodeStreamChunk = (streamId, payload) => {
   });
 };
 
+globalThis.__dispatchNodeStreamChunkRaw = (streamId, payload, credit) => {
+  const id = typeof streamId === "string" ? streamId : String(streamId || "");
+  if (!id) return;
+  const c = Number(credit || 0);
+  if (Number.isFinite(c) && c > 0) {
+    handleIncomingStreamFrame({
+      [STREAM_BRIDGE_TAG]: true,
+      t: "credit",
+      id,
+      credit: c,
+    });
+  }
+  const chunk = toStreamChunk(payload);
+  if (!chunk) return;
+  handleIncomingStreamFrame({
+    [STREAM_BRIDGE_TAG]: true,
+    t: "chunk",
+    id,
+    chunk,
+  });
+};
+
 globalThis.__dispatchNodeStreamChunks = (streamId, payloads) => {
   const id = typeof streamId === "string" ? streamId : String(streamId || "");
   if (!id) return;
@@ -1432,6 +1474,27 @@ globalThis.__dispatchNodeStreamChunks = (streamId, payloads) => {
       id,
       chunk,
     });
+  }
+};
+
+globalThis.__dispatchNodeStreamChunkVectorized = (streamId, payload) => {
+  const id = typeof streamId === "string" ? streamId : String(streamId || "");
+  if (!id) return;
+  const u8 = toStreamChunk(payload);
+  if (!u8 || u8.byteLength < 4) return;
+  let off = 0;
+  while (off + 4 <= u8.byteLength) {
+    const len =
+      ((u8[off] << 24) | (u8[off + 1] << 16) | (u8[off + 2] << 8) | u8[off + 3]) >>> 0;
+    off += 4;
+    if (off + len > u8.byteLength) break;
+    handleIncomingStreamFrame({
+      [STREAM_BRIDGE_TAG]: true,
+      t: "chunk",
+      id,
+      chunk: u8.subarray(off, off + len),
+    });
+    off += len;
   }
 };
 
