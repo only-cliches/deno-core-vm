@@ -3,7 +3,7 @@
 All notable changes to this project will be documented in this file.
 
 
-## [0.9.2] Future
+## [0.9.2] Mar 5, 2026
 
 ### Added
 - Added `worker.stream.connect(key): Promise<Duplex>` as the primary host-side stream API.
