@@ -137,6 +137,22 @@ function splitCounts(total: number, parts: number): number[] {
     return out;
 }
 
+async function mapConcurrent<T>(count: number, concurrency: number, task: (index: number) => Promise<T>): Promise<T[]> {
+    const out = new Array<T>(count);
+    let next = 0;
+    const workerCount = Math.max(1, Math.min(concurrency, count));
+    const workers = Array.from({ length: workerCount }, async () => {
+        while (true) {
+            const i = next;
+            next += 1;
+            if (i >= count) break;
+            out[i] = await task(i);
+        }
+    });
+    await Promise.all(workers);
+    return out;
+}
+
 function createWorkerScript(): string {
     return `
 self.onmessage = (ev) => {
@@ -285,7 +301,9 @@ async function runHttp(
         const oneRun = async (): Promise<number> => {
             const isJson = !(payload instanceof Uint8Array) && typeof payload !== "string";
             const isString = typeof payload === "string";
-            const promises = Array.from({ length: count }, async () => {
+            const rawConc = Number(Deno.env.get("DENO_DIRECTOR_BENCH_HTTP_CONCURRENCY") || "64");
+            const concurrency = Number.isFinite(rawConc) && rawConc >= 1 ? Math.trunc(rawConc) : 64;
+            const out = await mapConcurrent(count, concurrency, async () => {
                 const resp = await fetch(`http://127.0.0.1:${port}/echo`, {
                     method: "POST",
                     headers: { "content-type": isJson ? "application/json" : isString ? "text/plain" : "application/octet-stream" },
@@ -294,7 +312,6 @@ async function runHttp(
                 if (!resp.ok) throw new Error(`HTTP echo failed (${resp.status})`);
                 return (await resp.json()) as Ack;
             });
-            const out = await Promise.all(promises);
             return mergeChecksums(out.map((a) => ((a.checksum ^ a.size) >>> 0)));
         };
         return await oneRun();
