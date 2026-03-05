@@ -8,3 +8,4 @@ pub mod op_reply;
 pub mod ops;
 pub mod runtime;
 pub mod state;
+pub mod stream_plane;

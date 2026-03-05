@@ -2,6 +2,9 @@
 
 All notable changes to this project will be documented in this file.
 
+### TODO
+- Add "on" events for import request, import resovlved, eval (begin and end), error throw, evalSync (begin and end), handle create, handle dispose, handle.call (begin and end)
+- evalModule optionally sets moduleName (bypasses imports on future loads) (evalModule with null value to clear)
 
 ## [0.9.1] Mar 4, 2026
 ### Changes

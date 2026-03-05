@@ -1,5 +1,7 @@
 use deno_runtime::deno_core::{JsBuffer, OpState, op2};
 use bytes::Bytes;
+use std::collections::HashMap;
+use std::sync::Mutex;
 use tokio::sync::oneshot;
 
 use crate::bridge::types::JsValueBridge;
@@ -7,6 +9,7 @@ use crate::worker::env::{EnvRuntimeState, valid_env_key};
 use crate::worker::messages::NodeMsg;
 use crate::worker::op_reply::{err_reply, err_wire, ok_reply, ok_wire};
 use crate::worker::runtime::{SyncNodeDispatchAck, SyncNodeDispatchRequest, WorkerOpContext};
+use crate::worker::stream_plane::{NativeIncomingPlane, NativeReadEvent};
 use std::sync::mpsc as std_mpsc;
 use std::time::Duration;
 
@@ -18,6 +21,18 @@ fn ctx_from_state(state: &OpState) -> Option<WorkerOpContext> {
 // Internal helper for runtime<->host op handling; it handles env state from state.
 fn env_state_from_state(state: &OpState) -> Option<&EnvRuntimeState> {
     state.try_borrow::<EnvRuntimeState>()
+}
+
+// Internal helper for runtime<->host op handling; it handles native stream plane from state.
+fn stream_plane_from_state(state: &OpState) -> Option<std::sync::Arc<NativeIncomingPlane>> {
+    state
+        .try_borrow::<std::sync::Arc<NativeIncomingPlane>>()
+        .cloned()
+}
+
+#[derive(Default)]
+pub struct NativeReadScratch {
+    chunks: Mutex<HashMap<u32, Vec<u8>>>,
 }
 
 // Wraps raw bytes as a `Uint8Array` bridge value for zero-copy-friendly binary dispatch.
@@ -95,6 +110,175 @@ pub fn op_denojs_worker_post_message_bin(state: &mut OpState, #[buffer] msg: JsB
 
     let value = bytes_to_u8_bridge(&msg);
     send_node_msg_wait(&ctx, NodeMsg::EmitMessage { value }, Duration::from_secs(2)).is_ok()
+}
+
+// Worker-native stream accept (incoming stream data plane).
+#[op2(fast)]
+pub fn op_denojs_worker_stream_accept(
+    state: &mut OpState,
+    #[string] key: String,
+) -> i32 {
+    if key.trim().is_empty() {
+        return -1;
+    }
+    let plane = match stream_plane_from_state(state) {
+        Some(v) => v.clone(),
+        None => {
+            return -1;
+        }
+    };
+    let accepted = plane.accept_poll(key.as_str());
+    if accepted > 0 {
+        let _ = plane.mark_native_active(accepted as u32);
+        if let Some(ctx) = ctx_from_state(state)
+            && let Some(shared) = crate::native_stream_plane_for_worker(ctx.worker_id)
+        {
+            let _ = shared.mark_native_active(accepted as u32);
+        }
+    }
+    accepted
+}
+
+// Worker-native stream accept (incoming stream data plane, async wait).
+#[op2(async(lazy), nofast)]
+#[serde]
+pub async fn op_denojs_worker_stream_accept_async(
+    state: std::rc::Rc<std::cell::RefCell<OpState>>,
+    #[string] key: String,
+) -> serde_json::Value {
+    if key.trim().is_empty() {
+        return serde_json::json!({ "id": -1 });
+    }
+    let Some(plane) = state
+        .borrow()
+        .try_borrow::<std::sync::Arc<NativeIncomingPlane>>()
+        .cloned()
+    else {
+        return serde_json::json!({ "id": -1 });
+    };
+    let id = plane.accept_wait(key.as_str()).await;
+    serde_json::json!({ "id": id })
+}
+
+// Worker-native stream read (incoming stream data plane).
+#[op2]
+#[serde]
+pub fn op_denojs_worker_stream_read(state: &mut OpState, #[smi] stream_id: i32) -> serde_json::Value {
+    if stream_id <= 0 {
+        return serde_json::json!({ "kind": "error", "message": "Invalid native stream id" });
+    }
+    let Some(plane) = stream_plane_from_state(state) else {
+        return serde_json::json!({ "kind": "error", "message": "Native stream plane missing in OpState" });
+    };
+    if !plane.has_stream(stream_id as u32) {
+        return serde_json::json!({ "kind": "close" });
+    }
+    match plane.read_poll_event(stream_id as u32) {
+        Some(NativeReadEvent::Chunk(chunk)) => {
+            if let Some(scratch) = state.try_borrow::<NativeReadScratch>() {
+                if let Ok(mut guard) = scratch.chunks.lock() {
+                    guard.insert(stream_id as u32, chunk);
+                }
+            }
+            serde_json::json!({ "kind": "chunk" })
+        }
+        Some(NativeReadEvent::Close) => serde_json::json!({ "kind": "close" }),
+        Some(NativeReadEvent::Error(message)) => serde_json::json!({ "kind": "error", "message": message }),
+        None => serde_json::json!({ "kind": "none" }),
+    }
+}
+
+#[op2]
+#[buffer]
+pub fn op_denojs_worker_stream_take_chunk(state: &mut OpState, #[smi] stream_id: i32) -> Vec<u8> {
+    if stream_id <= 0 {
+        return Vec::new();
+    }
+    let Some(scratch) = state.try_borrow::<NativeReadScratch>() else {
+        return Vec::new();
+    };
+    let Ok(mut guard) = scratch.chunks.lock() else {
+        return Vec::new();
+    };
+    guard.remove(&(stream_id as u32)).unwrap_or_default()
+}
+
+#[op2]
+#[buffer]
+pub fn op_denojs_worker_stream_read_raw(state: &mut OpState, #[smi] stream_id: i32) -> Vec<u8> {
+    if stream_id <= 0 {
+        let mut out = Vec::from([3u8]);
+        out.extend_from_slice(b"Invalid native stream id");
+        return out;
+    }
+    let Some(plane) = stream_plane_from_state(state) else {
+        let mut out = Vec::from([3u8]);
+        out.extend_from_slice(b"Native stream plane missing in OpState");
+        return out;
+    };
+    if !plane.has_stream(stream_id as u32) {
+        return vec![2u8];
+    }
+    match plane.read_poll_event(stream_id as u32) {
+        Some(NativeReadEvent::Chunk(chunk)) => {
+            let mut out = Vec::with_capacity(1 + chunk.len());
+            out.push(1u8);
+            out.extend_from_slice(&chunk);
+            out
+        }
+        Some(NativeReadEvent::Close) => vec![2u8],
+        Some(NativeReadEvent::Error(message)) => {
+            let mut out = Vec::with_capacity(1 + message.len());
+            out.push(3u8);
+            out.extend_from_slice(message.as_bytes());
+            out
+        }
+        None => vec![0u8],
+    }
+}
+
+#[op2(async(lazy), nofast)]
+#[serde]
+pub async fn op_denojs_worker_stream_read_async(
+    state: std::rc::Rc<std::cell::RefCell<OpState>>,
+    #[smi] stream_id: i32,
+) -> serde_json::Value {
+    if stream_id <= 0 {
+        return serde_json::json!({ "kind": "error", "message": "Invalid native stream id" });
+    }
+    let Some(plane) = state
+        .borrow()
+        .try_borrow::<std::sync::Arc<NativeIncomingPlane>>()
+        .cloned()
+    else {
+        return serde_json::json!({ "kind": "error", "message": "Native stream plane missing in OpState" });
+    };
+    let out = plane.read_wait_event(stream_id as u32).await;
+    let v = match out {
+        NativeReadEvent::Chunk(chunk) => {
+            if let Some(scratch) = state.borrow().try_borrow::<NativeReadScratch>() {
+                if let Ok(mut guard) = scratch.chunks.lock() {
+                    guard.insert(stream_id as u32, chunk);
+                }
+            }
+            serde_json::json!({ "kind": "chunk" })
+        }
+        NativeReadEvent::Close => serde_json::json!({ "kind": "close" }),
+        NativeReadEvent::Error(message) => serde_json::json!({ "kind": "error", "message": message }),
+    };
+    v
+}
+
+// Worker-native stream discard (incoming stream data plane).
+#[op2(fast)]
+pub fn op_denojs_worker_stream_discard(state: &mut OpState, #[smi] stream_id: i32) -> bool {
+    let Some(plane) = stream_plane_from_state(state) else {
+        return false;
+    };
+    if stream_id <= 0 {
+        return false;
+    }
+    plane.discard(stream_id as u32)
 }
 
 // Worker -> Node: host function call (sync)

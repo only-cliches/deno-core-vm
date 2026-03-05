@@ -3,11 +3,14 @@ use deno_runtime::worker::MainWorker;
 use neon::prelude::*;
 use tokio::sync::mpsc;
 use bytes::Bytes;
+use std::sync::Arc;
+use std::sync::OnceLock;
 
 use crate::bridge::types::{EvalOptions, JsValueBridge};
 use crate::worker::eval::eval_in_runtime;
 use crate::worker::messages::{DenoMsg, EvalReply, ExecStats, NodeMsg, ResolvePayload};
 use crate::worker::state::RuntimeLimits;
+use crate::worker::stream_plane::NativeIncomingPlane;
 
 /// Handle deno msg.
 pub async fn handle_deno_msg(
@@ -16,6 +19,41 @@ pub async fn handle_deno_msg(
     limits: &RuntimeLimits,
     msg: DenoMsg,
 ) -> bool {
+    if native_stream_plane_enabled() && native_stream_debug_enabled() {
+        match &msg {
+            DenoMsg::PostMessage { .. } => eprintln!("[native-stream] msg:PostMessage"),
+            DenoMsg::PostMessageTyped { message_type, .. } => {
+                eprintln!("[native-stream] msg:PostMessageTyped type={}", message_type)
+            }
+            DenoMsg::PostStreamChunk { stream_id, .. } => {
+                eprintln!("[native-stream] msg:PostStreamChunk id={}", stream_id)
+            }
+            DenoMsg::PostStreamChunkRaw { stream_id, .. } => {
+                eprintln!("[native-stream] msg:PostStreamChunkRaw id={}", stream_id)
+            }
+            DenoMsg::PostStreamChunkRawBin { stream_id, payload, .. } => {
+                eprintln!(
+                    "[native-stream] msg:PostStreamChunkRawBin id={} bytes={}",
+                    stream_id,
+                    payload.len()
+                )
+            }
+            DenoMsg::PostStreamChunks { stream_id, payloads } => {
+                eprintln!(
+                    "[native-stream] msg:PostStreamChunks id={} count={}",
+                    stream_id,
+                    payloads.len()
+                )
+            }
+            DenoMsg::PostStreamChunksRaw { stream_id, .. } => {
+                eprintln!("[native-stream] msg:PostStreamChunksRaw id={}", stream_id)
+            }
+            DenoMsg::PostStreamControl { kind, stream_id, .. } => {
+                eprintln!("[native-stream] msg:PostStreamControl kind={} id={}", kind, stream_id)
+            }
+            _ => {}
+        }
+    }
     // Return true only for terminal/close path; false keeps event loop running.
     match msg {
         DenoMsg::Close { deferred } => handle_close_msg(worker_id, deferred),
@@ -82,6 +120,54 @@ fn payload_to_chunk_bytes(payload: &JsValueBridge) -> Option<&[u8]> {
     let start = (*byte_offset).min(bytes.len());
     let end = start.checked_add(*length)?.min(bytes.len());
     Some(&bytes.as_ref()[start..end])
+}
+
+fn native_stream_plane(worker: &mut MainWorker) -> Option<Arc<NativeIncomingPlane>> {
+    let state = worker.js_runtime.op_state();
+    let borrow = state.borrow();
+    borrow.try_borrow::<Arc<NativeIncomingPlane>>().cloned()
+}
+
+fn native_stream_plane_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("DENO_DIRECTOR_NATIVE_STREAM_PLANE")
+            .ok()
+            .map(|v| v == "1")
+            .unwrap_or(false)
+    })
+}
+
+fn native_stream_debug_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("DENO_DIRECTOR_NATIVE_STREAM_DEBUG")
+            .ok()
+            .map(|v| v == "1")
+            .unwrap_or(false)
+    })
+}
+
+fn dispatch_native_stream_poke(worker: &mut MainWorker, stream_id: u32) -> bool {
+    let dispatched = {
+        deno_core::scope!(scope, &mut worker.js_runtime);
+        let Some(key) = v8::String::new(scope, "__dispatchNativeStreamPoke") else {
+            return false;
+        };
+        let ctx = scope.get_current_context();
+        let global = ctx.global(scope);
+        let Some(fn_any) = global.get(scope, key.into()) else {
+            return false;
+        };
+        let Ok(dispatch_fn) = v8::Local::<v8::Function>::try_from(fn_any) else {
+            return false;
+        };
+        let id_val = v8::Integer::new_from_unsigned(scope, stream_id);
+        dispatch_fn
+            .call(scope, global.into(), &[id_val.into()])
+            .is_some()
+    };
+    dispatched
 }
 
 // Handle close msg.
@@ -315,6 +401,20 @@ fn handle_post_stream_chunk_msg(
     stream_id: String,
     payload: JsValueBridge,
 ) -> bool {
+    if native_stream_plane_enabled() && native_stream_debug_enabled() {
+        eprintln!("[native-stream] handle chunk id={stream_id}");
+    }
+    if native_stream_plane_enabled()
+        && let Ok(id_num) = stream_id.parse::<u32>()
+        && let Some(chunk) = payload_to_chunk_bytes(&payload)
+        && let Some(plane) = native_stream_plane(worker)
+    {
+        let (_, wake) = plane.push_chunk_with_wake(id_num, chunk.to_vec());
+        if wake {
+            let _ = dispatch_native_stream_poke(worker, id_num);
+        }
+        return false;
+    }
     let dispatched = {
         deno_core::scope!(scope, &mut worker.js_runtime);
         let Some(key) = v8::String::new(scope, "__dispatchNodeStreamChunk") else {
@@ -356,6 +456,30 @@ fn handle_post_stream_chunks_msg(
     stream_id: String,
     payloads: Vec<JsValueBridge>,
 ) -> bool {
+    if native_stream_plane_enabled() && native_stream_debug_enabled() {
+        eprintln!("[native-stream] handle chunks id={} count={}", stream_id, payloads.len());
+    }
+    if native_stream_plane_enabled()
+        && let Ok(id_num) = stream_id.parse::<u32>()
+        && let Some(plane) = native_stream_plane(worker)
+    {
+        let mut all_binary = true;
+        let mut wake_any = false;
+        for payload in &payloads {
+            let Some(chunk) = payload_to_chunk_bytes(payload) else {
+                all_binary = false;
+                break;
+            };
+            let (_, wake) = plane.push_chunk_with_wake(id_num, chunk.to_vec());
+            wake_any |= wake;
+        }
+        if all_binary {
+            if wake_any {
+                let _ = dispatch_native_stream_poke(worker, id_num);
+            }
+            return false;
+        }
+    }
     // Vectorize into one binary payload when all chunks are binary payloads.
     let mut merged = Vec::<u8>::new();
     let mut all_binary = !payloads.is_empty();
@@ -426,6 +550,20 @@ fn handle_post_stream_chunk_raw_msg(
     payload: JsValueBridge,
     credit: Option<u32>,
 ) -> bool {
+    if native_stream_plane_enabled() && native_stream_debug_enabled() {
+        eprintln!("[native-stream] handle raw id={stream_id}");
+    }
+    if native_stream_plane_enabled()
+        && let Some(chunk) = payload_to_chunk_bytes(&payload)
+        && let Some(plane) = native_stream_plane(worker)
+    {
+        let _ = credit;
+        let (_, wake) = plane.push_chunk_with_wake(stream_id, chunk.to_vec());
+        if wake {
+            let _ = dispatch_native_stream_poke(worker, stream_id);
+        }
+        return false;
+    }
     let dispatched = {
         deno_core::scope!(scope, &mut worker.js_runtime);
         let Some(key) = v8::String::new(scope, "__dispatchNodeStreamChunkRaw") else {
@@ -464,6 +602,19 @@ fn handle_post_stream_chunk_raw_bin_msg(
     payload: Vec<u8>,
     credit: Option<u32>,
 ) -> bool {
+    if native_stream_plane_enabled() && native_stream_debug_enabled() {
+        eprintln!("[native-stream] handle raw-bin id={} bytes={}", stream_id, payload.len());
+    }
+    if native_stream_plane_enabled()
+        && let Some(plane) = native_stream_plane(worker)
+    {
+        let _ = credit;
+        let (_, wake) = plane.push_chunk_with_wake(stream_id, payload);
+        if wake {
+            let _ = dispatch_native_stream_poke(worker, stream_id);
+        }
+        return false;
+    }
     let dispatched = {
         deno_core::scope!(scope, &mut worker.js_runtime);
         let Some(key) = v8::String::new(scope, "__dispatchNodeStreamChunkRaw") else {
@@ -507,6 +658,30 @@ fn handle_post_stream_chunks_raw_msg(
     stream_id: u32,
     payload: JsValueBridge,
 ) -> bool {
+    if native_stream_plane_enabled() && native_stream_debug_enabled() {
+        eprintln!("[native-stream] handle raw-vectorized id={stream_id}");
+    }
+    if native_stream_plane_enabled()
+        && let Some(chunk) = payload_to_chunk_bytes(&payload)
+        && let Some(plane) = native_stream_plane(worker)
+    {
+        let mut wake_any = false;
+        let mut off = 0usize;
+        while off + 4 <= chunk.len() {
+            let len = u32::from_be_bytes([chunk[off], chunk[off + 1], chunk[off + 2], chunk[off + 3]]) as usize;
+            off += 4;
+            if off + len > chunk.len() {
+                break;
+            }
+            let (_, wake) = plane.push_chunk_with_wake(stream_id, chunk[off..off + len].to_vec());
+            wake_any |= wake;
+            off += len;
+        }
+        if wake_any {
+            let _ = dispatch_native_stream_poke(worker, stream_id);
+        }
+        return false;
+    }
     let dispatched = {
         deno_core::scope!(scope, &mut worker.js_runtime);
         let Some(key) = v8::String::new(scope, "__dispatchNodeStreamChunkVectorized") else {
@@ -542,6 +717,51 @@ fn handle_post_stream_control_msg(
     stream_id: String,
     aux: Option<String>,
 ) -> bool {
+    if native_stream_plane_enabled() && let Some(plane) = native_stream_plane(worker) {
+        let (handled, wake) = match kind.as_str() {
+            "open" => {
+                let key = aux.as_deref().unwrap_or_default();
+                (plane.open(stream_id.as_str(), key), false)
+            }
+            "close" => {
+                if let Ok(id) = stream_id.parse::<u32>() {
+                    plane.close_with_wake(id)
+                } else {
+                    (false, false)
+                }
+            }
+            "error" => {
+                if let Ok(id) = stream_id.parse::<u32>() {
+                    let msg = aux.clone().unwrap_or_else(|| "Remote stream error".to_string());
+                    plane.error_with_wake(id, msg)
+                } else {
+                    (false, false)
+                }
+            }
+            "cancel" => {
+                if let Ok(id) = stream_id.parse::<u32>() {
+                    let msg = aux.clone().unwrap_or_else(|| "Remote stream cancelled".to_string());
+                    plane.error_with_wake(id, msg)
+                } else {
+                    (false, false)
+                }
+            }
+            "discard" => {
+                if let Ok(id) = stream_id.parse::<u32>() {
+                    plane.discard_with_wake(id)
+                } else {
+                    (false, false)
+                }
+            }
+            _ => (false, false),
+        };
+        if handled {
+            if wake && let Ok(id_num) = stream_id.parse::<u32>() {
+                let _ = dispatch_native_stream_poke(worker, id_num);
+            }
+            return false;
+        }
+    }
     let dispatched = {
         deno_core::scope!(scope, &mut worker.js_runtime);
         let Some(key) = v8::String::new(scope, "__dispatchNodeStreamControl") else {

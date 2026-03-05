@@ -231,13 +231,16 @@ fn build_console_config_from_neon<'a>(
 
 // Internal helper for Neon API bridge setup; it handles strict channel.
 fn strict_channel() -> bool {
-    std::env::var("DENOJS_WORKER_STRICT_CHANNEL")
-        .ok()
-        .map(|v| {
-            let v = v.trim().to_ascii_lowercase();
-            v == "1" || v == "true" || v == "yes" || v == "on"
-        })
-        .unwrap_or(false)
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("DENOJS_WORKER_STRICT_CHANNEL")
+            .ok()
+            .map(|v| {
+                let v = v.trim().to_ascii_lowercase();
+                v == "1" || v == "true" || v == "yes" || v == "on"
+            })
+            .unwrap_or(false)
+    })
 }
 
 // Returns `Object.prototype.toString` tag for a JS value.

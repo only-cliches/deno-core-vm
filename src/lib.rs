@@ -12,6 +12,7 @@ use crate::bridge::promise::PromiseSettler;
 use crate::bridge::types::{EvalOptions, JsValueBridge};
 use crate::worker::messages::DenoMsg;
 use crate::worker::state::WorkerHandle;
+use crate::worker::stream_plane::NativeIncomingPlane;
 
 lazy_static! {
     pub static ref WORKERS: RwLock<HashMap<usize, WorkerHandle>> = RwLock::new(HashMap::new());
@@ -71,6 +72,14 @@ pub(crate) fn deno_data_tx_for_worker(worker_id: usize) -> Option<tokio::sync::m
         .read()
         .ok()
         .and_then(|map| map.get(&worker_id).map(|w| w.deno_data_tx.clone()))
+}
+
+/// Native stream plane for worker.
+pub(crate) fn native_stream_plane_for_worker(worker_id: usize) -> Option<std::sync::Arc<NativeIncomingPlane>> {
+    let map = WORKERS.read().ok()?;
+    let handle = map.get(&worker_id)?;
+    let guard = handle.native_stream_plane.lock().ok()?;
+    guard.clone()
 }
 
 /// Queue deno msg or reject.

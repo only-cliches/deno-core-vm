@@ -16,14 +16,19 @@ use crate::worker::filesystem::{
 };
 use crate::worker::messages::{DenoMsg, NodeMsg};
 use crate::worker::ops::{
+    NativeReadScratch,
     op_denojs_worker_env_delete, op_denojs_worker_env_get, op_denojs_worker_env_set,
     op_denojs_worker_env_to_object, op_denojs_worker_host_call_async,
     op_denojs_worker_host_call_async_bin_mixed,
     op_denojs_worker_host_call_async_bin, op_denojs_worker_host_call_sync,
     op_denojs_worker_host_call_sync_bin_mixed,
     op_denojs_worker_host_call_sync_bin, op_denojs_worker_post_message,
-    op_denojs_worker_post_message_bin,
+    op_denojs_worker_post_message_bin, op_denojs_worker_stream_accept,
+    op_denojs_worker_stream_accept_async, op_denojs_worker_stream_discard,
+    op_denojs_worker_stream_read, op_denojs_worker_stream_read_async,
+    op_denojs_worker_stream_read_raw, op_denojs_worker_stream_take_chunk,
 };
+use crate::worker::stream_plane::NativeIncomingPlane;
 use crate::worker::state::RuntimeLimits;
 
 use std::path::Path;
@@ -68,6 +73,13 @@ extension!(
         op_denojs_worker_host_call_async,
         op_denojs_worker_host_call_async_bin,
         op_denojs_worker_host_call_async_bin_mixed,
+        op_denojs_worker_stream_accept,
+        op_denojs_worker_stream_accept_async,
+        op_denojs_worker_stream_read,
+        op_denojs_worker_stream_read_async,
+        op_denojs_worker_stream_read_raw,
+        op_denojs_worker_stream_take_chunk,
+        op_denojs_worker_stream_discard,
         op_denojs_worker_env_get,
         op_denojs_worker_env_set,
         op_denojs_worker_env_delete,
@@ -413,6 +425,33 @@ pub fn spawn_worker_thread(
                 };
 
             let mut worker = MainWorker::bootstrap_from_options(&main_module, services, worker_opts);
+            let stream_credit_flush_bytes = limits
+                .bridge
+                .as_ref()
+                .and_then(|cfg| cfg.stream_credit_flush_bytes)
+                .and_then(|v| u32::try_from(v).ok())
+                .filter(|v| *v > 0);
+            let native_stream_plane = std::sync::Arc::new(NativeIncomingPlane::new(stream_credit_flush_bytes));
+            if std::env::var("DENO_DIRECTOR_NATIVE_STREAM_DEBUG").ok().as_deref() == Some("1") {
+                eprintln!(
+                    "[native-stream] runtime-created plane={:p} worker={}",
+                    std::sync::Arc::as_ptr(&native_stream_plane),
+                    worker_id
+                );
+            }
+            if let Ok(map) = crate::WORKERS.read()
+                && let Some(handle) = map.get(&worker_id)
+                && let Ok(mut slot) = handle.native_stream_plane.lock()
+            {
+                *slot = Some(native_stream_plane.clone());
+                if std::env::var("DENO_DIRECTOR_NATIVE_STREAM_DEBUG").ok().as_deref() == Some("1") {
+                    eprintln!(
+                        "[native-stream] runtime-shared plane={:p} worker={}",
+                        std::sync::Arc::as_ptr(&native_stream_plane),
+                        worker_id
+                    );
+                }
+            }
 
             {
                 let state = worker.js_runtime.op_state();
@@ -428,6 +467,8 @@ pub fn spawn_worker_thread(
                     vars: std::sync::Mutex::new(env_snapshot),
                     access: env_access,
                 });
+                s.put(native_stream_plane.clone());
+                s.put(NativeReadScratch::default());
             }
 
             if worker.run_event_loop(false).await.is_err() {
@@ -443,12 +484,23 @@ pub fn spawn_worker_thread(
                 let _ = worker.js_runtime.execute_script("<consoleConfig>", script);
             }
 
+            let native_stream_plane_enabled = std::env::var("DENO_DIRECTOR_NATIVE_STREAM_PLANE")
+                .ok()
+                .map(|v| v == "1")
+                .unwrap_or(false);
             if let Some(cfg) = limits.bridge.as_ref() {
-                let cfg_json = serde_json::to_string(cfg).unwrap_or_else(|_| "{}".into());
+                let mut bridge_cfg = serde_json::to_value(cfg).unwrap_or_else(|_| serde_json::json!({}));
+                if native_stream_plane_enabled && let serde_json::Value::Object(obj) = &mut bridge_cfg {
+                    obj.insert("nativeStreamPlane".to_string(), serde_json::Value::Bool(true));
+                }
+                let cfg_json = serde_json::to_string(&bridge_cfg).unwrap_or_else(|_| "{}".into());
                 let script = format!(
                     "globalThis.__globals[\"__denojs_worker_bridge\"] = {cfg_json}; globalThis.__applyGlobals();"
                 );
                 let _ = worker.js_runtime.execute_script("<bridgeConfig>", script);
+            } else if native_stream_plane_enabled {
+                let script = "globalThis.__globals[\"__denojs_worker_bridge\"] = { nativeStreamPlane: true }; globalThis.__applyGlobals();";
+                let _ = worker.js_runtime.execute_script("<bridgeConfigNativeStream>", script);
             }
 
             for warning in limits.startup_warnings.iter() {

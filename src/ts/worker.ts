@@ -65,6 +65,7 @@ const STREAM_DEFAULT_WINDOW_BYTES = 256 * 1024 * 1024;
 const STREAM_CREDIT_FLUSH_THRESHOLD = 256 * 1024;
 const STREAM_V2_MAX_QUEUED_CHUNKS = 2048;
 const STREAM_V2_MAX_QUEUED_BYTES = 4 * 1024 * 1024;
+const NATIVE_STREAM_DEBUG = process.env.DENO_DIRECTOR_NATIVE_STREAM_DEBUG === "1";
 const STREAM_READER_DEFAULT_HIGH_WATER_MARK_BYTES = STREAM_DEFAULT_WINDOW_BYTES;
 const STREAM_BACKLOG_DEFAULT_LIMIT = 256;
 const STREAM_SLOT_POOL_MIN = 16;
@@ -2115,6 +2116,14 @@ export class DenoWorker {
             for (const payload of payloads) this.postMessageRaw(payload);
         };
         const postChunkFast = (chunk: Uint8Array): void => {
+            if (NATIVE_STREAM_DEBUG) {
+                try {
+                    // eslint-disable-next-line no-console
+                    console.log(`[stream-native-send] id=${id} bytes=${chunk.byteLength}`);
+                } catch {
+                    // ignore
+                }
+            }
             const piggybackCredit = this.pendingCreditFrames.get(id) || 0;
             if (piggybackCredit > 0) this.pendingCreditFrames.delete(id);
             if (canPostNativeChunkRawBin && useRawStreamId !== null) {
@@ -2262,7 +2271,9 @@ export class DenoWorker {
                     this.consumeWriterCredit(id, u8.byteLength);
                     if (useTypedChunk) {
                         try {
-                            queueFastChunk(u8);
+                            // `write()` is latency-sensitive; flush immediately so callers do not
+                            // wait on an ack for data that is still parked in JS microtask queues.
+                            postChunkFast(u8);
                             return Promise.resolve();
                         } catch (err) {
                             return Promise.reject(err);
@@ -2278,7 +2289,7 @@ export class DenoWorker {
                     await this.waitForWriterCredit(id, u8.byteLength);
                     this.consumeWriterCredit(id, u8.byteLength);
                     if (useTypedChunk) {
-                        queueFastChunk(u8);
+                        postChunkFast(u8);
                     } else {
                         const payload = encodeChunkEnvelope(u8);
                         this.postMessageRaw(payload);

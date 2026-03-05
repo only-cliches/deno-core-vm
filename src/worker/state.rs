@@ -1,6 +1,7 @@
 use crate::bridge::neon_codec::from_neon_value;
 use crate::bridge::types::JsValueBridge;
 use crate::worker::messages::{DenoMsg, ExecStats, NodeMsg};
+use crate::worker::stream_plane::NativeIncomingPlane;
 use neon::prelude::*;
 use neon::result::Throw;
 use std::collections::HashMap;
@@ -976,6 +977,7 @@ pub struct WorkerHandle {
     pub last_stats: Arc<Mutex<Option<ExecStats>>>,
     pub eval_sync_active: Arc<AtomicBool>,
     pub inspect_bound_port: Arc<AtomicU16>,
+    pub native_stream_plane: Arc<Mutex<Option<Arc<NativeIncomingPlane>>>>,
 }
 
 impl WorkerHandle {
@@ -1007,6 +1009,7 @@ impl WorkerHandle {
             last_stats: Arc::new(Mutex::new(None)),
             eval_sync_active: Arc::new(AtomicBool::new(false)),
             inspect_bound_port: Arc::new(AtomicU16::new(0)),
+            native_stream_plane: Arc::new(Mutex::new(None)),
         };
 
         (handle, deno_rx, deno_data_rx, node_rx)

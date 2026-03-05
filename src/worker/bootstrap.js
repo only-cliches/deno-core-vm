@@ -57,9 +57,23 @@ function callCapturedRaw(captured, name, ...args) {
 }
 
 async function callCapturedAwait(captured, name, ...args) {
+  if (
+    (name === OP_STREAM_ACCEPT_ASYNC || name === OP_STREAM_READ_ASYNC) &&
+    typeof coreOpAsync === "function"
+  ) {
+    return await coreOpAsync(name, ...args);
+  }
   if (captured && captured.kind === "function" && typeof captured.entry === "function") {
     const out = captured.entry(...args);
-    return isThenable(out) ? await out : out;
+    if (isThenable(out)) return await out;
+    // Some runtimes expose async ops as callable IDs/functions without thenables.
+    if (
+      (name === OP_STREAM_ACCEPT_ASYNC || name === OP_STREAM_READ_ASYNC) &&
+      typeof coreOpAsync === "function"
+    ) {
+      return await coreOpAsync(name, ...args);
+    }
+    return out;
   }
 
   if (captured && captured.kind === "number" && typeof captured.entry === "number") {
@@ -87,6 +101,13 @@ const OP_ENV_GET = "op_denojs_worker_env_get";
 const OP_ENV_SET = "op_denojs_worker_env_set";
 const OP_ENV_DELETE = "op_denojs_worker_env_delete";
 const OP_ENV_TO_OBJECT = "op_denojs_worker_env_to_object";
+const OP_STREAM_ACCEPT = "op_denojs_worker_stream_accept";
+const OP_STREAM_ACCEPT_ASYNC = "op_denojs_worker_stream_accept_async";
+const OP_STREAM_READ = "op_denojs_worker_stream_read";
+const OP_STREAM_READ_ASYNC = "op_denojs_worker_stream_read_async";
+const OP_STREAM_READ_RAW = "op_denojs_worker_stream_read_raw";
+const OP_STREAM_TAKE_CHUNK = "op_denojs_worker_stream_take_chunk";
+const OP_STREAM_DISCARD = "op_denojs_worker_stream_discard";
 
 // Capture stable references at bootstrap time.
 const CAP_HOST_CALL_SYNC = getOpEntry(OP_HOST_CALL_SYNC);
@@ -101,6 +122,13 @@ const CAP_ENV_GET = getOpEntry(OP_ENV_GET);
 const CAP_ENV_SET = getOpEntry(OP_ENV_SET);
 const CAP_ENV_DELETE = getOpEntry(OP_ENV_DELETE);
 const CAP_ENV_TO_OBJECT = getOpEntry(OP_ENV_TO_OBJECT);
+const CAP_STREAM_ACCEPT = getOpEntry(OP_STREAM_ACCEPT);
+const CAP_STREAM_ACCEPT_ASYNC = getOpEntry(OP_STREAM_ACCEPT_ASYNC);
+const CAP_STREAM_READ = getOpEntry(OP_STREAM_READ);
+const CAP_STREAM_READ_ASYNC = getOpEntry(OP_STREAM_READ_ASYNC);
+const CAP_STREAM_READ_RAW = getOpEntry(OP_STREAM_READ_RAW);
+const CAP_STREAM_TAKE_CHUNK = getOpEntry(OP_STREAM_TAKE_CHUNK);
+const CAP_STREAM_DISCARD = getOpEntry(OP_STREAM_DISCARD);
 
 // --------------------
 // Wire helpers
@@ -594,6 +622,7 @@ globalThis.__nodeStreamWriterCredits = new Map();
 globalThis.__nodeStreamWriterWaiters = new Map();
 globalThis.__nodePendingStreamCredits = new Map();
 globalThis.__nodeStreamCreditFlushQueued = false;
+globalThis.__nodeNativeStreamReadWaiters = new Map();
 
 function streamBridgeConfig() {
   const raw = globalThis.__denojs_worker_bridge;
@@ -1093,6 +1122,109 @@ function makeStreamReader(id) {
   return reader;
 }
 
+function makeNativeAcceptedStreamReader(idNum) {
+  const id = String(idNum >>> 0);
+  let done = false;
+  const clearWaiter = () => {
+    const waiter = globalThis.__nodeNativeStreamReadWaiters.get(id);
+    if (waiter) {
+      globalThis.__nodeNativeStreamReadWaiters.delete(id);
+      try {
+        waiter();
+      } catch {
+        // ignore
+      }
+    }
+  };
+  const wrapper = {
+    async read() {
+      if (done) return { done: true, value: undefined };
+      while (true) {
+        let raw = callCapturedRaw(CAP_STREAM_READ_RAW, OP_STREAM_READ_RAW, idNum >>> 0);
+        if (!(raw instanceof Uint8Array)) {
+          raw = toStreamChunk(raw);
+        }
+        if (!raw || raw.length === 0) {
+          done = true;
+          return { done: true, value: undefined };
+        }
+        const tag = raw[0] >>> 0;
+        if (tag === 0) {
+          await new Promise((resolve) => {
+            globalThis.__nodeNativeStreamReadWaiters.set(id, resolve);
+          });
+          continue;
+        }
+        if (tag === 1) {
+          const chunk = raw.subarray(1);
+          return { done: false, value: chunk };
+        }
+        done = true;
+        clearWaiter();
+        try {
+          callCapturedRaw(CAP_STREAM_DISCARD, OP_STREAM_DISCARD, idNum >>> 0);
+        } catch {
+          // ignore
+        }
+        if (tag === 2) return { done: true, value: undefined };
+        if (tag === 3) {
+          let msg = "Remote stream error";
+          try {
+            msg = new TextDecoder().decode(raw.subarray(1)) || msg;
+          } catch {
+            // ignore
+          }
+          throw new Error(msg);
+        }
+        return { done: true, value: undefined };
+      }
+    },
+    async cancel(reason) {
+      if (done) return;
+      done = true;
+      clearWaiter();
+      try {
+        hostPostMessageImpl(
+          encodeStreamFrameEnvelope({
+            t: "cancel",
+            id,
+            reason: reason == null ? undefined : String(reason),
+          })
+        );
+      } catch {
+        // ignore
+      }
+      try {
+        hostPostMessageImpl(encodeStreamFrameEnvelope({ t: "discard", id }));
+      } catch {
+        // ignore
+      }
+      try {
+        callCapturedRaw(CAP_STREAM_DISCARD, OP_STREAM_DISCARD, idNum >>> 0);
+      } catch {
+        // ignore
+      }
+    },
+    [Symbol.asyncIterator]() {
+      return {
+        next: () => wrapper.read(),
+        return: async () => {
+          await wrapper.cancel("iterator return");
+          return { done: true, value: undefined };
+        },
+        throw: async (err) => {
+          await wrapper.cancel("iterator throw");
+          throw err;
+        },
+        [Symbol.asyncIterator]() {
+          return this;
+        },
+      };
+    },
+  };
+  return wrapper;
+}
+
 function queueAcceptedStream(name, reader) {
   const pending = globalThis.__nodePendingStreamAccepts.get(name);
   if (pending) {
@@ -1173,11 +1305,32 @@ function handleIncomingStreamFrame(frame) {
       return true;
     }
     case "discard": {
+      const waiter = globalThis.__nodeNativeStreamReadWaiters.get(frame.id);
+      if (waiter) {
+        globalThis.__nodeNativeStreamReadWaiters.delete(frame.id);
+        try {
+          waiter();
+        } catch {
+          // ignore
+        }
+      }
       markRemoteDiscard(frame.id);
       return true;
     }
     case "credit": {
       addWriterCredit(frame.id, Number(frame.credit || 0));
+      return true;
+    }
+    case "native-poke": {
+      const waiter = globalThis.__nodeNativeStreamReadWaiters.get(frame.id);
+      if (waiter) {
+        globalThis.__nodeNativeStreamReadWaiters.delete(frame.id);
+        try {
+          waiter();
+        } catch {
+          // ignore
+        }
+      }
       return true;
     }
     default:
@@ -1354,6 +1507,21 @@ const hostStreams = {
   async accept(key) {
     const streamName = String(key || "").trim();
     if (!streamName) throw new Error("hostStreams.accept(key) requires a non-empty key");
+    if (globalThis.__denojs_worker_bridge && globalThis.__denojs_worker_bridge.nativeStreamPlane === true) {
+      await Promise.resolve();
+      const start = Date.now();
+      while (Date.now() - start < 30_000) {
+        const accepted = callCapturedRaw(CAP_STREAM_ACCEPT, OP_STREAM_ACCEPT, streamName);
+        const idNum = Number(accepted);
+        if (Number.isFinite(idNum) && idNum > 0) {
+          return makeNativeAcceptedStreamReader(Math.trunc(idNum) >>> 0);
+        }
+        if (idNum < 0) break;
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+      throw new Error(`hostStreams.accept timeout for stream key: ${streamName}`);
+    }
+
     if (globalThis.__nodePendingStreamAccepts.has(streamName)) {
       throw new Error(`hostStreams.accept already pending for stream key: ${streamName}`);
     }
@@ -1367,7 +1535,6 @@ const hostStreams = {
       globalThis.__nodeStreamBacklog.delete(streamName);
       return queued;
     }
-
     return await new Promise((resolve) => {
       globalThis.__nodePendingStreamAccepts.set(streamName, resolve);
     });
@@ -1375,6 +1542,15 @@ const hostStreams = {
 };
 
 safeObjSet(globalThis, "hostStreams", hostStreams);
+safeObjSet(globalThis, "__denojs_core_debug", {
+  hasCoreOpAsync: typeof coreOpAsync === "function",
+  hasCoreOpSync: typeof coreOpSync === "function",
+  hasOpresolve: !!(coreApi && typeof coreApi.opresolve === "function"),
+  capReadAsyncKind: CAP_STREAM_READ_ASYNC && CAP_STREAM_READ_ASYNC.kind,
+  capAcceptAsyncKind: CAP_STREAM_ACCEPT_ASYNC && CAP_STREAM_ACCEPT_ASYNC.kind,
+  capReadKind: CAP_STREAM_READ && CAP_STREAM_READ.kind,
+  capAcceptKind: CAP_STREAM_ACCEPT && CAP_STREAM_ACCEPT.kind,
+});
 
 const onImpl = (name, fn) => {
   if (name === "message" && typeof fn === "function") {
@@ -1554,8 +1730,21 @@ globalThis.__dispatchNodeStreamControl = (kind, streamId, aux) => {
   else if (t === "error") frame.error = aux == null ? "" : String(aux);
   else if (t === "cancel") frame.reason = aux == null ? "" : String(aux);
   else if (t === "credit") frame.credit = Number(aux || "0");
-  else if (t !== "close" && t !== "discard") return;
+  else if (t !== "close" && t !== "discard" && t !== "native-poke") return;
   handleIncomingStreamFrame(frame);
+};
+
+globalThis.__dispatchNativeStreamPoke = (streamId) => {
+  const id = resolveStreamId(streamId);
+  if (!id) return;
+  const waiter = globalThis.__nodeNativeStreamReadWaiters.get(id);
+  if (!waiter) return;
+  globalThis.__nodeNativeStreamReadWaiters.delete(id);
+  try {
+    waiter();
+  } catch {
+    // ignore
+  }
 };
 
 // --------------------
