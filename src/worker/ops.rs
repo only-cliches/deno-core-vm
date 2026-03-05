@@ -1,6 +1,7 @@
 use deno_runtime::deno_core::{JsBuffer, OpState, op2};
 use bytes::Bytes;
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::sync::Mutex;
 use tokio::sync::oneshot;
 
@@ -32,7 +33,7 @@ fn stream_plane_from_state(state: &OpState) -> Option<std::sync::Arc<NativeIncom
 
 #[derive(Default)]
 pub struct NativeReadScratch {
-    chunks: Mutex<HashMap<u32, Vec<u8>>>,
+    chunks: Mutex<HashMap<u32, VecDeque<Vec<u8>>>>,
 }
 
 // Wraps raw bytes as a `Uint8Array` bridge value for zero-copy-friendly binary dispatch.
@@ -177,7 +178,7 @@ pub fn op_denojs_worker_stream_read(state: &mut OpState, #[smi] stream_id: i32) 
         Some(NativeReadEvent::Chunk(chunk)) => {
             if let Some(scratch) = state.try_borrow::<NativeReadScratch>() {
                 if let Ok(mut guard) = scratch.chunks.lock() {
-                    guard.insert(stream_id as u32, chunk);
+                    guard.entry(stream_id as u32).or_default().push_back(chunk);
                 }
             }
             serde_json::json!({ "kind": "chunk" })
@@ -200,7 +201,15 @@ pub fn op_denojs_worker_stream_take_chunk(state: &mut OpState, #[smi] stream_id:
     let Ok(mut guard) = scratch.chunks.lock() else {
         return Vec::new();
     };
-    guard.remove(&(stream_id as u32)).unwrap_or_default()
+    let stream_id = stream_id as u32;
+    let out = guard
+        .get_mut(&stream_id)
+        .and_then(VecDeque::pop_front)
+        .unwrap_or_default();
+    if guard.get(&stream_id).is_some_and(|q| q.is_empty()) {
+        guard.remove(&stream_id);
+    }
+    out
 }
 
 #[op2]
@@ -258,7 +267,7 @@ pub async fn op_denojs_worker_stream_read_async(
         NativeReadEvent::Chunk(chunk) => {
             if let Some(scratch) = state.borrow().try_borrow::<NativeReadScratch>() {
                 if let Ok(mut guard) = scratch.chunks.lock() {
-                    guard.insert(stream_id as u32, chunk);
+                    guard.entry(stream_id as u32).or_default().push_back(chunk);
                 }
             }
             serde_json::json!({ "kind": "chunk" })

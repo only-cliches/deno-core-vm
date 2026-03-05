@@ -1001,6 +1001,7 @@ function makeStreamReader(id) {
 function makeNativeAcceptedStreamReader(idNum) {
   const id = String(idNum >>> 0);
   let done = false;
+  let pendingRaw = null;
   const clearWaiter = () => {
     const waiter = globalThis.__nodeNativeStreamReadWaiters.get(id);
     if (waiter) {
@@ -1016,7 +1017,11 @@ function makeNativeAcceptedStreamReader(idNum) {
     async read() {
       if (done) return { done: true, value: undefined };
       while (true) {
-        let raw = callCapturedRaw(CAP_STREAM_READ_RAW, OP_STREAM_READ_RAW, idNum >>> 0);
+        let raw = pendingRaw;
+        pendingRaw = null;
+        if (!raw) {
+          raw = callCapturedRaw(CAP_STREAM_READ_RAW, OP_STREAM_READ_RAW, idNum >>> 0);
+        }
         if (!(raw instanceof Uint8Array)) {
           raw = toStreamChunk(raw);
         }
@@ -1028,11 +1033,23 @@ function makeNativeAcceptedStreamReader(idNum) {
         if (tag === 0) {
           await new Promise((resolve) => {
             globalThis.__nodeNativeStreamReadWaiters.set(id, resolve);
+            let immediate = callCapturedRaw(CAP_STREAM_READ_RAW, OP_STREAM_READ_RAW, idNum >>> 0);
+            if (!(immediate instanceof Uint8Array)) {
+              immediate = toStreamChunk(immediate);
+            }
+            if (immediate && immediate.length > 0 && (immediate[0] >>> 0) !== 0) {
+              pendingRaw = immediate;
+              globalThis.__nodeNativeStreamReadWaiters.delete(id);
+              resolve();
+            }
           });
           continue;
         }
         if (tag === 1) {
           const chunk = raw.subarray(1);
+          if (chunk.byteLength > 0) {
+            queueStreamCredit(id, chunk.byteLength);
+          }
           return { done: false, value: chunk };
         }
         done = true;

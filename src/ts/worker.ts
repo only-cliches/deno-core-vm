@@ -720,6 +720,7 @@ export class DenoWorker {
         Array<{ minBytes: number; resolve: () => void; reject: (e: unknown) => void }>
     >();
     private readonly pendingCreditFrames = new Map<string, number>();
+    private creditFlushScheduled = false;
     private readonly pendingIncomingStreamFrames = new Map<string, StreamFrame[]>();
     private readonly streamSlotPool: StreamSlotMeta[] = [];
     private streamSlotsInUse = 0;
@@ -1376,6 +1377,10 @@ export class DenoWorker {
     /** Sends a batch of logical stream frames using native bulk-post when available. */
     private emitStreamFrames(frames: Array<Omit<StreamFrame, typeof STREAM_BRIDGE_TAG>>): void {
         if (frames.length === 0) return;
+        if (frames.length <= 2) {
+            for (const frame of frames) this.emitStreamFrame(frame);
+            return;
+        }
         const postControl = (this.native as any).postStreamControl;
         if (typeof postControl === "function" && frames.every((f) => f.t !== "chunk")) {
             for (const frame of frames) this.emitStreamFrame(frame);
@@ -1401,6 +1406,19 @@ export class DenoWorker {
         const flushThreshold = Math.max(1, Math.min(this.streamCreditFlushBytes, this.streamWindowBytes));
         if (next >= flushThreshold) {
             this.flushCreditFrames();
+            return;
+        }
+        if (this.creditFlushScheduled) return;
+        this.creditFlushScheduled = true;
+        const run = () => {
+            this.creditFlushScheduled = false;
+            this.flushCreditFrames();
+        };
+        if (typeof setImmediate === "function") {
+            setImmediate(run);
+        }
+        else {
+            queueMicrotask(run);
         }
     }
 
@@ -2299,7 +2317,7 @@ export class DenoWorker {
                 postChunkFast(chunks[0]);
                 return;
             }
-            if (!STREAM_V2_ENABLED && canPostNativeChunksRaw && useRawStreamId !== null) {
+            if (canPostNativeChunksRaw && useRawStreamId !== null) {
                 const ok = (this.native as any).postStreamChunksRaw(useRawStreamId, encodeVectorizedChunks(chunks));
                 if (!ok) throw new Error("DenoWorker.postStreamChunksRaw failed: worker is closed");
                 return;
@@ -2491,6 +2509,7 @@ export class DenoWorker {
                     done = true;
                     flushQueuedWrites();
                     flushFastChunks();
+                    this.flushCreditFrames();
                     if (STREAM_V2_STATS_DEBUG) {
                         try {
                             // eslint-disable-next-line no-console

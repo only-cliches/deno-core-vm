@@ -1,5 +1,6 @@
 use neon::prelude::*;
 use neon::types::buffer::TypedArray;
+use bytes::Bytes;
 use serde_json::json;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -551,6 +552,56 @@ pub fn create_worker(mut cx: FunctionContext) -> JsResult<JsObject> {
             };
 
             let mut sent: usize = 0;
+            let mut binary_payloads: Vec<Vec<u8>> = Vec::with_capacity(arr.len(&mut cx) as usize);
+            let mut all_binary = true;
+            for i in 0..arr.len(&mut cx) {
+                let v = arr.get_value(&mut cx, i)?;
+                let payload = if let Ok(buf) = v.downcast::<JsBuffer, _>(&mut cx) {
+                    buf.as_slice(&cx).to_vec()
+                } else if let Ok(u8) = v.downcast::<JsUint8Array, _>(&mut cx) {
+                    u8.as_slice(&cx).to_vec()
+                } else if let Ok(ab) = v.downcast::<JsArrayBuffer, _>(&mut cx) {
+                    ab.as_slice(&cx).to_vec()
+                } else {
+                    all_binary = false;
+                    break;
+                };
+                binary_payloads.push(payload);
+            }
+
+            if all_binary {
+                for payload in binary_payloads {
+                    let len = payload.len();
+                    let msg = DenoMsg::PostMessage {
+                        value: JsValueBridge::BufferView {
+                            kind: "Uint8Array".into(),
+                            bytes: Bytes::from(payload),
+                            byte_offset: 0,
+                            length: len,
+                        },
+                    };
+                    match tx.try_send(msg) {
+                        Ok(()) => sent += 1,
+                        Err(tokio::sync::mpsc::error::TrySendError::Full(msg)) => match tx.blocking_send(msg) {
+                            Ok(()) => sent += 1,
+                            Err(_) => {
+                                if strict_channel() {
+                                    return cx.throw_error("Runtime is closed (postMessages)");
+                                }
+                                break;
+                            }
+                        },
+                        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                            if strict_channel() {
+                                return cx.throw_error("Runtime is closed (postMessages)");
+                            }
+                            break;
+                        }
+                    }
+                }
+                return Ok(cx.number(sent as f64));
+            }
+
             for i in 0..arr.len(&mut cx) {
                 let v = arr.get_value(&mut cx, i)?;
                 let msg = crate::bridge::neon_codec::from_neon_value(&mut cx, v)?;

@@ -1,14 +1,18 @@
 use serde::Serialize;
 use std::collections::HashMap;
 use std::collections::VecDeque;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 use std::sync::Condvar;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
 use tokio::sync::Notify;
 
 use crate::worker::env_flags::native_stream_debug_enabled;
+use crate::worker::env_flags::native_stream_telemetry_enabled;
 
 const STREAM_CREDIT_FLUSH_DEFAULT: u32 = 256 * 1024;
+const STREAM_TELEMETRY_LOG_EVERY_CHUNKS: u64 = 16 * 1024;
 
 #[derive(Debug)]
 enum NativeStreamEvent {
@@ -44,11 +48,30 @@ impl NativeIncomingPlaneInner {
   }
 }
 
+struct NativeStreamTelemetry {
+  chunk_count: AtomicU64,
+  chunk_bytes: AtomicU64,
+  wake_count: AtomicU64,
+  vectorized_push_count: AtomicU64,
+}
+
+impl NativeStreamTelemetry {
+  fn new() -> Self {
+    Self {
+      chunk_count: AtomicU64::new(0),
+      chunk_bytes: AtomicU64::new(0),
+      wake_count: AtomicU64::new(0),
+      vectorized_push_count: AtomicU64::new(0),
+    }
+  }
+}
+
 pub struct NativeIncomingPlane {
   inner: Mutex<NativeIncomingPlaneInner>,
   cv: Condvar,
   accept_notify: Notify,
   read_notify: Notify,
+  telemetry: NativeStreamTelemetry,
   #[allow(dead_code)]
   credit_flush_bytes: u32,
 }
@@ -87,7 +110,30 @@ impl NativeIncomingPlane {
       cv: Condvar::new(),
       accept_notify: Notify::new(),
       read_notify: Notify::new(),
+      telemetry: NativeStreamTelemetry::new(),
       credit_flush_bytes: credit_flush_bytes.filter(|v| *v > 0).unwrap_or(STREAM_CREDIT_FLUSH_DEFAULT),
+    }
+  }
+
+  fn record_chunk_telemetry(&self, chunk_count: u64, chunk_bytes: u64, wake: bool, vectorized: bool) {
+    if !native_stream_telemetry_enabled() || chunk_count == 0 {
+      return;
+    }
+    let next_chunks = self.telemetry.chunk_count.fetch_add(chunk_count, Ordering::Relaxed) + chunk_count;
+    let total_bytes = self.telemetry.chunk_bytes.fetch_add(chunk_bytes, Ordering::Relaxed) + chunk_bytes;
+    if wake {
+      self.telemetry.wake_count.fetch_add(1, Ordering::Relaxed);
+    }
+    if vectorized {
+      self.telemetry.vectorized_push_count.fetch_add(1, Ordering::Relaxed);
+    }
+    if (next_chunks & (STREAM_TELEMETRY_LOG_EVERY_CHUNKS - 1)) == 0 {
+      let wakes = self.telemetry.wake_count.load(Ordering::Relaxed);
+      let vectorized_calls = self.telemetry.vectorized_push_count.load(Ordering::Relaxed);
+      eprintln!(
+        "[native-stream][telemetry] chunks={} bytes={} wakes={} vectorized_pushes={}",
+        next_chunks, total_bytes, wakes, vectorized_calls
+      );
     }
   }
 
@@ -226,6 +272,7 @@ impl NativeIncomingPlane {
   }
 
   pub fn push_chunk_with_wake(&self, stream_id: u32, chunk: Vec<u8>) -> (bool, bool) {
+    let chunk_len = chunk.len() as u64;
     let mut inner = self.lock_inner();
     let Some(stream) = inner.streams.get_mut(&stream_id) else {
       if native_stream_debug_enabled() {
@@ -237,7 +284,7 @@ impl NativeIncomingPlane {
         .or_default()
         .push_back(NativeStreamEvent::Chunk(chunk));
       self.read_notify.notify_waiters();
-      self.cv.notify_all();
+      self.record_chunk_telemetry(1, chunk_len, false, false);
       return (true, false);
     };
     let wake = stream.waiting_reader;
@@ -249,7 +296,68 @@ impl NativeIncomingPlane {
     stream.queue.push_back(NativeStreamEvent::Chunk(chunk));
     self.read_notify.notify_waiters();
     self.cv.notify_all();
+    self.record_chunk_telemetry(1, chunk_len, wake, false);
     (true, wake)
+  }
+
+  pub fn push_vectorized_with_wake(&self, stream_id: u32, vectorized: &[u8]) -> (bool, bool) {
+    let mut inner = self.lock_inner();
+    let mut off = 0usize;
+    let mut pushed_any = false;
+    let mut pushed_chunks = 0u64;
+    let mut pushed_bytes = 0u64;
+
+    let wake = if let Some(stream) = inner.streams.get_mut(&stream_id) {
+      let wake = stream.waiting_reader;
+      stream.waiting_reader = false;
+      while off + 4 <= vectorized.len() {
+        let len = u32::from_be_bytes([
+          vectorized[off],
+          vectorized[off + 1],
+          vectorized[off + 2],
+          vectorized[off + 3],
+        ]) as usize;
+        off += 4;
+        if off + len > vectorized.len() {
+          break;
+        }
+        stream
+          .queue
+          .push_back(NativeStreamEvent::Chunk(vectorized[off..off + len].to_vec()));
+        pushed_any = true;
+        pushed_chunks += 1;
+        pushed_bytes += len as u64;
+        off += len;
+      }
+      wake
+    } else {
+      let pending = inner.pending_by_id.entry(stream_id).or_default();
+      while off + 4 <= vectorized.len() {
+        let len = u32::from_be_bytes([
+          vectorized[off],
+          vectorized[off + 1],
+          vectorized[off + 2],
+          vectorized[off + 3],
+        ]) as usize;
+        off += 4;
+        if off + len > vectorized.len() {
+          break;
+        }
+        pending.push_back(NativeStreamEvent::Chunk(vectorized[off..off + len].to_vec()));
+        pushed_any = true;
+        pushed_chunks += 1;
+        pushed_bytes += len as u64;
+        off += len;
+      }
+      false
+    };
+
+    if pushed_any {
+      self.read_notify.notify_waiters();
+      self.cv.notify_all();
+    }
+    self.record_chunk_telemetry(pushed_chunks, pushed_bytes, wake && pushed_any, true);
+    (true, wake && pushed_any)
   }
 
   pub fn close(&self, stream_id: u32) -> bool {

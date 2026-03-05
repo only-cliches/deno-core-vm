@@ -448,41 +448,35 @@ fn handle_post_stream_chunks_msg(
     if native_stream_plane_enabled() && native_stream_debug_enabled() {
         eprintln!("[native-stream] handle chunks id={} count={}", stream_id, payloads.len());
     }
-    if native_stream_plane_enabled()
-        && let Ok(id_num) = stream_id.parse::<u32>()
-        && let Some(plane) = native_stream_plane(worker)
-    {
-        let mut all_binary = true;
-        let mut wake_any = false;
-        for payload in &payloads {
-            let Some(chunk) = payload_to_chunk_bytes(payload) else {
-                all_binary = false;
-                break;
-            };
-            let (_, wake) = plane.push_chunk_with_wake(id_num, chunk.to_vec());
-            wake_any |= wake;
-        }
-        if all_binary {
-            if wake_any {
-                let _ = dispatch_native_stream_poke(worker, id_num);
-            }
-            return false;
-        }
-    }
     // Vectorize into one binary payload when all chunks are binary payloads.
-    let mut merged = Vec::<u8>::new();
     let mut all_binary = !payloads.is_empty();
+    let mut merged_chunks: Vec<&[u8]> = Vec::with_capacity(payloads.len());
+    let mut merged_cap = 0usize;
     for payload in &payloads {
         let Some(chunk) = payload_to_chunk_bytes(payload) else {
             all_binary = false;
             break;
         };
-        merged.extend_from_slice(&(chunk.len() as u32).to_be_bytes());
-        merged.extend_from_slice(chunk);
+        merged_cap = merged_cap.saturating_add(4 + chunk.len());
+        merged_chunks.push(chunk);
     }
     if all_binary {
+        let mut merged = Vec::<u8>::with_capacity(merged_cap);
+        for chunk in merged_chunks {
+            merged.extend_from_slice(&(chunk.len() as u32).to_be_bytes());
+            merged.extend_from_slice(chunk);
+        }
         let id_num = stream_id.parse::<u32>().unwrap_or(0);
         if id_num > 0 {
+            if native_stream_plane_enabled()
+                && let Some(plane) = native_stream_plane(worker)
+            {
+                let (_, wake) = plane.push_vectorized_with_wake(id_num, &merged);
+                if wake {
+                    let _ = dispatch_native_stream_poke(worker, id_num);
+                }
+                return false;
+            }
             let merged_len = merged.len();
             return handle_post_stream_chunks_raw_msg(
                 worker,
@@ -654,19 +648,8 @@ fn handle_post_stream_chunks_raw_msg(
         && let Some(chunk) = payload_to_chunk_bytes(&payload)
         && let Some(plane) = native_stream_plane(worker)
     {
-        let mut wake_any = false;
-        let mut off = 0usize;
-        while off + 4 <= chunk.len() {
-            let len = u32::from_be_bytes([chunk[off], chunk[off + 1], chunk[off + 2], chunk[off + 3]]) as usize;
-            off += 4;
-            if off + len > chunk.len() {
-                break;
-            }
-            let (_, wake) = plane.push_chunk_with_wake(stream_id, chunk[off..off + len].to_vec());
-            wake_any |= wake;
-            off += len;
-        }
-        if wake_any {
+        let (_, wake) = plane.push_vectorized_with_wake(stream_id, chunk);
+        if wake {
             let _ = dispatch_native_stream_poke(worker, stream_id);
         }
         return false;
