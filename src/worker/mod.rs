@@ -1,5 +1,6 @@
 pub mod dispatch;
 pub mod env;
+pub mod env_flags;
 pub mod eval;
 pub mod filesystem;
 pub mod messages;

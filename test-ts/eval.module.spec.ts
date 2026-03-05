@@ -1,14 +1,13 @@
 // src/__tests__/eval_module.spec.ts
-import { DenoWorker } from "../src/index";
 import { createTestWorker } from "./helpers.worker-harness";
 
-describe("evalModule: module namespace API", () => {
+describe("module.eval: module namespace API", () => {
   jest.setTimeout(60_000);
 
   test("returns a module namespace object with named exports", async () => {
     const dw = createTestWorker({ console: false });
     try {
-      const mod = await dw.evalModule(`
+      const mod = await dw.module.eval(`
         export const cfg = {
           api: {
             baseUrl: "https://example.com",
@@ -33,7 +32,7 @@ describe("evalModule: module namespace API", () => {
   test("supports default export on the returned namespace", async () => {
     const dw = createTestWorker({ console: false });
     try {
-      const mod = await dw.evalModule(`
+      const mod = await dw.module.eval(`
         export default function add(a, b) { return a + b; }
         export const x = 10;
       `);
@@ -50,7 +49,7 @@ describe("evalModule: module namespace API", () => {
   test("module evaluation can return expanded types via exports", async () => {
     const dw = createTestWorker({ console: false });
     try {
-      const mod = await dw.evalModule(`
+      const mod = await dw.module.eval(`
         export const bi = 9007199254740993n;
         export const when = new Date(1700000000000);
         export const re = /a+b/gi;
@@ -104,11 +103,11 @@ describe("evalModule: module namespace API", () => {
     }
   });
 
-  test("multiple evalModule calls return independent namespaces", async () => {
+  test("multiple module.eval calls return independent namespaces", async () => {
     const dw = createTestWorker({ console: false });
     try {
-      const a = await dw.evalModule(`export const n = 1;`);
-      const b = await dw.evalModule(`export const n = 2;`);
+      const a = await dw.module.eval(`export const n = 1;`);
+      const b = await dw.module.eval(`export const n = 2;`);
 
       expect(a.n).toBe(1);
       expect(b.n).toBe(2);
@@ -117,13 +116,13 @@ describe("evalModule: module namespace API", () => {
     }
   });
 
-  test("transpiles TypeScript in evalModule when top-level transpileTs is enabled", async () => {
+  test("transpiles TypeScript in module.eval when top-level transpileTs is enabled", async () => {
     const dw = createTestWorker({
       transpileTs: true,
       console: false,
     });
     try {
-      const mod = await dw.evalModule(`
+      const mod = await dw.module.eval(`
         export type User = { id: number };
         const user: User = { id: 42 };
         export const out: number = user.id;
@@ -143,7 +142,7 @@ describe("evalModule: module namespace API", () => {
         return { id: userId, secret: "super_classified_payload" };
       });
 
-      const sandbox = await dw.evalModule(`
+      const sandbox = await dw.module.eval(`
         export async function processUser(userId) {
           const rawData = await globalThis.hostFetchData(userId);
           return {
@@ -172,7 +171,7 @@ describe("evalModule: module namespace API", () => {
       try {
         await dw.setGlobal("hostDouble", (x: number) => x * 2);
 
-        const mod = await dw.evalModule(`
+        const mod = await dw.module.eval(`
           export function run() {
             return globalThis.hostDouble(21);
           }

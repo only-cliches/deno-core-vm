@@ -905,6 +905,7 @@ pub fn create_worker(mut cx: FunctionContext) -> JsResult<JsObject> {
             match event.as_str() {
                 "message" => worker.callbacks.on_message = Some(Arc::new(cb)),
                 "close" => worker.callbacks.on_close = Some(Arc::new(cb)),
+                "runtime" => worker.callbacks.on_runtime = Some(Arc::new(cb)),
                 _ => {}
             }
 
@@ -1134,6 +1135,40 @@ pub fn create_worker(mut cx: FunctionContext) -> JsResult<JsObject> {
             Ok(promise)
         })?;
         api.set(&mut cx, "evalModule", f)?;
+    }
+
+    // registerModule(moduleName, source): Promise<void>
+    {
+        let id2 = id;
+        let f = JsFunction::new(&mut cx, move |mut cx| {
+            let module_name = cx.argument::<JsString>(0)?.value(&mut cx);
+            let source = cx.argument::<JsString>(1)?.value(&mut cx);
+            let (deferred, promise) = cx.promise();
+            let settler = PromiseSettler::new(deferred, cx.channel());
+            queue_deno_msg_or_reject(id2, settler, |deferred| DenoMsg::RegisterModule {
+                module_name,
+                source,
+                deferred,
+            });
+            Ok(promise)
+        })?;
+        api.set(&mut cx, "registerModule", f)?;
+    }
+
+    // clearModule(moduleName): Promise<boolean>
+    {
+        let id2 = id;
+        let f = JsFunction::new(&mut cx, move |mut cx| {
+            let module_name = cx.argument::<JsString>(0)?.value(&mut cx);
+            let (deferred, promise) = cx.promise();
+            let settler = PromiseSettler::new(deferred, cx.channel());
+            queue_deno_msg_or_reject(id2, settler, |deferred| DenoMsg::ClearModule {
+                module_name,
+                deferred,
+            });
+            Ok(promise)
+        })?;
+        api.set(&mut cx, "clearModule", f)?;
     }
 
     // lastExecutionStats getter

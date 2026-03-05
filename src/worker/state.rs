@@ -55,6 +55,7 @@ impl PendingRequests {
 pub struct NodeCallbacks {
     pub on_message: Option<Arc<Root<JsFunction>>>,
     pub on_close: Option<Arc<Root<JsFunction>>>,
+    pub on_runtime: Option<Arc<Root<JsFunction>>>,
     pub imports: Option<Arc<Root<JsFunction>>>,
     pub console_log: Option<Arc<Root<JsFunction>>>,
     pub console_info: Option<Arc<Root<JsFunction>>>,

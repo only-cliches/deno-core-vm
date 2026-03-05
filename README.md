@@ -21,7 +21,7 @@ Whether you are building a multi-tenant edge-compute platform, executing untrust
 * **Zero-Serialization Friction:** Unlike standard IPC, Deno Director uses a highly optimized native bridge. Pass `Map`, `Set`, `ArrayBuffer`, `Date`, `RegExp`, native `Error` objects, **recursive values**, and even **Functions** across the Node/Deno boundary without losing fidelity.
 * **Wield Host Functions:** Pass a Node.js function *into* the Deno sandbox. Call it from Deno, and it executes in Node. Synchronously or asynchronously.
 * **Ironclad Sandboxing:** Every worker is a Deno isolate. You have absolute control over `read`, `write`, `net`, `env`, and `ffi` permissions. Lock it down.
-* **Native TypeScript & JSX:** Evaluate TS/JSX directly in `eval`, `evalSync`, `evalModule`, and import pipelines. No build step required. Deno Director handles transpilation on the fly.
+* **Native TypeScript & JSX:** Evaluate TS/JSX directly in `eval`, `evalSync`, `worker.module.eval`, and import pipelines. No build step required. Deno Director handles transpilation on the fly.
 * **Fleet Orchestration:** Spin up thousands of runtimes. Tag them, label them, and manage their lifecycles seamlessly with the built-in `DenoDirector` orchestration class.
 * **Telemetry:** Extract granular V8 heap space statistics and exact CPU/Wall-clock execution times for every script evaluation.
 
@@ -66,7 +66,7 @@ await worker.setGlobal("hostFetchData", async (userId: string) => {
 
 // 3. Inject an ES Module into Deno
 // Notice how Deno seamlessly awaits the Node.js function we just injected!
-const sandbox = await worker.evalModule(`
+const sandbox = await worker.module.eval(`
     export async function processUser(userId) {
 
         console.log(\`[Deno] Initiating secure processing for \${userId}...\`);
@@ -148,7 +148,7 @@ Don't just evaluate strings—import entire ES modules and use them as if they w
 
 ```ts
 // Deno dynamically imports the code, and Node gets a fully typed proxy namespace!
-const mod = await worker.evalModule(`
+const mod = await worker.module.eval(`
   export const version = "1.0.0";
   export function encrypt(data) { return btoa(data); }
 `);
@@ -240,7 +240,7 @@ const worker = new DenoWorker({
 });
 
 // Run it! Deno will hit our interceptor for "app:database"
-const result = await worker.evalModule(`
+const result = await worker.module.eval(`
   import { database } from "app:database";
   export function getData() {
     return database;
@@ -401,7 +401,7 @@ const compatWorker = new DenoWorker({
   moduleLoader: { nodeResolve: true },
 });
 
-const compatOut = await compatWorker.evalModule(`
+const compatOut = await compatWorker.module.eval(`
   import path from "path";
   export const out = path.join("a", "b");
 `);
@@ -415,7 +415,7 @@ const resolveWorker = new DenoWorker({
   moduleLoader: { nodeResolve: true },
 });
 
-const resolveOut = await resolveWorker.evalModule(`
+const resolveOut = await resolveWorker.module.eval(`
   import path from "path";
   export const base = path.basename("/tmp/some-installed-package");
 `);
@@ -554,8 +554,12 @@ The core runtime isolate. Maps 1:1 with a V8 Thread.
 Evaluates JavaScript or TypeScript asynchronously.
 * `evalSync(src: string, options?: EvalOptions): any`
 Evaluates JavaScript or TypeScript synchronously (blocks Node event loop while waiting).
-* `evalModule<T>(src: string, options?: EvalOptions): Promise<T>`
+* `module.eval<T>(src: string, options?: EvalOptions & { moduleName?: string }): Promise<T>`
 Evaluates the source as an ES Module and returns a callable Proxy namespace to the exports.
+* `module.register(moduleName: string, source: string): Promise<void>`
+Registers source under a module name for future imports.
+* `module.clear(moduleName: string): Promise<boolean>`
+Clears a previously registered module by name.
 * `importModule<T>(specifier: string): Promise<T>`
 Imports a module specifier through the runtime import pipeline and returns a callable Proxy namespace to the exports.
 * `stream.create(key?: string): DenoWorkerStreamWriter`
@@ -563,7 +567,7 @@ Creates a byte stream from Node -> worker. If `key` is omitted, a cryptographica
 * `stream.accept(key: string): Promise<DenoWorkerStreamReader>`
 Accepts a byte stream opened from worker -> Node.
 
-When `transpileTs: true` is enabled, all three evaluation entrypoints (`eval`, `evalSync`, `evalModule`) run source through the TS/JSX transpiler before execution.
+When `transpileTs: true` is enabled, all three evaluation entrypoints (`eval`, `evalSync`, `module.eval`) run source through the TS/JSX transpiler before execution.
 
 Stream writer methods:
 

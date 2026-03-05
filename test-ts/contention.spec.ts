@@ -1,9 +1,6 @@
 import { DenoWorker } from "../src/index";
+import { sleep } from "./helpers.time";
 import { closeTrackedWorkers, createTestWorker } from "./helpers.worker-harness";
-
-function sleep(ms: number) {
-  return new Promise<void>((resolve) => setTimeout(resolve, ms));
-}
 
 async function withHardTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
   return await Promise.race([
@@ -35,7 +32,7 @@ function envInt(name: string, fallback: number): number {
 }
 
 async function closeWorkerFully(dw: DenoWorker): Promise<void> {
-  const native = (dw as any)?.native as
+  const native = (dw as unknown as { native?: unknown })?.native as
     | { __isRegistered?: () => boolean; forceDispose?: () => void }
     | undefined;
   if (dw.isClosed()) {
@@ -168,7 +165,7 @@ describe("deno_worker: contention", () => {
   );
 
   test(
-    "20 runtimes: mixed eval/evalModule + stream fanout all queue and drain",
+    "20 runtimes: mixed eval/module.eval + stream fanout all queue and drain",
     async () => {
       const runtimeCount = 20;
       const streamsPerRuntime = 6;
@@ -218,7 +215,7 @@ describe("deno_worker: contention", () => {
             { args: [startAt, hostCallsPerRuntime] },
           );
 
-          const moduleTask = dw.evalModule(`
+          const moduleTask = dw.module.eval(`
             export const marker = ${idx} + 1000;
             export const kind = "contention-module";
           `);
@@ -424,7 +421,7 @@ describe("deno_worker: contention", () => {
               { args: [startAt, hostCallsPerRuntime] },
             );
 
-            const moduleTask = dw.evalModule(`
+            const moduleTask = dw.module.eval(`
               export const wave = ${wave};
               export const runtime = ${idx};
               export const marker = "absurd";

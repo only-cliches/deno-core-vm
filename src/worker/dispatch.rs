@@ -82,6 +82,9 @@ pub fn dispatch_node_msg(worker_id: usize, msg: NodeMsg) {
                 }
 
                 NodeMsg::EmitClose => node_events::handle_emit_close(cx, worker_id, &callbacks),
+                NodeMsg::EmitRuntimeEvent { value } => {
+                    node_events::handle_emit_runtime(cx, &callbacks, value)
+                }
 
                 NodeMsg::InvokeHostFunctionSync {
                     func_id,

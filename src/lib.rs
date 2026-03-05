@@ -42,7 +42,9 @@ pub(crate) fn queue_deno_msg_or_reject_with_backpressure(
             } => deferred.reject_with_error("Runtime is closed"),
             DenoMsg::Close { deferred }
             | DenoMsg::Memory { deferred }
-            | DenoMsg::SetGlobal { deferred, .. } => deferred.reject_with_error("Runtime is closed"),
+            | DenoMsg::SetGlobal { deferred, .. }
+            | DenoMsg::RegisterModule { deferred, .. }
+            | DenoMsg::ClearModule { deferred, .. } => deferred.reject_with_error("Runtime is closed"),
             DenoMsg::Eval { deferred: None, .. }
             | DenoMsg::PostMessage { .. }
             | DenoMsg::PostMessageTyped { .. }
@@ -103,7 +105,9 @@ where
             } => deferred.reject_with_value_via_channel(mk_err("Runtime is closed")),
             DenoMsg::Close { deferred }
             | DenoMsg::Memory { deferred }
-            | DenoMsg::SetGlobal { deferred, .. } => {
+            | DenoMsg::SetGlobal { deferred, .. }
+            | DenoMsg::RegisterModule { deferred, .. }
+            | DenoMsg::ClearModule { deferred, .. } => {
                 deferred.reject_with_value_via_channel(mk_err("Runtime is closed"))
             }
             DenoMsg::Eval { deferred: None, .. }

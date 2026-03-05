@@ -1,12 +1,12 @@
-use deno_runtime::deno_core::v8;
+use deno_runtime::deno_core::{self, v8};
 use deno_runtime::worker::MainWorker;
 use neon::prelude::*;
 use tokio::sync::mpsc;
 use bytes::Bytes;
 use std::sync::Arc;
-use std::sync::OnceLock;
 
 use crate::bridge::types::{EvalOptions, JsValueBridge};
+use crate::worker::env_flags::{native_stream_debug_enabled, native_stream_plane_enabled};
 use crate::worker::eval::eval_in_runtime;
 use crate::worker::messages::{DenoMsg, EvalReply, ExecStats, NodeMsg, ResolvePayload};
 use crate::worker::state::RuntimeLimits;
@@ -93,6 +93,15 @@ pub async fn handle_deno_msg(
             value,
             deferred,
         } => handle_set_global_msg(worker, worker_id, key, value, deferred).await,
+        DenoMsg::RegisterModule {
+            module_name,
+            source,
+            deferred,
+        } => handle_register_module_msg(worker, worker_id, module_name, source, deferred).await,
+        DenoMsg::ClearModule {
+            module_name,
+            deferred,
+        } => handle_clear_module_msg(worker, worker_id, module_name, deferred).await,
         DenoMsg::Eval {
             source,
             options,
@@ -126,26 +135,6 @@ fn native_stream_plane(worker: &mut MainWorker) -> Option<Arc<NativeIncomingPlan
     let state = worker.js_runtime.op_state();
     let borrow = state.borrow();
     borrow.try_borrow::<Arc<NativeIncomingPlane>>().cloned()
-}
-
-fn native_stream_plane_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("DENO_DIRECTOR_NATIVE_STREAM_PLANE")
-            .ok()
-            .map(|v| v == "1")
-            .unwrap_or(false)
-    })
-}
-
-fn native_stream_debug_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("DENO_DIRECTOR_NATIVE_STREAM_DEBUG")
-            .ok()
-            .map(|v| v == "1")
-            .unwrap_or(false)
-    })
 }
 
 fn dispatch_native_stream_poke(worker: &mut MainWorker, stream_id: u32) -> bool {
@@ -857,6 +846,125 @@ async fn handle_set_global_msg(
                 .await;
             }
         }
+    } else {
+        deferred.reject_with_error("Node thread is unavailable");
+    }
+
+    false
+}
+
+// Handle register module msg.
+async fn handle_register_module_msg(
+    worker: &mut MainWorker,
+    worker_id: usize,
+    module_name: String,
+    source: String,
+    deferred: crate::bridge::promise::PromiseSettler,
+) -> bool {
+    let module_name = module_name.trim().to_string();
+    if module_name.is_empty() {
+        if let Some(tx) = get_node_tx(worker_id) {
+            let err = crate::bridge::errors::error("Error", "moduleName must be a non-empty string");
+            send_node_msg_or_reject(
+                &tx,
+                NodeMsg::Resolve {
+                    settler: deferred,
+                    payload: ResolvePayload::Result {
+                        result: Err(err),
+                        stats: ExecStats {
+                            cpu_time_ms: 0.0,
+                            eval_time_ms: 0.0,
+                        },
+                    },
+                },
+            )
+            .await;
+        } else {
+            deferred.reject_with_error("Node thread is unavailable");
+        }
+        return false;
+    }
+
+    {
+        let state = worker.js_runtime.op_state();
+        let reg = state
+            .borrow()
+            .borrow::<crate::worker::modules::ModuleRegistry>()
+            .clone();
+        reg.put_named_persistent(&module_name, &source, deno_core::ModuleType::JavaScript);
+    }
+
+    if let Some(tx) = get_node_tx(worker_id) {
+        send_node_msg_or_reject(
+            &tx,
+            NodeMsg::Resolve {
+                settler: deferred,
+                payload: ResolvePayload::Void,
+            },
+        )
+        .await;
+    } else {
+        deferred.reject_with_error("Node thread is unavailable");
+    }
+
+    false
+}
+
+// Handle clear module msg.
+async fn handle_clear_module_msg(
+    worker: &mut MainWorker,
+    worker_id: usize,
+    module_name: String,
+    deferred: crate::bridge::promise::PromiseSettler,
+) -> bool {
+    let module_name = module_name.trim().to_string();
+    if module_name.is_empty() {
+        if let Some(tx) = get_node_tx(worker_id) {
+            let err = crate::bridge::errors::error("Error", "moduleName must be a non-empty string");
+            send_node_msg_or_reject(
+                &tx,
+                NodeMsg::Resolve {
+                    settler: deferred,
+                    payload: ResolvePayload::Result {
+                        result: Err(err),
+                        stats: ExecStats {
+                            cpu_time_ms: 0.0,
+                            eval_time_ms: 0.0,
+                        },
+                    },
+                },
+            )
+            .await;
+        } else {
+            deferred.reject_with_error("Node thread is unavailable");
+        }
+        return false;
+    }
+
+    let removed = {
+        let state = worker.js_runtime.op_state();
+        let reg = state
+            .borrow()
+            .borrow::<crate::worker::modules::ModuleRegistry>()
+            .clone();
+        reg.remove_named(&module_name)
+    };
+
+    if let Some(tx) = get_node_tx(worker_id) {
+        send_node_msg_or_reject(
+            &tx,
+            NodeMsg::Resolve {
+                settler: deferred,
+                payload: ResolvePayload::Result {
+                    result: Ok(JsValueBridge::Bool(removed)),
+                    stats: ExecStats {
+                        cpu_time_ms: 0.0,
+                        eval_time_ms: 0.0,
+                    },
+                },
+            },
+        )
+        .await;
     } else {
         deferred.reject_with_error("Node thread is unavailable");
     }

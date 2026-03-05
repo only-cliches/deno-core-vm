@@ -1,7 +1,6 @@
 import { DenoWorker } from "../src/index";
+import { sleep } from "./helpers.time";
 import { createTestWorker } from "./helpers.worker-harness";
-
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 describe("deno_worker: messaging", () => {
   let dw: DenoWorker;

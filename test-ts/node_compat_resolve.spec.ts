@@ -1,7 +1,6 @@
 // test-ts/node_compat_resolve.spec.ts
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
-import { DenoWorker } from "../src/index";
 import { createTestWorker } from "./helpers.worker-harness";
 import * as fs from "fs/promises";
 import * as os from "os";
@@ -52,7 +51,7 @@ describe("DenoWorker nodeResolve/nodeCompat", () => {
         import { y } from "my_pkg";
         export const out = y;
       `;
-      await expect(dw.evalModule(code)).rejects.toBeTruthy();
+      await expect(dw.module.eval(code)).rejects.toBeTruthy();
     } finally {
       if (!dw.isClosed()) await dw.close();
     }
@@ -70,7 +69,7 @@ describe("DenoWorker nodeResolve/nodeCompat", () => {
         import { y } from "my_pkg";
         export const out = y;
       `;
-      await expect(dw.evalModule(code)).resolves.toMatchObject({ out: 456 });
+      await expect(dw.module.eval(code)).resolves.toMatchObject({ out: 456 });
     } finally {
       if (!dw.isClosed()) await dw.close();
     }
@@ -88,7 +87,7 @@ describe("DenoWorker nodeResolve/nodeCompat", () => {
         import { y } from "my_pkg";
         export const out = y;
       `;
-      await expect(dw.evalModule(code)).resolves.toMatchObject({ out: 456 });
+      await expect(dw.module.eval(code)).resolves.toMatchObject({ out: 456 });
     } finally {
       if (!dw.isClosed()) await dw.close();
     }
@@ -106,7 +105,7 @@ describe("DenoWorker nodeResolve/nodeCompat", () => {
         import { x } from "./local.js";
         export const out = x;
       `;
-      await expect(dw.evalModule(code)).resolves.toMatchObject({ out: 123 });
+      await expect(dw.module.eval(code)).resolves.toMatchObject({ out: 123 });
     } finally {
       if (!dw.isClosed()) await dw.close();
     }
@@ -128,7 +127,7 @@ describe("DenoWorker nodeResolve/nodeCompat", () => {
         export const out = v;
       `;
 
-      await expect(dw.evalModule(code)).resolves.toMatchObject({ out: "from-js" });
+      await expect(dw.module.eval(code)).resolves.toMatchObject({ out: "from-js" });
     } finally {
       if (!dw.isClosed()) await dw.close();
     }
@@ -164,7 +163,7 @@ describe("DenoWorker nodeResolve/nodeCompat", () => {
         export const out = which;
       `;
 
-      await expect(dw.evalModule(code)).resolves.toMatchObject({ out: "module" });
+      await expect(dw.module.eval(code)).resolves.toMatchObject({ out: "module" });
     } finally {
       if (!dw.isClosed()) await dw.close();
     }
@@ -194,7 +193,7 @@ describe("DenoWorker nodeResolve/nodeCompat", () => {
         export const out = v;
       `;
 
-        await expect(dw.evalModule(code)).resolves.toMatchObject({ out: "index-mjs" });
+        await expect(dw.module.eval(code)).resolves.toMatchObject({ out: "index-mjs" });
       } finally {
         if (!dw.isClosed()) await dw.close();
       }
@@ -223,7 +222,7 @@ describe("DenoWorker nodeResolve/nodeCompat", () => {
         export const out = scoped;
       `;
 
-      await expect(dw.evalModule(code)).resolves.toMatchObject({ out: "ok" });
+      await expect(dw.module.eval(code)).resolves.toMatchObject({ out: "ok" });
     } finally {
       if (!dw.isClosed()) await dw.close();
     }
@@ -249,7 +248,7 @@ describe("DenoWorker nodeResolve/nodeCompat", () => {
         export const out = sub;
       `;
 
-      await expect(dw.evalModule(code)).resolves.toMatchObject({ out: "sub-ts" });
+      await expect(dw.module.eval(code)).resolves.toMatchObject({ out: "sub-ts" });
     } finally {
       if (!dw.isClosed()) await dw.close();
     }
@@ -272,7 +271,7 @@ describe("DenoWorker nodeResolve/nodeCompat", () => {
         export const out = v;
       `;
 
-        await expect(dw.evalModule(code)).rejects.toBeTruthy();
+        await expect(dw.module.eval(code)).rejects.toBeTruthy();
       } finally {
         if (!dw.isClosed()) await dw.close();
       }
@@ -304,7 +303,7 @@ describe("DenoWorker nodeResolve/nodeCompat", () => {
         export const out = z;
       `;
 
-        await expect(dw.evalModule(code)).rejects.toBeTruthy();
+        await expect(dw.module.eval(code)).rejects.toBeTruthy();
       } finally {
         if (!dw.isClosed()) await dw.close();
       }

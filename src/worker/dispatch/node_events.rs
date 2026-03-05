@@ -50,3 +50,26 @@ pub fn handle_emit_close(
 
     Ok(())
 }
+
+/// Handle emit runtime event.
+pub fn handle_emit_runtime(
+    cx: &mut TaskContext,
+    callbacks: &NodeCallbacks,
+    value: JsValueBridge,
+) -> NeonResult<()> {
+    let Some(cb_root) = callbacks.on_runtime.as_ref() else {
+        return Ok(());
+    };
+
+    let cb = cb_root.to_inner(cx);
+    let arg = crate::bridge::neon_codec::to_neon_value(cx, &value)
+        .unwrap_or_else(|_| cx.undefined().upcast());
+
+    let this = cx.undefined();
+    let _ = cx.try_catch(|cx| {
+        cb.call(cx, this, &[arg])?;
+        Ok(())
+    });
+
+    Ok(())
+}

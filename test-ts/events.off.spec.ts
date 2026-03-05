@@ -1,9 +1,6 @@
-import { DenoWorker, DenoWorkerLifecycleContext } from "../src/index";
+import { DenoWorkerLifecycleContext } from "../src/index";
+import { sleep } from "./helpers.time";
 import { createTestWorker } from "./helpers.worker-harness";
-
-function sleep(ms: number) {
-  return new Promise((r) => setTimeout(r, ms));
-}
 
 describe("DenoWorker on/off event adapters", () => {
   test("on('lifecycle') receives lifecycle events and off() unsubscribes", async () => {
@@ -71,6 +68,22 @@ describe("DenoWorker on/off event adapters", () => {
     await dw.eval(`postMessage({ shouldNotArrive: true })`);
     await sleep(20);
 
+    expect(hits).toEqual([]);
+    await dw.close();
+  });
+
+  test("on('runtime') can be removed with off()", async () => {
+    const hits: any[] = [];
+    const dw = createTestWorker();
+    const cb = (event: any) => hits.push(event.kind);
+    dw.on("runtime", cb);
+    await dw.eval("1 + 1");
+    expect(hits).toContain("eval.begin");
+    expect(hits).toContain("eval.end");
+
+    dw.off("runtime", cb);
+    hits.length = 0;
+    await dw.eval("2 + 2");
     expect(hits).toEqual([]);
     await dw.close();
   });

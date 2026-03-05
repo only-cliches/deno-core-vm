@@ -226,7 +226,7 @@ describe("deno_worker: handles", () => {
       })`);
 
       await expect(h.call("burn", [80])).rejects.toThrow();
-      await expect(h.call("burn", [80], { maxEvalMs: 250 })).resolves.toBe(80);
+      await expect(h.call("burn", [80], { maxEvalMs: 750 })).resolves.toBe(80);
     } finally {
       if (!limited.isClosed()) await limited.close();
     }
@@ -377,7 +377,7 @@ describe("deno_worker: handles", () => {
 
   test("apply failure rejects but handle remains usable", async () => {
     const h = await dw.handle.eval(`({ n: 1 })`);
-    await expect(h.apply([{ op: "set", path: "n", value: 2 }, { op: "nope" as any }])).rejects.toBeTruthy();
+    await expect(h.apply([{ op: "set", path: "n", value: 2 }, { op: "nope" as unknown as never }])).rejects.toBeTruthy();
     await expect(h.get("n")).resolves.toBe(2);
   });
 

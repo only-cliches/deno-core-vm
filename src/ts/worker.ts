@@ -3,7 +3,16 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { nativeAddon } from "./native";
 import { wrapModuleNamespace } from "./module-namespace";
+import { buildImportModuleSource } from "./module-source";
 import { coerceMemoryPayload, normalizeEvalOptions, normalizeWorkerOptions } from "./options";
+import {
+    STREAM_BRIDGE_TAG as STREAM_BRIDGE_TAG_RAW,
+    STREAM_CHUNK_MAGIC,
+    STREAM_FRAME_TYPE_TO_CODE,
+    decodeStreamFrameEnvelope,
+    encodeStreamFrameEnvelope,
+    STREAM_TYPED_CHUNK_PREFIX as STREAM_TYPED_CHUNK_PREFIX_RAW,
+} from "../shared/stream-envelope";
 import { dehydrateForWire, hydrateFromWire } from "./wire";
 import type {
     DenoWorkerHandleApplyOp,
@@ -21,8 +30,12 @@ import type {
     DenoWorkerCloseOptions,
     DenoWorkerMemory,
     DenoWorkerMessageHandler,
+    DenoWorkerModuleApi,
+    DenoWorkerModuleEvalOptions,
     DenoWorkerOptions,
     DenoWorkerRestartOptions,
+    DenoWorkerRuntimeEvent,
+    DenoWorkerRuntimeHandler,
     DenoWorkerStreamApi,
     DenoWorkerStreamReader,
     DenoWorkerStreamWriter,
@@ -31,32 +44,12 @@ import type {
     NativeWorker,
 } from "./types";
 
-const STREAM_BRIDGE_TAG = "__denojs_worker_stream_v1";
-const STREAM_TYPED_CHUNK_PREFIX = "__denojs_worker_stream_chunk_v1:";
+const STREAM_BRIDGE_TAG = STREAM_BRIDGE_TAG_RAW as "__denojs_worker_stream_v1";
+const STREAM_TYPED_CHUNK_PREFIX = STREAM_TYPED_CHUNK_PREFIX_RAW as "__denojs_worker_stream_chunk_v1:";
 const STREAM_TYPED_CHUNK_MIN_BYTES = 1;
 const STREAM_V2_ENABLED = process.env.DENO_DIRECTOR_STREAM_V2 !== "0";
 const STREAM_V2_STATS_DEBUG = process.env.DENO_DIRECTOR_STREAM_V2_STATS_DEBUG === "1";
-const STREAM_CHUNK_MAGIC = [0x44, 0x44, 0x53, 0x54, 0x52, 0x4d, 0x31, 0x00] as const;
 const textEncoder = new TextEncoder();
-const textDecoder = new TextDecoder();
-const STREAM_FRAME_TYPE_TO_CODE: Record<StreamFrameType, number> = {
-    open: 1,
-    chunk: 2,
-    close: 3,
-    error: 4,
-    cancel: 5,
-    discard: 6,
-    credit: 7,
-};
-const STREAM_FRAME_CODE_TO_TYPE: Record<number, StreamFrameType> = {
-    1: "open",
-    2: "chunk",
-    3: "close",
-    4: "error",
-    5: "cancel",
-    6: "discard",
-    7: "credit",
-};
 
 // Default stream flow-control window.
 const STREAM_DEFAULT_WINDOW_BYTES = 256 * 1024 * 1024;
@@ -461,77 +454,6 @@ function toBinaryChunk(chunk: Uint8Array | ArrayBuffer): Uint8Array {
     return new Uint8Array(chunk);
 }
 
-/** Coerces unknown binary-like values into a Uint8Array view for envelope parsing. */
-function asUint8View(value: unknown): Uint8Array | null {
-    if (typeof Uint8Array === "undefined") return null;
-    if (value instanceof Uint8Array) return value;
-    if (typeof ArrayBuffer !== "undefined" && value instanceof ArrayBuffer) return new Uint8Array(value);
-    if (
-        typeof ArrayBuffer !== "undefined" &&
-        typeof ArrayBuffer.isView === "function" &&
-        ArrayBuffer.isView(value)
-    ) {
-        const v = value as ArrayBufferView;
-        return new Uint8Array(v.buffer, v.byteOffset, v.byteLength);
-    }
-    return null;
-}
-
-/** Encodes a logical stream frame into the binary bridge envelope format. */
-function encodeStreamFrameEnvelope(frame: Omit<StreamFrame, typeof STREAM_BRIDGE_TAG>): Uint8Array {
-    const typeCode = STREAM_FRAME_TYPE_TO_CODE[frame.t];
-    if (!typeCode) {
-        throw new Error(`Unknown stream frame type: ${String((frame as any).t)}`);
-    }
-
-    const idBytes = textEncoder.encode(frame.id);
-    if (idBytes.byteLength === 0 || idBytes.byteLength > 0xffff) {
-        throw new Error(`Invalid stream id length: ${idBytes.byteLength}`);
-    }
-
-    const auxText =
-        frame.t === "open"
-            ? (frame.key ?? "")
-            : frame.t === "error"
-                ? (frame.error ?? "")
-                : frame.t === "cancel"
-                    ? (frame.reason ?? "")
-                    : frame.t === "credit"
-                        ? String(Math.max(0, Math.trunc(frame.credit ?? 0)))
-                    : "";
-    const auxBytes = textEncoder.encode(auxText);
-    if (auxBytes.byteLength > 0xffff) {
-        throw new Error(`Invalid stream aux length: ${auxBytes.byteLength}`);
-    }
-
-    const chunk =
-        frame.t === "chunk" && frame.chunk instanceof Uint8Array
-            ? frame.chunk
-            : new Uint8Array(0);
-    const out = new Uint8Array(
-        STREAM_CHUNK_MAGIC.length + 1 + 2 + 2 + idBytes.byteLength + auxBytes.byteLength + chunk.byteLength,
-    );
-    out.set(STREAM_CHUNK_MAGIC, 0);
-    let off = STREAM_CHUNK_MAGIC.length;
-    out[off] = typeCode & 0xff;
-    off += 1;
-    out[off] = (idBytes.byteLength >>> 8) & 0xff;
-    out[off + 1] = idBytes.byteLength & 0xff;
-    off += 2;
-    out[off] = (auxBytes.byteLength >>> 8) & 0xff;
-    out[off + 1] = auxBytes.byteLength & 0xff;
-    off += 2;
-    out.set(idBytes, off);
-    off += idBytes.byteLength;
-    out.set(auxBytes, off);
-    off += auxBytes.byteLength;
-    out.set(chunk, off);
-    if (typeof Buffer !== "undefined") {
-        return Buffer.from(out.buffer, out.byteOffset, out.byteLength);
-    }
-    return out;
-}
-
 /** Builds a stream-chunk envelope encoder with cached id/header bytes for hot write loops. */
 function createChunkEnvelopeEncoder(id: string): (chunk: Uint8Array) => Uint8Array {
     const idBytes = textEncoder.encode(id);
@@ -578,49 +500,6 @@ class HeaderCache {
     clear(id: string): void {
         this.chunkEnvelopeById.delete(id);
     }
-}
-
-/** Decodes a binary bridge envelope back into a logical stream frame object. */
-function decodeStreamFrameEnvelope(payload: unknown): StreamFrame | null {
-    const u8 = asUint8View(payload);
-    if (!u8) return null;
-    const minLen = STREAM_CHUNK_MAGIC.length + 1 + 2 + 2 + 1;
-    if (u8.byteLength < minLen) return null;
-
-    for (let i = 0; i < STREAM_CHUNK_MAGIC.length; i += 1) {
-        if (u8[i] !== STREAM_CHUNK_MAGIC[i]) return null;
-    }
-
-    let off = STREAM_CHUNK_MAGIC.length;
-    const typeCode = u8[off] >>> 0;
-    off += 1;
-    const t = STREAM_FRAME_CODE_TO_TYPE[typeCode];
-    if (!t) return null;
-
-    const idLen = ((u8[off] << 8) | u8[off + 1]) >>> 0;
-    off += 2;
-    const auxLen = ((u8[off] << 8) | u8[off + 1]) >>> 0;
-    off += 2;
-    if (idLen === 0) return null;
-    if (off + idLen + auxLen > u8.byteLength) return null;
-
-    const id = textDecoder.decode(u8.subarray(off, off + idLen));
-    if (!id) return null;
-    off += idLen;
-    const auxText = auxLen > 0 ? textDecoder.decode(u8.subarray(off, off + auxLen)) : "";
-    off += auxLen;
-
-    const frame: StreamFrame = {
-        [STREAM_BRIDGE_TAG]: true,
-        t,
-        id,
-    };
-    if (t === "open" && auxText) frame.key = auxText;
-    else if (t === "error" && auxText) frame.error = auxText;
-    else if (t === "cancel" && auxText) frame.reason = auxText;
-    else if (t === "credit") frame.credit = Number(auxText || "0");
-    else if (t === "chunk") frame.chunk = u8.subarray(off);
-    return frame;
 }
 
 /** Generates a high-entropy stream key used when callers do not provide one. */
@@ -812,6 +691,7 @@ export class DenoWorker {
     private readonly messageHandlers = new Set<DenoWorkerMessageHandler>();
     private readonly closeHandlers = new Set<DenoWorkerCloseHandler>();
     private readonly lifecycleHandlers = new Set<DenoWorkerLifecycleHandler>();
+    private readonly runtimeHandlers = new Set<DenoWorkerRuntimeHandler>();
     private readonly inFlightRejectors = new Set<(reason: unknown) => void>();
     private nativeEpoch = 0;
     private closeNotified = false;
@@ -860,6 +740,13 @@ export class DenoWorker {
         get: (path: string, options?: DenoWorkerHandleExecOptions) => this.handleGet(path, options),
         tryGet: (path: string, options?: DenoWorkerHandleExecOptions) => this.handleTryGet(path, options),
         eval: (source: string, options?: Omit<EvalOptions, "args" | "type">) => this.handleEval(source, options),
+    };
+    /** Module API for source evaluation and named module registry operations. */
+    readonly module: DenoWorkerModuleApi = {
+        eval: <T extends Record<string, any> = Record<string, any>>(source: string, options?: DenoWorkerModuleEvalOptions) =>
+            this.moduleEval<T>(source, options),
+        register: (moduleName: string, source: string) => this.moduleRegister(moduleName, source),
+        clear: (moduleName: string) => this.moduleClear(moduleName),
     };
 
     /** Allocates the next unique handle id scoped to the current native epoch. */
@@ -1027,25 +914,41 @@ export class DenoWorker {
                 optionsMaybe?: DenoWorkerHandleExecOptions,
             ) => {
                 ensureUsable();
+                const opId = `handle.call:${id}:${randomUUID()}`;
                 if (typeof pathOrArgs === "string") {
                     const p = pathOrArgs.trim();
                     if (!p) throw new Error("handle.call(path, args?) requires a non-empty path");
                     if (argsOrOptions !== undefined && !Array.isArray(argsOrOptions)) {
                         throw new Error("handle.call(path, args?, options?) expects args as an array when path is provided");
                     }
-                    return await self.runHandleCallOp(
-                        id,
-                        p,
-                        Array.isArray(argsOrOptions) ? argsOrOptions : [],
-                        toExecOptions(optionsMaybe),
-                    );
+                    const args = Array.isArray(argsOrOptions) ? argsOrOptions : [];
+                    self.emitRuntimeEvent({ kind: "handle.call.begin", opId, handleId: id, path: p, args });
+                    try {
+                        const out = await self.runHandleCallOp(id, p, args, toExecOptions(optionsMaybe));
+                        self.emitRuntimeEvent({ kind: "handle.call.end", opId, handleId: id, path: p, ok: true });
+                        return out;
+                    } catch (e) {
+                        self.emitRuntimeEvent({ kind: "handle.call.end", opId, handleId: id, path: p, ok: false });
+                        self.emitThrownError(opId, "handle.call", e);
+                        throw e;
+                    }
                 }
                 const args = pathOrArgs;
                 if (args !== undefined && !Array.isArray(args)) {
                     throw new Error("handle.call(args?) expects args as an array");
                 }
                 const execOptions = toExecOptions(optionsMaybe ?? (Array.isArray(argsOrOptions) ? undefined : argsOrOptions));
-                return await self.runHandleCallOp(id, "", Array.isArray(args) ? args : [], execOptions);
+                const callArgs = Array.isArray(args) ? args : [];
+                self.emitRuntimeEvent({ kind: "handle.call.begin", opId, handleId: id, path: "", args: callArgs });
+                try {
+                    const out = await self.runHandleCallOp(id, "", callArgs, execOptions);
+                    self.emitRuntimeEvent({ kind: "handle.call.end", opId, handleId: id, path: "", ok: true });
+                    return out;
+                } catch (e) {
+                    self.emitRuntimeEvent({ kind: "handle.call.end", opId, handleId: id, path: "", ok: false });
+                    self.emitThrownError(opId, "handle.call", e);
+                    throw e;
+                }
             },
             construct: async (args?: any[], options?: DenoWorkerHandleExecOptions) => {
                 ensureUsable();
@@ -1105,6 +1008,8 @@ export class DenoWorker {
                 disposed = true;
                 self.activeHandleIds.delete(id);
                 if (generation !== self.handleGeneration || self.isClosed()) return;
+                const opId = `handle.dispose:${id}`;
+                self.emitRuntimeEvent({ kind: "handle.dispose", opId, handleId: id });
                 try {
                     await self.runHandleOp({ op: "dispose", id }, toExecOptions(options));
                 } catch {
@@ -1207,10 +1112,34 @@ export class DenoWorker {
         }
     }
 
-    /** Initializes constructor-time globals and tracks startup readiness/error state. */
-    private initializeStartup(globals?: Record<string, any>): void {
-        const entries = globals && typeof globals === "object" ? Object.entries(globals) : [];
-        if (entries.length === 0) {
+    /** Registers a module source in native runtime without waiting on startup gates. */
+    private async registerModuleInternal(moduleName: string, source: string): Promise<void> {
+        const name = String(moduleName ?? "").trim();
+        if (!name) throw new Error("registerModule(moduleName, source) requires non-empty moduleName");
+        if (typeof this.native.registerModule !== "function") {
+            throw new Error("registerModule is not available in this runtime");
+        }
+        await this.trackInFlight(this.native.registerModule(name, String(source ?? "")));
+    }
+
+    /** Clears a module source from native runtime without waiting on startup gates. */
+    private async clearModuleInternal(moduleName: string): Promise<boolean> {
+        const name = String(moduleName ?? "").trim();
+        if (!name) throw new Error("clearModule(moduleName) requires non-empty moduleName");
+        if (typeof this.native.clearModule !== "function") {
+            throw new Error("clearModule is not available in this runtime");
+        }
+        return Boolean(await this.trackInFlight(this.native.clearModule(name)));
+    }
+
+    /** Initializes constructor-time globals/modules and tracks startup readiness/error state. */
+    private initializeStartup(globals?: Record<string, any>, modules?: Record<string, string>): void {
+        const globalEntries = globals && typeof globals === "object" ? Object.entries(globals) : [];
+        const moduleEntriesRaw = modules && typeof modules === "object" ? Object.entries(modules) : [];
+        const moduleEntries = moduleEntriesRaw
+            .map(([name, source]) => [String(name ?? "").trim(), String(source ?? "")] as const)
+            .filter(([name]) => name.length > 0);
+        if (globalEntries.length === 0 && moduleEntries.length === 0) {
             this.startupReady = true;
             this.startupError = null;
             this.startupPromise = Promise.resolve();
@@ -1220,7 +1149,10 @@ export class DenoWorker {
         this.startupReady = false;
         this.startupError = null;
         this.startupPromise = (async () => {
-            for (const [k, v] of entries) {
+            for (const [name, source] of moduleEntries) {
+                await this.registerModuleInternal(name, source);
+            }
+            for (const [k, v] of globalEntries) {
                 await this.setGlobalInternal(k, v);
             }
         })()
@@ -1262,6 +1194,32 @@ export class DenoWorker {
                 }
             }
         }
+    }
+
+    /** Emits runtime events to `on("runtime")` listeners with auto timestamping. */
+    private emitRuntimeEvent(event: Omit<DenoWorkerRuntimeEvent, "ts"> & { ts?: number }): void {
+        if (this.runtimeHandlers.size === 0) return;
+        const payload = {
+            ...event,
+            ts: typeof event.ts === "number" ? event.ts : Date.now(),
+        } as DenoWorkerRuntimeEvent;
+        for (const cb of [...this.runtimeHandlers]) {
+            try {
+                cb(payload);
+            } catch {
+                // ignore runtime subscriber errors
+            }
+        }
+    }
+
+    /** Emits standardized user-visible thrown error events. */
+    private emitThrownError(opId: string, surface: string, error: unknown): void {
+        this.emitRuntimeEvent({
+            kind: "error.thrown",
+            opId,
+            surface,
+            error,
+        });
     }
 
     /** Constructs a new native worker instance and routes creation failures through crash hooks. */
@@ -1350,6 +1308,14 @@ export class DenoWorker {
                     requested: false,
                 });
             }
+        });
+
+        native.on("runtime", (event: any) => {
+            if (epoch !== this.nativeEpoch) return;
+            const hydrated = this.canBypassWireHydration(event) ? event : hydrateFromWire(event);
+            if (!hydrated || typeof hydrated !== "object") return;
+            const payload = hydrated as DenoWorkerRuntimeEvent;
+            this.emitRuntimeEvent(payload);
         });
     }
 
@@ -1593,7 +1559,7 @@ export class DenoWorker {
     }
 
     /** Rejects an incoming stream open request by emitting error+discard control frames. */
-    private rejectIncomingOpen(id: string, name: string, reason: string): void {
+    private rejectIncomingOpen(id: string, reason: string): void {
         this.pendingIncomingStreamFrames.delete(id);
         this.emitStreamFrame({ t: "error", id, error: reason });
         this.emitStreamFrame({ t: "discard", id });
@@ -1627,11 +1593,11 @@ export class DenoWorker {
             case "open": {
                 const key = typeof frame.key === "string" && frame.key ? frame.key : frame.id;
                 if (this.streamNameToId.has(key) || this.streamBacklog.has(key)) {
-                    this.rejectIncomingOpen(frame.id, key, `Stream key already in use: ${key}`);
+                    this.rejectIncomingOpen(frame.id, `Stream key already in use: ${key}`);
                     return true;
                 }
                 if (!this.streamPendingAccepts.has(key) && this.streamBacklog.size >= this.streamBacklogLimit) {
-                    this.rejectIncomingOpen(frame.id, key, `Stream backlog limit reached (${this.streamBacklogLimit})`);
+                    this.rejectIncomingOpen(frame.id, `Stream backlog limit reached (${this.streamBacklogLimit})`);
                     return true;
                 }
                 this.registerStream(key, frame.id);
@@ -1835,7 +1801,7 @@ export class DenoWorker {
         this.native = this.createNative(false);
         this.nativeEpoch += 1;
         this.bindNativeEvents(this.native, this.nativeEpoch);
-        this.initializeStartup(options?.globals);
+        this.initializeStartup(options?.globals, options?.modules);
         this.invokeHook("afterStart");
     }
 
@@ -1846,6 +1812,7 @@ export class DenoWorker {
      * - `message`: receives payloads posted from runtime `postMessage(...)`.
      * - `close`: emitted once runtime closes.
      * - `lifecycle`: emits lifecycle transitions and crash/requested flags.
+     * - `runtime`: emits runtime execution/import/handle events.
      *
      * @example
      * ```ts
@@ -1856,7 +1823,11 @@ export class DenoWorker {
     on(event: "message", cb: DenoWorkerMessageHandler): void;
     on(event: "close", cb: DenoWorkerCloseHandler): void;
     on(event: "lifecycle", cb: DenoWorkerLifecycleHandler): void;
-    on(event: DenoWorkerEvent, cb: DenoWorkerMessageHandler | DenoWorkerCloseHandler | DenoWorkerLifecycleHandler): void {
+    on(event: "runtime", cb: DenoWorkerRuntimeHandler): void;
+    on(
+        event: DenoWorkerEvent,
+        cb: DenoWorkerMessageHandler | DenoWorkerCloseHandler | DenoWorkerLifecycleHandler | DenoWorkerRuntimeHandler,
+    ): void {
         if (event === "message") {
             if (typeof cb === "function") this.messageHandlers.add(cb as DenoWorkerMessageHandler);
             return;
@@ -1867,6 +1838,10 @@ export class DenoWorker {
         }
         if (event === "lifecycle" && typeof cb === "function") {
             this.lifecycleHandlers.add(cb as DenoWorkerLifecycleHandler);
+            return;
+        }
+        if (event === "runtime" && typeof cb === "function") {
+            this.runtimeHandlers.add(cb as DenoWorkerRuntimeHandler);
         }
     }
 
@@ -1886,7 +1861,11 @@ export class DenoWorker {
     off(event: "message", cb?: DenoWorkerMessageHandler): void;
     off(event: "close", cb?: DenoWorkerCloseHandler): void;
     off(event: "lifecycle", cb?: DenoWorkerLifecycleHandler): void;
-    off(event: DenoWorkerEvent, cb?: DenoWorkerMessageHandler | DenoWorkerCloseHandler | DenoWorkerLifecycleHandler): void {
+    off(event: "runtime", cb?: DenoWorkerRuntimeHandler): void;
+    off(
+        event: DenoWorkerEvent,
+        cb?: DenoWorkerMessageHandler | DenoWorkerCloseHandler | DenoWorkerLifecycleHandler | DenoWorkerRuntimeHandler,
+    ): void {
         if (event === "message") {
             if (cb) this.messageHandlers.delete(cb as DenoWorkerMessageHandler);
             else this.messageHandlers.clear();
@@ -1895,6 +1874,11 @@ export class DenoWorker {
         if (event === "close") {
             if (cb) this.closeHandlers.delete(cb as DenoWorkerCloseHandler);
             else this.closeHandlers.clear();
+            return;
+        }
+        if (event === "runtime") {
+            if (cb) this.runtimeHandlers.delete(cb as DenoWorkerRuntimeHandler);
+            else this.runtimeHandlers.clear();
             return;
         }
         if (cb) this.lifecycleHandlers.delete(cb as DenoWorkerLifecycleHandler);
@@ -2570,7 +2554,7 @@ export class DenoWorker {
         this.native = this.createNative(true);
         this.nativeEpoch += 1;
         this.bindNativeEvents(this.native, this.nativeEpoch);
-        this.initializeStartup(this.creationOptions?.globals);
+        this.initializeStartup(this.creationOptions?.globals, this.creationOptions?.modules);
         await this.startupPromise;
         this.invokeHook("afterStart");
     }
@@ -2611,6 +2595,8 @@ export class DenoWorker {
         if (!p) throw new Error("handle.get(path) requires a non-empty path");
         this.ensureHandleCapacity();
         const id = this.nextHandleId();
+        const opId = `handle.create:${id}`;
+        this.emitRuntimeEvent({ kind: "handle.create", opId, handleId: id, source: "path", path: p });
         const defaultExecOptions: Omit<EvalOptions, "args" | "type"> | undefined =
             typeof options?.maxEvalMs === "number" || typeof options?.maxCpuMs === "number"
                 ? {
@@ -2618,7 +2604,12 @@ export class DenoWorker {
                     ...(typeof options?.maxCpuMs === "number" ? { maxCpuMs: options.maxCpuMs } : {}),
                 }
                 : undefined;
-        await this.runHandleOp({ op: "createFromPath", id, path: p }, defaultExecOptions);
+        try {
+            await this.runHandleOp({ op: "createFromPath", id, path: p }, defaultExecOptions);
+        } catch (e) {
+            this.emitThrownError(opId, "handle.create", e);
+            throw e;
+        }
         const rootType = (await this.runHandleOp({ op: "getType", id, path: "" }, defaultExecOptions)) as DenoWorkerHandleTypeInfo;
         this.activeHandleIds.add(id);
         return this.createHandle(id, this.handleGeneration, rootType, defaultExecOptions);
@@ -2641,6 +2632,8 @@ export class DenoWorker {
         if (!src.trim()) throw new Error("handle.eval(source) requires non-empty source");
         this.ensureHandleCapacity();
         const id = this.nextHandleId();
+        const opId = `handle.create:${id}`;
+        this.emitRuntimeEvent({ kind: "handle.create", opId, handleId: id, source: "eval" });
         const defaultExecOptions: Omit<EvalOptions, "args" | "type"> | undefined =
             options &&
             (typeof options.maxEvalMs === "number" ||
@@ -2652,7 +2645,12 @@ export class DenoWorker {
                     ...(typeof options.filename === "string" ? { filename: options.filename } : {}),
                 }
                 : undefined;
-        await this.runHandleOp({ op: "createFromEval", id, source: src }, defaultExecOptions);
+        try {
+            await this.runHandleOp({ op: "createFromEval", id, source: src }, defaultExecOptions);
+        } catch (e) {
+            this.emitThrownError(opId, "handle.create", e);
+            throw e;
+        }
         const rootType = (await this.runHandleOp({ op: "getType", id, path: "" }, defaultExecOptions)) as DenoWorkerHandleTypeInfo;
         this.activeHandleIds.add(id);
         return this.createHandle(id, this.handleGeneration, rootType, defaultExecOptions);
@@ -2664,17 +2662,28 @@ export class DenoWorker {
      * If evaluated source resolves to a Promise, this method waits until fulfillment/rejection.
      */
     eval(src: string, options?: EvalOptions): Promise<any> {
+        const opId = `eval:${randomUUID()}`;
+        this.emitRuntimeEvent({
+            kind: "eval.begin",
+            opId,
+            args: Array.isArray(options?.args) ? options?.args : [],
+        });
         const op = (async () => {
             if (!this.startupReady) {
                 await this.startupPromise;
             } else if (this.startupError) {
+                this.emitRuntimeEvent({ kind: "eval.end", opId, ok: false });
                 throw this.startupError;
             }
             try {
                 const raw = await this.trackInFlight(this.native.eval(src, normalizeEvalOptions(options)));
+                this.emitRuntimeEvent({ kind: "eval.end", opId, ok: true });
                 return hydrateFromWire(raw);
             } catch (e) {
-                throw hydrateFromWire(e);
+                const hydrated = hydrateFromWire(e);
+                this.emitRuntimeEvent({ kind: "eval.end", opId, ok: false });
+                this.emitThrownError(opId, "eval", hydrated);
+                throw hydrated;
             }
         })();
         // Keep rejection semantics unchanged for callers while preventing
@@ -2689,39 +2698,45 @@ export class DenoWorker {
      * Throws while constructor globals are still initializing.
      */
     evalSync(src: string, options?: EvalOptions): any {
+        const opId = `evalSync:${randomUUID()}`;
+        this.emitRuntimeEvent({
+            kind: "evalSync.begin",
+            opId,
+            args: Array.isArray(options?.args) ? options?.args : [],
+        });
         if (!this.startupReady) {
+            this.emitRuntimeEvent({ kind: "evalSync.end", opId, ok: false });
             throw new Error(
                 "DenoWorker.evalSync cannot run while constructor globals are still initializing; use eval(...) or await startup completion",
             );
         }
         if (this.startupError) {
+            this.emitRuntimeEvent({ kind: "evalSync.end", opId, ok: false });
             throw this.startupError;
         }
         try {
             const raw = this.native.evalSync(src, normalizeEvalOptions(options));
+            this.emitRuntimeEvent({ kind: "evalSync.end", opId, ok: true });
             return hydrateFromWire(raw);
         } catch (e) {
-            throw hydrateFromWire(e);
+            const hydrated = hydrateFromWire(e);
+            this.emitRuntimeEvent({ kind: "evalSync.end", opId, ok: false });
+            this.emitThrownError(opId, "evalSync", hydrated);
+            throw hydrated;
         }
     }
 
-    /**
-     * Evaluate ES module source and return a callable namespace proxy.
-     *
-     * Function exports are wrapped as Node-callable host functions.
-     * Non-function exports are hydrated to equivalent host-side values.
-     *
-     * @example
-     * ```ts
-     * const mod = await dw.evalModule(`export const x = 1; export function add(a,b){return a+b}`);
-     * const n = await mod.add(2, 3); // 5
-     * ```
-     */
-    async evalModule<T extends Record<string, any> = Record<string, any>>(
+    private async moduleEval<T extends Record<string, any> = Record<string, any>>(
         source: string,
-        options?: Omit<EvalOptions, "type">,
+        options?: DenoWorkerModuleEvalOptions,
     ): Promise<T> {
         await this.startupPromise;
+        const moduleName = typeof options?.moduleName === "string" ? options.moduleName.trim() : "";
+        if (moduleName) {
+            await this.registerModuleInternal(moduleName, source);
+            return this.importModule<T>(moduleName);
+        }
+
         let raw: any;
         try {
             if (typeof this.native.evalModule === "function") {
@@ -2737,6 +2752,18 @@ export class DenoWorker {
         return wrapModuleNamespace<T>(this, hydrateFromWire(raw));
     }
 
+    /** Module API entrypoint: register module source under a stable module name. */
+    private async moduleRegister(moduleName: string, source: string): Promise<void> {
+        await this.startupPromise;
+        await this.registerModuleInternal(moduleName, source);
+    }
+
+    /** Module API entrypoint: clear a previously registered module by name. */
+    private async moduleClear(moduleName: string): Promise<boolean> {
+        await this.startupPromise;
+        return await this.clearModuleInternal(moduleName);
+    }
+
     /**
      * Import a module specifier and return a callable namespace proxy.
      *
@@ -2750,43 +2777,7 @@ export class DenoWorker {
             throw new Error(`WASM module loading is disabled by permissions.wasm: ${spec}`);
         }
 
-        const specJson = JSON.stringify(spec);
-        const source = `(async () => {
-            const spec = ${specJson};
-            const m = await import(spec);
-            const o = Object.create(null);
-            const moduleFnKeys = [];
-            const moduleAsyncFnKeys = [];
-            o.__denojs_worker_module_spec = spec;
-
-            for (const k of Object.keys(m)) {
-                const v = m[k];
-                if (typeof v === "function") {
-                    const isAsync = Object.prototype.toString.call(v) === "[object AsyncFunction]";
-                    o[k] = { __denojs_worker_type: "module_fn", spec, name: k, async: isAsync };
-                    moduleFnKeys.push(k);
-                    if (isAsync) moduleAsyncFnKeys.push(k);
-                } else {
-                    o[k] = v;
-                }
-            }
-
-            if ("default" in m) {
-                const dv = m.default;
-                if (typeof dv === "function") {
-                    const isDefaultAsync = Object.prototype.toString.call(dv) === "[object AsyncFunction]";
-                    o.default = { __denojs_worker_type: "module_fn", spec, name: "default", async: isDefaultAsync };
-                    if (!moduleFnKeys.includes("default")) moduleFnKeys.push("default");
-                    if (isDefaultAsync && !moduleAsyncFnKeys.includes("default")) moduleAsyncFnKeys.push("default");
-                } else {
-                    o.default = dv;
-                }
-            }
-
-            if (moduleFnKeys.length) o.__denojs_worker_module_fns = moduleFnKeys;
-            if (moduleAsyncFnKeys.length) o.__denojs_worker_module_async_fns = moduleAsyncFnKeys;
-            return o;
-        })()`;
+        const source = buildImportModuleSource(spec);
 
         const raw = await this.eval(source);
         return wrapModuleNamespace<T>(this, raw);

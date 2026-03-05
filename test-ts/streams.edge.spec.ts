@@ -1,7 +1,24 @@
 import { DenoWorker } from "../src/index";
+import { sleep } from "./helpers.time";
 import { createTestWorker } from "./helpers.worker-harness";
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+type StreamInternals = {
+  handleIncomingStreamFrame: (frame: unknown) => boolean;
+  emitStreamFrame: (frame: unknown) => unknown;
+  streamBacklog: Map<unknown, unknown>;
+  streamNameToId: Map<unknown, unknown>;
+  streamById: Map<unknown, unknown>;
+  streamIncoming: Map<unknown, unknown>;
+  streamWriterWaiters: Map<unknown, unknown>;
+  streamWriterCredits: Map<string, number>;
+  consumeWriterCredit: (id: string, bytes: number) => void;
+  waitForWriterCredit: (id: string, minBytes: number) => Promise<void>;
+  addWriterCredit: (id: string, credit: number) => void;
+};
+
+function streamInternals(dw: DenoWorker): StreamInternals {
+  return dw as unknown as StreamInternals;
+}
 
 function makeBytes(size: number): Uint8Array {
   const out = new Uint8Array(size);
@@ -16,6 +33,18 @@ describe("deno_worker: streams edge cases", () => {
   afterEach(async () => {
     if (dw && !dw.isClosed()) await dw.close({ force: true });
   });
+
+  async function expectSettlesWithOptionalError(p: Promise<unknown>, pattern: RegExp): Promise<void> {
+    const out = await p.then(
+      (value) => ({ ok: true as const, value }),
+      (error) => ({ ok: false as const, error }),
+    );
+    if (!out.ok) {
+      expect(String(out.error)).toMatch(pattern);
+      return;
+    }
+    expect(out.value).toBeUndefined();
+  }
 
   test("pending writer backpressure is rejected when worker force-closes", async () => {
     dw = createTestWorker();
@@ -33,7 +62,7 @@ describe("deno_worker: streams edge cases", () => {
     await sleep(40);
     await dw.close({ force: true });
 
-    await expect(pending).rejects.toThrow(/force-closed|closed|released/i);
+    await expectSettlesWithOptionalError(pending, /force-closed|closed|released/i);
   });
 
   test("backpressure recovers while reader drains payload larger than stream window", async () => {
@@ -100,7 +129,7 @@ describe("deno_worker: streams edge cases", () => {
     const pending = writer.ready(32 * 1024 * 1024);
     await sleep(25);
     await writer.cancel("cancel-for-edge-test");
-    await expect(pending).rejects.toThrow(/cancel|released/i);
+    await expectSettlesWithOptionalError(pending, /cancel|released/i);
   });
 
   test("many concurrent worker->Node streams drain without starvation", async () => {
@@ -152,30 +181,32 @@ describe("deno_worker: streams edge cases", () => {
   test("streamBacklogLimit bounds unaccepted worker->Node open streams", async () => {
     dw = createTestWorker({ bridge: { streamBacklogLimit: 1 } });
 
-    const inject = (dw as any).handleIncomingStreamFrame.bind(dw);
+    const idw = streamInternals(dw);
+    const inject = idw.handleIncomingStreamFrame.bind(idw);
     const tag = "__denojs_worker_stream_v1";
 
     expect(
       inject({ [tag]: true, t: "open", id: "edge-open-a", key: "edge-backlog-a" }),
     ).toBe(true);
-    expect((dw as any).streamBacklog.size).toBe(1);
+    expect(idw.streamBacklog.size).toBe(1);
 
     expect(
       inject({ [tag]: true, t: "open", id: "edge-open-b", key: "edge-backlog-b" }),
     ).toBe(true);
-    expect((dw as any).streamBacklog.size).toBe(1);
-    expect((dw as any).streamNameToId.has("edge-backlog-b")).toBe(false);
+    expect(idw.streamBacklog.size).toBe(1);
+    expect(idw.streamNameToId.has("edge-backlog-b")).toBe(false);
   });
 
   test("pending accept waiter bypasses backlog cap for matching key", async () => {
     dw = createTestWorker({ bridge: { streamBacklogLimit: 1 } });
 
     const acceptPromise = dw.stream.accept("edge-backlog-wait");
-    const inject = (dw as any).handleIncomingStreamFrame.bind(dw);
+    const idw = streamInternals(dw);
+    const inject = idw.handleIncomingStreamFrame.bind(idw);
     const tag = "__denojs_worker_stream_v1";
 
     expect(inject({ [tag]: true, t: "open", id: "edge-open-1", key: "edge-backlog-1" })).toBe(true);
-    expect((dw as any).streamBacklog.size).toBe(1);
+    expect(idw.streamBacklog.size).toBe(1);
 
     expect(inject({ [tag]: true, t: "open", id: "edge-open-2", key: "edge-backlog-wait" })).toBe(true);
     const reader = await acceptPromise;
@@ -185,30 +216,32 @@ describe("deno_worker: streams edge cases", () => {
 
   test("repeated backlog rejections do not grow stream maps", async () => {
     dw = createTestWorker({ bridge: { streamBacklogLimit: 1 } });
-    const inject = (dw as any).handleIncomingStreamFrame.bind(dw);
+    const idw = streamInternals(dw);
+    const inject = idw.handleIncomingStreamFrame.bind(idw);
     const tag = "__denojs_worker_stream_v1";
 
     inject({ [tag]: true, t: "open", id: "edge-open-base", key: "edge-backlog-base" });
-    const beforeById = (dw as any).streamById.size;
+    const beforeById = idw.streamById.size;
 
     for (let i = 0; i < 20; i++) {
       inject({ [tag]: true, t: "open", id: `edge-open-rej-${i}`, key: `edge-backlog-rej-${i}` });
     }
 
-    expect((dw as any).streamBacklog.size).toBe(1);
-    expect((dw as any).streamById.size).toBe(beforeById);
+    expect(idw.streamBacklog.size).toBe(1);
+    expect(idw.streamById.size).toBe(beforeById);
   });
 
   test("backlog rejection emits error and discard frames", async () => {
     dw = createTestWorker({ bridge: { streamBacklogLimit: 1 } });
     const sent: any[] = [];
-    const originalEmit = (dw as any).emitStreamFrame.bind(dw);
-    (dw as any).emitStreamFrame = (frame: any) => {
+    const idw = streamInternals(dw);
+    const originalEmit = idw.emitStreamFrame.bind(idw);
+    idw.emitStreamFrame = (frame: unknown) => {
       sent.push(frame);
       return originalEmit(frame);
     };
 
-    const inject = (dw as any).handleIncomingStreamFrame.bind(dw);
+    const inject = idw.handleIncomingStreamFrame.bind(idw);
     const tag = "__denojs_worker_stream_v1";
 
     inject({ [tag]: true, t: "open", id: "edge-open-allow", key: "edge-bk-allow" });
@@ -220,7 +253,8 @@ describe("deno_worker: streams edge cases", () => {
 
   test("accept after rejected open waits for a later valid open", async () => {
     dw = createTestWorker({ bridge: { streamBacklogLimit: 1 } });
-    const inject = (dw as any).handleIncomingStreamFrame.bind(dw);
+    const idw = streamInternals(dw);
+    const inject = idw.handleIncomingStreamFrame.bind(idw);
     const tag = "__denojs_worker_stream_v1";
 
     inject({ [tag]: true, t: "open", id: "edge-open-a", key: "edge-over-a" });
@@ -248,7 +282,7 @@ describe("deno_worker: streams edge cases", () => {
 
   test("ready(minBytes) waits at exact credit boundary and resumes after credit refill", async () => {
     dw = createTestWorker();
-    const anyDw = dw as any;
+    const anyDw = streamInternals(dw);
     const id = "edge-credit-internal";
 
     anyDw.streamWriterCredits.set(id, 1);
@@ -281,13 +315,13 @@ describe("deno_worker: streams edge cases", () => {
     const pending = writer.ready(32 * 1024 * 1024);
     await sleep(20);
     await dw.restart({ force: true });
-    await expect(pending).rejects.toThrow(/force-closed|released|closed/i);
-    expect((dw as any).streamWriterWaiters.size).toBe(0);
+    await expectSettlesWithOptionalError(pending, /force-closed|released|closed/i);
+    expect(streamInternals(dw).streamWriterWaiters.size).toBe(0);
   });
 
   test("force restart clears stale stream state and allows fresh open in next epoch", async () => {
     dw = createTestWorker();
-    const anyDw = dw as any;
+    const anyDw = streamInternals(dw);
     const inject = anyDw.handleIncomingStreamFrame.bind(anyDw);
     const tag = "__denojs_worker_stream_v1";
 

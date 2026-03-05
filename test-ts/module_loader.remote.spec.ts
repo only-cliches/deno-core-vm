@@ -2,7 +2,6 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { DenoWorker } from "../src/index";
 import { createTestWorker } from "./helpers.worker-harness";
 
 function isBindPermissionError(err: any): boolean {
@@ -79,7 +78,7 @@ describe("moduleLoader.httpsResolve MVP", () => {
         import { Application } from "${srv.base}/oak/mod.ts";
         export const out = typeof Application;
       `;
-      await expect(dw.evalModule(src)).rejects.toBeTruthy();
+      await expect(dw.module.eval(src)).rejects.toBeTruthy();
     } finally {
       if (!dw.isClosed()) await dw.close();
       await srv.close();
@@ -114,7 +113,7 @@ describe("moduleLoader.httpsResolve MVP", () => {
         import { Application } from "${srv.base}/oak/mod.ts";
         export const out = Application.kind;
       `;
-      await expect(dw.evalModule(src)).resolves.toMatchObject({ out: "oak" });
+      await expect(dw.module.eval(src)).resolves.toMatchObject({ out: "oak" });
     } finally {
       if (!dw.isClosed()) await dw.close();
       await srv.close();
@@ -145,7 +144,7 @@ describe("moduleLoader.httpsResolve MVP", () => {
         import { ok } from "${srv.base}/oak/mod.ts";
         export const out = ok;
       `;
-      await expect(dw.evalModule(src)).resolves.toMatchObject({ out: "yes" });
+      await expect(dw.module.eval(src)).resolves.toMatchObject({ out: "yes" });
     } finally {
       if (!dw.isClosed()) await dw.close();
       await srv.close();
@@ -177,7 +176,7 @@ describe("moduleLoader.httpsResolve MVP", () => {
         import { v } from "${srv.base}/oak/mod.ts";
         export const out = v;
       `;
-      await expect(dw.evalModule(src)).rejects.toBeTruthy();
+      await expect(dw.module.eval(src)).rejects.toBeTruthy();
     } finally {
       if (!dw.isClosed()) await dw.close();
       await srv.close();
@@ -208,7 +207,7 @@ describe("moduleLoader.httpsResolve MVP", () => {
         import { v } from "${srv.base}/oak/mod.ts";
         export const out = v;
       `;
-      await expect(dw.evalModule(src)).rejects.toBeTruthy();
+      await expect(dw.module.eval(src)).rejects.toBeTruthy();
     } finally {
       if (!dw.isClosed()) await dw.close();
       await srv.close();
@@ -241,7 +240,7 @@ describe("moduleLoader.httpsResolve MVP", () => {
         import { v } from "${confusedHost}";
         export const out = v;
       `;
-      await expect(dw.evalModule(src)).rejects.toBeTruthy();
+      await expect(dw.module.eval(src)).rejects.toBeTruthy();
     } finally {
       if (!dw.isClosed()) await dw.close();
       await srv.close();
@@ -258,7 +257,7 @@ describe("moduleLoader.httpsResolve MVP", () => {
         import { x } from "virtual:never";
         export const out = x;
       `;
-      await expect(withHardTimeout(dw.evalModule(src), 7000)).rejects.toBeTruthy();
+      await expect(withHardTimeout(dw.module.eval(src), 7000)).rejects.toBeTruthy();
     } finally {
       if (!dw.isClosed()) await dw.close({ force: true }).catch(() => undefined);
     }
@@ -276,7 +275,7 @@ describe("moduleLoader.httpsResolve MVP", () => {
         import { assert } from "jsr:@std/assert";
         export const out = typeof assert;
       `;
-      await expect(dw.evalModule(src)).rejects.toBeTruthy();
+      await expect(dw.module.eval(src)).rejects.toBeTruthy();
     } finally {
       if (!dw.isClosed()) await dw.close();
     }
@@ -294,7 +293,7 @@ describe("moduleLoader.httpsResolve MVP", () => {
         import { assert } from "@std/assert";
         export const out = typeof assert;
       `;
-      await expect(withHardTimeout(dw.evalModule(src), 12000)).rejects.toThrow(/jsr\.io/i);
+      await expect(withHardTimeout(dw.module.eval(src), 12000)).rejects.toThrow(/jsr\.io/i);
     } finally {
       if (!dw.isClosed()) await dw.close().catch(() => undefined);
     }
@@ -323,7 +322,7 @@ describe("moduleLoader.httpsResolve MVP", () => {
         import { data } from "${srv.base}/big/mod.ts";
         export const out = data.length;
       `;
-      await expect(dw.evalModule(src)).rejects.toThrow(/payload too large/i);
+      await expect(dw.module.eval(src)).rejects.toThrow(/payload too large/i);
     } finally {
       if (!dw.isClosed()) await dw.close();
       await srv.close();
@@ -357,10 +356,10 @@ describe("moduleLoader.httpsResolve MVP", () => {
 
     try {
       await expect(
-        ok.evalModule(`import { v } from "${srv.base}/ok/mod.ts"; export const out = v;`),
+        ok.module.eval(`import { v } from "${srv.base}/ok/mod.ts"; export const out = v;`),
       ).resolves.toMatchObject({ out: 42 });
       await expect(
-        bad.evalModule(`import { v } from "${srv.base}/ok/mod.ts"; export const out = v;`),
+        bad.module.eval(`import { v } from "${srv.base}/ok/mod.ts"; export const out = v;`),
       ).rejects.toThrow(/permissions\.import|denied/i);
     } finally {
       if (!ok.isClosed()) await ok.close();
@@ -388,7 +387,7 @@ describe("moduleLoader.httpsResolve MVP", () => {
 
     try {
       const src = `import { v } from "${srv.base}/api/mod.ts"; export const out = v;`;
-      await expect(dw.evalModule(src)).rejects.toThrow(/permissions\.import|denied/i);
+      await expect(dw.module.eval(src)).rejects.toThrow(/permissions\.import|denied/i);
     } finally {
       if (!dw.isClosed()) await dw.close();
       await srv.close();
@@ -416,7 +415,7 @@ describe("moduleLoader.httpsResolve MVP", () => {
 
     try {
       const src = `import { v } from "${srv.base}/q/mod.ts?x=1#frag"; export const out = v;`;
-      await expect(dw.evalModule(src)).resolves.toMatchObject({ out: "q-ok" });
+      await expect(dw.module.eval(src)).resolves.toMatchObject({ out: "q-ok" });
     } finally {
       if (!dw.isClosed()) await dw.close();
       await srv.close();

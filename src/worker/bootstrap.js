@@ -2,6 +2,15 @@
 // Extension ESM entrypoint.
 
 import * as coreMod from "ext:core/mod.js";
+import {
+  STREAM_BRIDGE_TAG,
+  STREAM_TYPED_CHUNK_PREFIX,
+  STREAM_TYPED_CONTROL_PREFIX,
+  decodeStreamFrameEnvelope,
+  decodeTypedStreamChunkMessage,
+  decodeTypedStreamControlMessage,
+  encodeStreamFrameEnvelope,
+} from "../shared/stream-envelope.ts";
 
 // Resolve the core API across Deno core versions and export shapes.
 function getCoreApi() {
@@ -582,30 +591,6 @@ try {
 
 globalThis.__nodeOnMessageHandlers = [];
 globalThis.__nodeMessageEventListeners = [];
-const STREAM_BRIDGE_TAG = "__denojs_worker_stream_v1";
-const STREAM_TYPED_CHUNK_PREFIX = "__denojs_worker_stream_chunk_v1:";
-const STREAM_TYPED_CONTROL_PREFIX = "__denojs_worker_stream_control_v1:";
-const STREAM_CHUNK_MAGIC = [0x44, 0x44, 0x53, 0x54, 0x52, 0x4d, 0x31, 0x00];
-const streamTextEncoder = new TextEncoder();
-const streamTextDecoder = new TextDecoder();
-const STREAM_FRAME_TYPE_TO_CODE = {
-  open: 1,
-  chunk: 2,
-  close: 3,
-  error: 4,
-  cancel: 5,
-  discard: 6,
-  credit: 7,
-};
-const STREAM_FRAME_CODE_TO_TYPE = {
-  1: "open",
-  2: "chunk",
-  3: "close",
-  4: "error",
-  5: "cancel",
-  6: "discard",
-  7: "credit",
-};
 const STREAM_DEFAULT_WINDOW_BYTES = 256 * 1024 * 1024;
 const STREAM_CREDIT_FLUSH_THRESHOLD = 256 * 1024;
 const STREAM_READER_DEFAULT_HIGH_WATER_MARK_BYTES = STREAM_DEFAULT_WINDOW_BYTES;
@@ -654,133 +639,10 @@ function isStreamFrame(payload) {
   );
 }
 
-function encodeStreamFrameEnvelope(frame) {
-  const typeCode = STREAM_FRAME_TYPE_TO_CODE[String(frame && frame.t || "")];
-  if (!typeCode) throw new Error("Invalid stream frame type");
-
-  const idBytes = streamTextEncoder.encode(String(frame && frame.id || ""));
-  if (!idBytes || idBytes.length === 0 || idBytes.length > 0xffff) {
-    throw new Error("Invalid stream id length");
-  }
-
-  let aux = "";
-  if (frame.t === "open") aux = frame.key == null ? "" : String(frame.key);
-  else if (frame.t === "error") aux = frame.error == null ? "" : String(frame.error);
-  else if (frame.t === "cancel") aux = frame.reason == null ? "" : String(frame.reason);
-  else if (frame.t === "credit") aux = String(Math.max(0, Math.trunc(frame.credit || 0)));
-  const auxBytes = streamTextEncoder.encode(aux);
-  if (auxBytes.length > 0xffff) throw new Error("Invalid stream frame aux length");
-
-  const chunk = frame.t === "chunk" ? toStreamChunk(frame.chunk) : null;
-  const chunkBytes = chunk || new Uint8Array(0);
-  const out = new Uint8Array(
-    STREAM_CHUNK_MAGIC.length + 1 + 2 + 2 + idBytes.length + auxBytes.length + chunkBytes.byteLength
-  );
-  out.set(STREAM_CHUNK_MAGIC, 0);
-  let off = STREAM_CHUNK_MAGIC.length;
-  out[off] = typeCode & 0xff;
-  off += 1;
-  out[off] = (idBytes.length >>> 8) & 0xff;
-  out[off + 1] = idBytes.length & 0xff;
-  off += 2;
-  out[off] = (auxBytes.length >>> 8) & 0xff;
-  out[off + 1] = auxBytes.length & 0xff;
-  off += 2;
-  out.set(idBytes, off);
-  off += idBytes.length;
-  out.set(auxBytes, off);
-  off += auxBytes.length;
-  out.set(chunkBytes, off);
-  return out;
-}
-
-function decodeStreamFrameEnvelope(payload) {
-  const u8 = toStreamChunk(payload);
-  if (!u8) return null;
-  const minLen = STREAM_CHUNK_MAGIC.length + 1 + 2 + 2 + 1;
-  if (u8.byteLength < minLen) return null;
-  for (let i = 0; i < STREAM_CHUNK_MAGIC.length; i += 1) {
-    if (u8[i] !== STREAM_CHUNK_MAGIC[i]) return null;
-  }
-  let off = STREAM_CHUNK_MAGIC.length;
-  const typeCode = u8[off] >>> 0;
-  off += 1;
-  const t = STREAM_FRAME_CODE_TO_TYPE[typeCode];
-  if (!t) return null;
-  const idLen = ((u8[off] << 8) | u8[off + 1]) >>> 0;
-  off += 2;
-  const auxLen = ((u8[off] << 8) | u8[off + 1]) >>> 0;
-  off += 2;
-  if (idLen === 0 || off + idLen + auxLen > u8.byteLength) return null;
-
-  const id = streamTextDecoder.decode(u8.subarray(off, off + idLen));
-  if (!id) return null;
-  off += idLen;
-  const aux = auxLen > 0 ? streamTextDecoder.decode(u8.subarray(off, off + auxLen)) : "";
-  off += auxLen;
-
-  const out = {
-    [STREAM_BRIDGE_TAG]: true,
-    t,
-    id,
-  };
-  if (t === "open" && aux) out.key = aux;
-  else if (t === "error" && aux) out.error = aux;
-  else if (t === "cancel" && aux) out.reason = aux;
-  else if (t === "credit") out.credit = Number(aux || "0");
-  else if (t === "chunk") out.chunk = u8.subarray(off);
-  return out;
-}
-
-function decodeTypedStreamChunkMessage(payload) {
-  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
-  const type = payload.type;
-  if (typeof type !== "string" || !type.startsWith(STREAM_TYPED_CHUNK_PREFIX)) return null;
-  const id = type.slice(STREAM_TYPED_CHUNK_PREFIX.length);
-  if (!id) return null;
-  let chunk = toStreamChunk(payload.payload);
-  if (!chunk && payload.payload && typeof payload.payload === "object") {
-    try {
-      const hydrate =
-        globalThis && typeof globalThis.__hydrate === "function"
-          ? globalThis.__hydrate(payload.payload)
-          : payload.payload;
-      chunk = toStreamChunk(hydrate);
-    } catch {
-      // ignore
-    }
-  }
-  if (!chunk) return null;
-  return {
-    [STREAM_BRIDGE_TAG]: true,
-    t: "chunk",
-    id,
-    chunk,
-  };
-}
-
-function decodeTypedStreamControlMessage(payload) {
-  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
-  const type = payload.type;
-  if (typeof type !== "string" || !type.startsWith(STREAM_TYPED_CONTROL_PREFIX)) return null;
-  const rest = type.slice(STREAM_TYPED_CONTROL_PREFIX.length);
-  const sep = rest.indexOf(":");
-  if (sep <= 0) return null;
-  const kind = rest.slice(0, sep);
-  const id = rest.slice(sep + 1);
-  if (!id) return null;
-  const out = {
-    [STREAM_BRIDGE_TAG]: true,
-    t: kind,
-    id,
-  };
-  const auxRaw = payload && typeof payload.payload === "string" ? payload.payload : "";
-  if (kind === "open") out.key = auxRaw;
-  else if (kind === "error") out.error = auxRaw;
-  else if (kind === "cancel") out.reason = auxRaw;
-  else if (kind === "credit") out.credit = Number(auxRaw || "0");
-  else if (kind !== "close" && kind !== "discard") return null;
-  return out;
+function decodeTypedStreamChunkMessageWithHydrate(payload) {
+  const hydrate =
+    globalThis && typeof globalThis.__hydrate === "function" ? globalThis.__hydrate : undefined;
+  return decodeTypedStreamChunkMessage(payload, hydrate);
 }
 
 function toStreamChunk(x) {
@@ -1638,7 +1500,7 @@ globalThis.__dispatchNodeMessage = (payload) => {
     handleIncomingStreamFrame(frame);
     return;
   }
-  const typedStreamFrame = decodeTypedStreamChunkMessage(payload);
+  const typedStreamFrame = decodeTypedStreamChunkMessageWithHydrate(payload);
   if (typedStreamFrame) {
     handleIncomingStreamFrame(typedStreamFrame);
     return;

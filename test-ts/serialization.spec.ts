@@ -171,7 +171,7 @@ describe("deno_worker: data serialization", () => {
     dw = createTestWorker();
 
     const out: any = await dw.eval(`(() => JSON.parse('{"__proto__":{"polluted":"yes"},"safe":2}'))()`);
-    expect(({} as any).polluted).toBeUndefined();
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
     expect(Object.prototype.hasOwnProperty.call(out, "__proto__")).toBe(false);
   });
 

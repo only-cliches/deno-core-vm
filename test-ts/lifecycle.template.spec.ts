@@ -1,4 +1,4 @@
-import { DenoWorker, DenoWorkerTemplate } from "../src/index";
+import { DenoWorkerTemplate } from "../src/index";
 import { createTestWorker } from "./helpers.worker-harness";
 
 describe("DenoWorker lifecycle hooks + templates", () => {

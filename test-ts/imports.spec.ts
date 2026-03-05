@@ -1,25 +1,5 @@
 // test-ts/imports.spec.ts
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
-
 import { DenoWorker } from "../src/index";
-import { createTestWorker } from "./helpers.worker-harness";
-
-function makeTempDir(prefix = "deno-director-imports-") {
-  return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
-}
-
-function writeFile(p: string, content: string) {
-  fs.mkdirSync(path.dirname(p), { recursive: true });
-  fs.writeFileSync(p, content, "utf8");
-}
-
-function toFileUrl(p: string) {
-  // tests run on macOS, but keep this robust across platforms
-  const normalized = p.replace(/\\/g, "/");
-  return normalized.startsWith("/") ? `file://${normalized}` : `file:///${normalized}`;
-}
 
 describe("deno_worker: imports/module loader combinations", () => {
   let dw: DenoWorker | undefined;
@@ -43,7 +23,7 @@ describe("deno_worker: imports/module loader combinations", () => {
   //       export const out = x;
   //     `;
 
-  //     await expect(dw.evalModule(src)).rejects.toBeTruthy();
+  //     await expect(dw.module.eval(src)).rejects.toBeTruthy();
   //   },
   //   20_000
   // );
@@ -58,7 +38,7 @@ describe("deno_worker: imports/module loader combinations", () => {
   //       export const out = m.default;
   //     `;
 
-  //     await expect(dw.evalModule(src)).rejects.toBeTruthy();
+  //     await expect(dw.module.eval(src)).rejects.toBeTruthy();
   //   },
   //   20_000
   // );
@@ -82,7 +62,7 @@ describe("deno_worker: imports/module loader combinations", () => {
   //       export const out = x;
   //     `;
 
-  //     await expect(dw.evalModule(src)).resolves.toBe(42);
+  //     await expect(dw.module.eval(src)).resolves.toBe(42);
   //   },
   //   20_000
   // );
@@ -106,7 +86,7 @@ describe("deno_worker: imports/module loader combinations", () => {
   //       export const out = m.default;
   //     `;
 
-  //     await expect(dw.evalModule(src)).resolves.toBe(99);
+  //     await expect(dw.module.eval(src)).resolves.toBe(99);
   //   },
   //   20_000
   // );
@@ -128,7 +108,7 @@ describe("deno_worker: imports/module loader combinations", () => {
   //       export const out = x;
   //     `;
 
-  //     await expect(dw.evalModule(src)).resolves.toBe("OK_SYNC_STATIC");
+  //     await expect(dw.module.eval(src)).resolves.toBe("OK_SYNC_STATIC");
   //   },
   //   20_000
   // );
@@ -150,7 +130,7 @@ describe("deno_worker: imports/module loader combinations", () => {
   //       export const out = m.default;
   //     `;
 
-  //     await expect(dw.evalModule(src)).resolves.toBe("OK_SYNC_DYNAMIC");
+  //     await expect(dw.module.eval(src)).resolves.toBe("OK_SYNC_DYNAMIC");
   //   },
   //   20_000
   // );
@@ -172,7 +152,7 @@ describe("deno_worker: imports/module loader combinations", () => {
   //       export const out = x;
   //     `;
 
-  //     await expect(dw.evalModule(src)).resolves.toBe("OK_ASYNC_STATIC");
+  //     await expect(dw.module.eval(src)).resolves.toBe("OK_ASYNC_STATIC");
   //   },
   //   20_000
   // );
@@ -194,7 +174,7 @@ describe("deno_worker: imports/module loader combinations", () => {
   //       export const out = m.default;
   //     `;
 
-  //     await expect(dw.evalModule(src)).resolves.toBe("OK_ASYNC_DYNAMIC");
+  //     await expect(dw.module.eval(src)).resolves.toBe("OK_ASYNC_DYNAMIC");
   //   },
   //   20_000
   // );
@@ -214,7 +194,7 @@ describe("deno_worker: imports/module loader combinations", () => {
   //       export const out = x;
   //     `;
 
-  //     await expect(dw.evalModule(src)).rejects.toBeTruthy();
+  //     await expect(dw.module.eval(src)).rejects.toBeTruthy();
   //   },
   //   20_000
   // );
@@ -234,7 +214,7 @@ describe("deno_worker: imports/module loader combinations", () => {
   //       export const out = m.default;
   //     `;
 
-  //     await expect(dw.evalModule(src)).rejects.toBeTruthy();
+  //     await expect(dw.module.eval(src)).rejects.toBeTruthy();
   //   },
   //   20_000
   // );
@@ -255,7 +235,7 @@ describe("deno_worker: imports/module loader combinations", () => {
   //       export const out = x;
   //     `;
 
-  //     await expect(dw.evalModule(src)).resolves.toBe("DISK_OK_STATIC");
+  //     await expect(dw.module.eval(src)).resolves.toBe("DISK_OK_STATIC");
   //   },
   //   20_000
   // );
@@ -276,7 +256,7 @@ describe("deno_worker: imports/module loader combinations", () => {
   //       export const out = m.default;
   //     `;
 
-  //     await expect(dw.evalModule(src)).resolves.toBe("DISK_OK_DYNAMIC");
+  //     await expect(dw.module.eval(src)).resolves.toBe("DISK_OK_DYNAMIC");
   //   },
   //   20_000
   // );
@@ -299,7 +279,7 @@ describe("deno_worker: imports/module loader combinations", () => {
   //       export const out = x;
   //     `;
 
-  //     await expect(dw.evalModule(src)).resolves.toBe(1);
+  //     await expect(dw.module.eval(src)).resolves.toBe(1);
   //     expect(seen.length).toBeGreaterThanOrEqual(1);
   //     expect(seen[0].specifier).toBe("virtual:referrer");
   //     expect(typeof seen[0].referrer).toBe("string");
@@ -322,7 +302,7 @@ describe("deno_worker: imports/module loader combinations", () => {
   //       export const out = x;
   //     `;
 
-  //     await expect(dw.evalModule(src)).resolves.toBe("FROM_CWD");
+  //     await expect(dw.module.eval(src)).resolves.toBe("FROM_CWD");
   //   },
   //   20_000
   // );
@@ -342,7 +322,7 @@ describe("deno_worker: imports/module loader combinations", () => {
   //       export const out = m.default;
   //     `;
 
-  //     await expect(dw.evalModule(src)).resolves.toBe("FROM_CWD_DYNAMIC");
+  //     await expect(dw.module.eval(src)).resolves.toBe("FROM_CWD_DYNAMIC");
   //   },
   //   20_000
   // );
@@ -360,7 +340,7 @@ describe("deno_worker: imports/module loader combinations", () => {
   //       export const out = x;
   //     `;
 
-  //     await expect(dw.evalModule(src)).resolves.toBe("FROM_CWD_OPT");
+  //     await expect(dw.module.eval(src)).resolves.toBe("FROM_CWD_OPT");
   //   },
   //   20_000
   // );
@@ -378,7 +358,7 @@ describe("deno_worker: imports/module loader combinations", () => {
   //       export const out = m.default;
   //     `;
 
-  //     await expect(dw.evalModule(src)).resolves.toBe("FROM_CWD_OPT_DYNAMIC");
+  //     await expect(dw.module.eval(src)).resolves.toBe("FROM_CWD_OPT_DYNAMIC");
   //   },
   //   20_000
   // );
@@ -398,7 +378,7 @@ describe("deno_worker: imports/module loader combinations", () => {
   //       export const out = x;
   //     `;
 
-  //     await expect(dw.evalModule(src)).resolves.toBe("FROM_FILE_URL");
+  //     await expect(dw.module.eval(src)).resolves.toBe("FROM_FILE_URL");
   //   },
   //   20_000
   // );
@@ -422,7 +402,7 @@ describe("deno_worker: imports/module loader combinations", () => {
   //       export const out = x;
   //     `;
 
-  //     await expect(dw.evalModule(src)).resolves.toBe("OK_PROMISE_STATIC");
+  //     await expect(dw.module.eval(src)).resolves.toBe("OK_PROMISE_STATIC");
   //   },
   //   20_000
   // );
@@ -442,7 +422,7 @@ describe("deno_worker: imports/module loader combinations", () => {
   //       export const out = m.default;
   //     `;
 
-  //     await expect(dw.evalModule(src)).resolves.toBe("OK_PROMISE_DYNAMIC");
+  //     await expect(dw.module.eval(src)).resolves.toBe("OK_PROMISE_DYNAMIC");
   //   },
   //   20_000
   // );
@@ -462,7 +442,7 @@ describe("deno_worker: imports/module loader combinations", () => {
   //       export const out = x;
   //     `;
 
-  //     await expect(dw.evalModule(src)).rejects.toBeTruthy();
+  //     await expect(dw.module.eval(src)).rejects.toBeTruthy();
   //   },
   //   20_000
   // );
@@ -482,7 +462,7 @@ describe("deno_worker: imports/module loader combinations", () => {
   //       export const out = x;
   //     `;
 
-  //     await expect(dw.evalModule(src)).rejects.toBeTruthy();
+  //     await expect(dw.module.eval(src)).rejects.toBeTruthy();
   //   },
   //   20_000
   // );
@@ -506,7 +486,7 @@ describe("deno_worker: imports/module loader combinations", () => {
   //       export const out = x;
   //     `;
 
-  //     await expect(dw.evalModule(src)).resolves.toBe("RESOLVED_STATIC");
+  //     await expect(dw.module.eval(src)).resolves.toBe("RESOLVED_STATIC");
   //   },
   //   20_000
   // );
@@ -530,7 +510,7 @@ describe("deno_worker: imports/module loader combinations", () => {
   //       export const out = m.default;
   //     `;
 
-  //     await expect(dw.evalModule(src)).resolves.toBe("RESOLVED_DYNAMIC");
+  //     await expect(dw.module.eval(src)).resolves.toBe("RESOLVED_DYNAMIC");
   //   },
   //   20_000
   // );
@@ -550,7 +530,7 @@ describe("deno_worker: imports/module loader combinations", () => {
   //       export const out = x;
   //     `;
 
-  //     await expect(dw.evalModule(src)).rejects.toBeTruthy();
+  //     await expect(dw.module.eval(src)).rejects.toBeTruthy();
   //   },
   //   20_000
   // );
@@ -581,7 +561,7 @@ describe("deno_worker: imports/module loader combinations", () => {
   //       export const out = r;
   //     `;
 
-  //     await expect(dw.evalModule(src)).resolves.toBe("ROOT:DEP");
+  //     await expect(dw.module.eval(src)).resolves.toBe("ROOT:DEP");
   //     expect(seen).toContain("virtual:root");
   //     expect(seen).toContain("virtual:dep");
   //   },
@@ -601,7 +581,7 @@ describe("deno_worker: imports/module loader combinations", () => {
   //       export const out = x;
   //     `;
 
-  //     await expect(dw.evalModule(src)).rejects.toBeTruthy();
+  //     await expect(dw.module.eval(src)).rejects.toBeTruthy();
   //   },
   //   20_000
   // );

@@ -1,7 +1,6 @@
 import { DenoWorker } from "../src/index";
+import { sleep, waitFor } from "./helpers.time";
 import { createTestWorker } from "./helpers.worker-harness";
-
-const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 async function withHardTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
   return await Promise.race([
@@ -13,18 +12,6 @@ async function withHardTimeout<T>(p: Promise<T>, ms: number, label: string): Pro
   ]);
 }
 
-async function waitFor(
-  fn: () => boolean,
-  ms: number,
-  label: string,
-): Promise<void> {
-  const start = Date.now();
-  while (Date.now() - start < ms) {
-    if (fn()) return;
-    await sleep(10);
-  }
-  throw new Error(`timeout: ${label}`);
-}
 
 describe("deno_worker: bridge isolation", () => {
   let dw: DenoWorker;
@@ -65,7 +52,8 @@ describe("deno_worker: bridge isolation", () => {
       dw = createTestWorker({ bridge: { channelSize: 32 } });
       const seen: number[] = [];
       dw.on("message", (m) => {
-        if (m && typeof m === "object" && (m as any).echo != null) seen.push(Number((m as any).echo));
+        const mm = m as { echo?: unknown } | null;
+        if (mm && typeof mm === "object" && mm.echo != null) seen.push(Number(mm.echo));
       });
 
       await dw.eval(`
@@ -79,7 +67,7 @@ describe("deno_worker: bridge isolation", () => {
       for (let i = 0; i < 80; i += 1) dw.postMessage({ i });
 
       await withHardTimeout(Promise.all(evals), 20_000, "eval-flood");
-      await waitFor(() => seen.length >= 80, 5_000, "echoes");
+      await waitFor(() => seen.length >= 80, 5_000, { label: "timeout: echoes" });
       expect(seen.length).toBeGreaterThanOrEqual(80);
     },
     30_000,
@@ -149,7 +137,7 @@ describe("deno_worker: bridge isolation", () => {
       `);
 
       dw.postMessage({ new: 7 });
-      await waitFor(() => seen.some((m) => m && m.newSeen === 7), 3_000, "new-echo");
+      await waitFor(() => seen.some((m) => m && m.newSeen === 7), 3_000, { label: "timeout: new-echo" });
       await sleep(200);
       expect(seen.some((m) => m && m.oldSeen != null)).toBe(false);
     },
@@ -195,4 +183,3 @@ describe("deno_worker: bridge isolation", () => {
     20_000,
   );
 });
-

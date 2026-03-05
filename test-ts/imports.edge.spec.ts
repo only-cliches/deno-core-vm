@@ -1,5 +1,4 @@
 // test-ts/imports.edge.spec.ts
-import { DenoWorker } from "../src/index";
 import { createTestWorker } from "./helpers.worker-harness";
 import * as fs from "fs/promises";
 import * as os from "os";
@@ -31,7 +30,7 @@ describe("DenoWorker imports callback edge cases", () => {
         export const out = a;
       `;
 
-      await expect(dw.evalModule(code)).rejects.toBeTruthy();
+      await expect(dw.module.eval(code)).rejects.toBeTruthy();
     } finally {
       if (!dw.isClosed()) await dw.close();
       await fs.rm(dir, { recursive: true, force: true });
@@ -54,7 +53,7 @@ describe("DenoWorker imports callback edge cases", () => {
         export const out = a;
       `;
 
-      await expect(dw.evalModule(code)).rejects.toBeTruthy();
+      await expect(dw.module.eval(code)).rejects.toBeTruthy();
     } finally {
       if (!dw.isClosed()) await dw.close();
       await fs.rm(dir, { recursive: true, force: true });
@@ -77,7 +76,7 @@ describe("DenoWorker imports callback edge cases", () => {
         export const out = a;
       `;
 
-      await expect(dw.evalModule(code)).rejects.toBeTruthy();
+      await expect(dw.module.eval(code)).rejects.toBeTruthy();
     } finally {
       if (!dw.isClosed()) await dw.close();
       await fs.rm(dir, { recursive: true, force: true });
@@ -100,7 +99,7 @@ describe("DenoWorker imports callback edge cases", () => {
         export const out = a;
       `;
 
-      await expect(dw.evalModule(code)).resolves.toMatchObject({ out: 7 });
+      await expect(dw.module.eval(code)).resolves.toMatchObject({ out: 7 });
     } finally {
       if (!dw.isClosed()) await dw.close();
       await fs.rm(dir, { recursive: true, force: true });
@@ -123,7 +122,7 @@ describe("DenoWorker imports callback edge cases", () => {
         export const out = a;
       `;
 
-      await expect(dw.evalModule(code)).rejects.toBeTruthy();
+      await expect(dw.module.eval(code)).rejects.toBeTruthy();
     } finally {
       if (!dw.isClosed()) await dw.close();
       await fs.rm(dir, { recursive: true, force: true });
@@ -149,7 +148,7 @@ describe("DenoWorker imports callback edge cases", () => {
         export const out = a;
       `;
 
-      await expect(dw.evalModule(code)).resolves.toMatchObject({ out: 123 });
+      await expect(dw.module.eval(code)).resolves.toMatchObject({ out: 123 });
     } finally {
       if (!dw.isClosed()) await dw.close();
       await fs.rm(dir, { recursive: true, force: true });
@@ -172,7 +171,7 @@ describe("DenoWorker imports callback edge cases", () => {
         export const out = a;
       `;
 
-      await expect(dw.evalModule(code)).rejects.toBeTruthy();
+      await expect(dw.module.eval(code)).rejects.toBeTruthy();
     } finally {
       if (!dw.isClosed()) await dw.close();
       await fs.rm(dir, { recursive: true, force: true });
@@ -198,12 +197,12 @@ describe("DenoWorker imports callback edge cases", () => {
         export const out = a;
       `;
 
-      await expect(dw.evalModule(code)).resolves.toMatchObject({ out: 9 });
+      await expect(dw.module.eval(code)).resolves.toMatchObject({ out: 9 });
       const firstCount = count;
       expect(firstCount).toBeGreaterThan(0);
 
       await dw.restart();
-      await expect(dw.evalModule(code)).resolves.toMatchObject({ out: 9 });
+      await expect(dw.module.eval(code)).resolves.toMatchObject({ out: 9 });
       const secondDelta = count - firstCount;
 
       expect(secondDelta).toBe(firstCount);

@@ -1,12 +1,11 @@
 // test-ts/globals.spec.ts
 import { DenoWorker } from "../src/index";
+import { sleep } from "./helpers.time";
 import { createTestWorker } from "./helpers.worker-harness";
 import * as nodeFs from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 describe("deno_worker: globals", () => {
   let dw: DenoWorker;

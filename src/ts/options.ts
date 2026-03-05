@@ -11,6 +11,23 @@ import type {
 // Alias to preserve existing exported name
 export type DenoWorkerWorkerOptions = DenoWorkerOptions;
 
+function finiteInt(v: unknown, min: number, max = Number.POSITIVE_INFINITY): number | undefined {
+    if (typeof v !== "number" || !Number.isFinite(v)) return undefined;
+    if (v < min || v > max) return undefined;
+    return Math.trunc(v);
+}
+
+function finitePositive(v: unknown): number | undefined {
+    if (typeof v !== "number" || !Number.isFinite(v) || v <= 0) return undefined;
+    return v;
+}
+
+function nonEmptyTrimmed(v: unknown): string | undefined {
+    if (typeof v !== "string") return undefined;
+    const s = v.trim();
+    return s ? s : undefined;
+}
+
 /**
  * Sanitizes user-provided eval options before crossing the native boundary.
  *
@@ -86,10 +103,7 @@ function normalizeConsoleOption(x: unknown): unknown {
 function normalizeEnvOption(x: unknown): unknown {
     if (x === undefined) return undefined;
 
-    if (typeof x === "string") {
-        const s = x.trim();
-        return s ? s : undefined;
-    }
+    if (typeof x === "string") return nonEmptyTrimmed(x);
 
     if (x && typeof x === "object") {
         const o: any = x as any;
@@ -119,9 +133,8 @@ function normalizeInspectOption(x: unknown): unknown {
 
         if (typeof o.host === "string") out.host = o.host;
 
-        if (typeof o.port === "number" && Number.isFinite(o.port) && o.port >= 0 && o.port <= 65535) {
-            out.port = Math.trunc(o.port);
-        }
+        const port = finiteInt(o.port, 0, 65535);
+        if (port !== undefined) out.port = port;
 
         if (typeof o.break === "boolean") out.break = o.break;
 
@@ -142,13 +155,10 @@ function normalizeModuleLoaderOption(x: unknown): unknown {
     if (typeof o.nodeResolve === "boolean") out.nodeResolve = o.nodeResolve;
     if (typeof o.jsrResolve === "boolean") out.jsrResolve = o.jsrResolve;
     if (typeof o.reload === "boolean") out.reload = o.reload;
-    if (typeof o.maxPayloadBytes === "number" && Number.isFinite(o.maxPayloadBytes)) {
-        out.maxPayloadBytes = Math.trunc(o.maxPayloadBytes);
-    }
-    if (typeof o.cacheDir === "string") {
-        const s = o.cacheDir.trim();
-        if (s) out.cacheDir = s;
-    }
+    const maxPayloadBytes = finiteInt(o.maxPayloadBytes, Number.NEGATIVE_INFINITY);
+    if (maxPayloadBytes !== undefined) out.maxPayloadBytes = maxPayloadBytes;
+    const cacheDir = nonEmptyTrimmed(o.cacheDir);
+    if (cacheDir !== undefined) out.cacheDir = cacheDir;
 
     return Object.keys(out).length ? out : undefined;
 }
@@ -162,18 +172,12 @@ function normalizeTsCompilerOption(x: unknown): unknown {
     if (rawJsx === "react" || rawJsx === "react-jsx" || rawJsx === "react-jsxdev" || rawJsx === "preserve") {
         out.jsx = rawJsx;
     }
-    if (typeof o.jsxFactory === "string") {
-        const s = o.jsxFactory.trim();
-        if (s) out.jsxFactory = s;
-    }
-    if (typeof o.jsxFragmentFactory === "string") {
-        const s = o.jsxFragmentFactory.trim();
-        if (s) out.jsxFragmentFactory = s;
-    }
-    if (typeof o.cacheDir === "string") {
-        const s = o.cacheDir.trim();
-        if (s) out.cacheDir = s;
-    }
+    const jsxFactory = nonEmptyTrimmed(o.jsxFactory);
+    if (jsxFactory !== undefined) out.jsxFactory = jsxFactory;
+    const jsxFragmentFactory = nonEmptyTrimmed(o.jsxFragmentFactory);
+    if (jsxFragmentFactory !== undefined) out.jsxFragmentFactory = jsxFragmentFactory;
+    const cacheDir = nonEmptyTrimmed(o.cacheDir);
+    if (cacheDir !== undefined) out.cacheDir = cacheDir;
     return Object.keys(out).length ? out : undefined;
 }
 
@@ -183,29 +187,16 @@ function normalizeBridgeOption(x: unknown): unknown {
     const o: any = x as any;
     const out: any = {};
 
-    if (typeof o.channelSize === "number" && Number.isFinite(o.channelSize) && o.channelSize >= 1) {
-        out.channelSize = Math.trunc(o.channelSize);
-    }
-    if (typeof o.streamWindowBytes === "number" && Number.isFinite(o.streamWindowBytes) && o.streamWindowBytes >= 1) {
-        out.streamWindowBytes = Math.trunc(o.streamWindowBytes);
-    }
-    if (
-        typeof o.streamCreditFlushBytes === "number" &&
-        Number.isFinite(o.streamCreditFlushBytes) &&
-        o.streamCreditFlushBytes >= 1
-    ) {
-        out.streamCreditFlushBytes = Math.trunc(o.streamCreditFlushBytes);
-    }
-    if (typeof o.streamBacklogLimit === "number" && Number.isFinite(o.streamBacklogLimit) && o.streamBacklogLimit >= 1) {
-        out.streamBacklogLimit = Math.trunc(o.streamBacklogLimit);
-    }
-    if (
-        typeof o.streamHighWaterMarkBytes === "number" &&
-        Number.isFinite(o.streamHighWaterMarkBytes) &&
-        o.streamHighWaterMarkBytes >= 1
-    ) {
-        out.streamHighWaterMarkBytes = Math.trunc(o.streamHighWaterMarkBytes);
-    }
+    const channelSize = finiteInt(o.channelSize, 1);
+    if (channelSize !== undefined) out.channelSize = channelSize;
+    const streamWindowBytes = finiteInt(o.streamWindowBytes, 1);
+    if (streamWindowBytes !== undefined) out.streamWindowBytes = streamWindowBytes;
+    const streamCreditFlushBytes = finiteInt(o.streamCreditFlushBytes, 1);
+    if (streamCreditFlushBytes !== undefined) out.streamCreditFlushBytes = streamCreditFlushBytes;
+    const streamBacklogLimit = finiteInt(o.streamBacklogLimit, 1);
+    if (streamBacklogLimit !== undefined) out.streamBacklogLimit = streamBacklogLimit;
+    const streamHighWaterMarkBytes = finiteInt(o.streamHighWaterMarkBytes, 1);
+    if (streamHighWaterMarkBytes !== undefined) out.streamHighWaterMarkBytes = streamHighWaterMarkBytes;
 
     return Object.keys(out).length ? out : undefined;
 }
@@ -216,18 +207,14 @@ function normalizeLimitsOption(x: unknown): unknown {
     const o: any = x as any;
     const out: any = {};
 
-    if (typeof o.maxHandle === "number" && Number.isFinite(o.maxHandle) && o.maxHandle >= 1) {
-        out.maxHandle = Math.trunc(o.maxHandle);
-    }
-    if (typeof o.maxEvalMs === "number" && Number.isFinite(o.maxEvalMs) && o.maxEvalMs > 0) {
-        out.maxEvalMs = o.maxEvalMs;
-    }
-    if (typeof o.maxCpuMs === "number" && Number.isFinite(o.maxCpuMs) && o.maxCpuMs > 0) {
-        out.maxCpuMs = o.maxCpuMs;
-    }
-    if (typeof o.maxMemoryBytes === "number" && Number.isFinite(o.maxMemoryBytes) && o.maxMemoryBytes > 0) {
-        out.maxMemoryBytes = Math.trunc(o.maxMemoryBytes);
-    }
+    const maxHandle = finiteInt(o.maxHandle, 1);
+    if (maxHandle !== undefined) out.maxHandle = maxHandle;
+    const maxEvalMs = finitePositive(o.maxEvalMs);
+    if (maxEvalMs !== undefined) out.maxEvalMs = maxEvalMs;
+    const maxCpuMs = finitePositive(o.maxCpuMs);
+    if (maxCpuMs !== undefined) out.maxCpuMs = maxCpuMs;
+    const maxMemoryBytes = finiteInt(o.maxMemoryBytes, 1);
+    if (maxMemoryBytes !== undefined) out.maxMemoryBytes = maxMemoryBytes;
 
     return Object.keys(out).length ? out : undefined;
 }
@@ -260,7 +247,6 @@ export function normalizeWorkerOptions(options?: DenoWorkerOptions): DenoWorkerW
     delete o.channelSize;
     if (typeof o.transpileTs !== "boolean") delete o.transpileTs;
     o.tsCompiler = normalizeTsCompilerOption(o.tsCompiler);
-    delete o.transpliteTs;
     delete o.nodeResolve;
     if ((o.moduleLoader?.httpsResolve === true || o.moduleLoader?.httpResolve === true) && o.imports === undefined) {
         o.imports = true;
@@ -268,7 +254,7 @@ export function normalizeWorkerOptions(options?: DenoWorkerOptions): DenoWorkerW
 
     if (!(typeof o.envFile === "boolean" || typeof o.envFile === "string")) delete o.envFile;
     if (typeof o.envFile === "string") {
-        const s = o.envFile.trim();
+        const s = nonEmptyTrimmed(o.envFile);
         if (!s) delete o.envFile;
         else o.envFile = s;
     }

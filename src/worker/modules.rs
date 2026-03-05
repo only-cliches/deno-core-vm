@@ -53,6 +53,7 @@ struct ModuleEntry {
 
 struct ModuleRegistryState {
     modules: HashMap<String, ModuleEntry>,
+    aliases: HashMap<String, String>,
     persistent_lru: VecDeque<String>,
     persistent_limit: usize,
 }
@@ -80,6 +81,7 @@ impl ModuleRegistry {
         Self {
             state: Arc::new(Mutex::new(ModuleRegistryState {
                 modules: HashMap::new(),
+                aliases: HashMap::new(),
                 persistent_lru: VecDeque::new(),
                 persistent_limit,
             })),
@@ -136,6 +138,15 @@ impl ModuleRegistry {
         }
     }
 
+    // Returns a deterministic internal virtual URL for a user-provided module name.
+    fn named_virtual_specifier(module_name: &str) -> String {
+        let mut encoded = String::with_capacity(module_name.len() * 2);
+        for b in module_name.as_bytes() {
+            let _ = std::fmt::Write::write_fmt(&mut encoded, format_args!("{b:02x}"));
+        }
+        format!("denojs-worker://virtual/__named_{encoded}.js")
+    }
+
     /// Returns a unique virtual module specifier for generated source modules.
     pub fn next_virtual_specifier(&self, ext: &str) -> String {
         // Monotonic virtual ids avoid collision across evalModule calls.
@@ -152,8 +163,25 @@ impl ModuleRegistry {
         self.state
             .lock()
             .ok()
-            .map(|s| s.modules.contains_key(specifier))
+            .map(|s| {
+                if s.modules.contains_key(specifier) {
+                    return true;
+                }
+                s.aliases
+                    .get(specifier)
+                    .map(|resolved| s.modules.contains_key(resolved))
+                    .unwrap_or(false)
+            })
             .unwrap_or(false)
+    }
+
+    /// Resolves input specifier to canonical registry key when present.
+    pub fn resolve_specifier(&self, specifier: &str) -> Option<String> {
+        let state = self.state.lock().ok()?;
+        if state.modules.contains_key(specifier) {
+            return Some(specifier.to_string());
+        }
+        state.aliases.get(specifier).cloned()
     }
 
     /// Stores ephemeral in caches/state used by module resolution, policy, and remote loading.
@@ -199,6 +227,29 @@ impl ModuleRegistry {
         Self::evict_persistent_if_needed(&mut state);
     }
 
+    /// Stores a persistent module registered under user module name and canonical internal URL.
+    pub fn put_named_persistent(&self, module_name: &str, code: &str, module_type: ModuleType) {
+        let canonical = Self::named_virtual_specifier(module_name);
+        let mut state = match self.state.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+
+        state.aliases.insert(module_name.to_string(), canonical.clone());
+        state.modules.insert(
+            canonical.clone(),
+            ModuleEntry {
+                code: code.to_string(),
+                module_type,
+                persistent: true,
+                uses_left: None,
+                loaded_once: false,
+            },
+        );
+        Self::touch_lru(&mut state.persistent_lru, &canonical);
+        Self::evict_persistent_if_needed(&mut state);
+    }
+
     /// Removes remove from tracked state used by module resolution, policy, and remote loading.
     pub fn remove(&self, specifier: &str) {
         let mut state = match self.state.lock() {
@@ -206,24 +257,57 @@ impl ModuleRegistry {
             Err(poisoned) => poisoned.into_inner(),
         };
         state.modules.remove(specifier);
+        if let Some(canonical) = state.aliases.remove(specifier) {
+            state.modules.remove(&canonical);
+            if let Some(i) = state.persistent_lru.iter().position(|s| s == &canonical) {
+                state.persistent_lru.remove(i);
+            }
+        }
         if let Some(i) = state.persistent_lru.iter().position(|s| s == specifier) {
             state.persistent_lru.remove(i);
         }
+        state.aliases.retain(|_, v| v != specifier);
+    }
+
+    /// Removes a module registered by name; returns whether anything was removed.
+    pub fn remove_named(&self, module_name: &str) -> bool {
+        let mut state = match self.state.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let canonical = state.aliases.remove(module_name);
+        let removed_alias = canonical.is_some();
+        let removed_module = canonical
+            .as_ref()
+            .map(|key| state.modules.remove(key).is_some())
+            .unwrap_or(false);
+        if let Some(key) = canonical.as_ref() {
+            if let Some(i) = state.persistent_lru.iter().position(|s| s == key) {
+                state.persistent_lru.remove(i);
+            }
+        }
+        removed_alias || removed_module
     }
 
     /// Returns module source for a load request and updates entry lifecycle/eviction state.
     pub fn get_for_load(&self, specifier: &str) -> Option<(String, ModuleType)> {
         let mut state = self.state.lock().ok()?;
-        if let Some(entry) = state.modules.get_mut(specifier) {
+        let lookup_key = state
+            .aliases
+            .get(specifier)
+            .cloned()
+            .unwrap_or_else(|| specifier.to_string());
+
+        if let Some(entry) = state.modules.get_mut(&lookup_key) {
             if entry.persistent {
                 entry.loaded_once = true;
                 let out = (entry.code.clone(), entry.module_type.clone());
-                Self::touch_lru(&mut state.persistent_lru, specifier);
+                Self::touch_lru(&mut state.persistent_lru, &lookup_key);
                 return Some(out);
             }
         }
 
-        let entry = state.modules.get_mut(specifier)?;
+        let entry = state.modules.get_mut(&lookup_key)?;
         match entry.uses_left.as_mut() {
             Some(n) if *n > 0 => {
                 *n -= 1;
@@ -231,12 +315,12 @@ impl ModuleRegistry {
                 let module_type = entry.module_type.clone();
                 // Remove once budget is consumed so transient eval modules do not leak.
                 if *n == 0 {
-                    state.modules.remove(specifier);
+                    state.modules.remove(&lookup_key);
                 }
                 Some((out, module_type))
             }
             _ => {
-                state.modules.remove(specifier);
+                state.modules.remove(&lookup_key);
                 None
             }
         }
@@ -563,6 +647,61 @@ impl DynamicModuleLoader {
             permissions: self.permissions.clone(),
             eval_sync_active: self.eval_sync_active.clone(),
         }
+    }
+
+    // Best-effort runtime event emitter for Node-side runtime listeners.
+    fn emit_runtime_event(&self, event: serde_json::Value) {
+        let _ = self.node_tx.try_send(NodeMsg::EmitRuntimeEvent {
+            value: crate::bridge::types::JsValueBridge::Json(event),
+        });
+    }
+
+    // Emits `import.requested` event.
+    fn emit_import_requested(
+        &self,
+        specifier: &str,
+        referrer: &str,
+        is_dynamic_import: bool,
+        cache_hit: bool,
+    ) {
+        self.emit_runtime_event(serde_json::json!({
+            "kind": "import.requested",
+            "ts": std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0),
+            "specifier": specifier,
+            "referrer": referrer,
+            "isDynamicImport": is_dynamic_import,
+            "cacheHit": cache_hit
+        }));
+    }
+
+    // Emits `import.resolved` event.
+    fn emit_import_resolved(
+        &self,
+        specifier: &str,
+        referrer: &str,
+        is_dynamic_import: bool,
+        cache_hit: bool,
+        resolved_specifier: Option<&str>,
+        source: &str,
+        blocked: bool,
+    ) {
+        self.emit_runtime_event(serde_json::json!({
+            "kind": "import.resolved",
+            "ts": std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0),
+            "specifier": specifier,
+            "referrer": referrer,
+            "isDynamicImport": is_dynamic_import,
+            "cacheHit": cache_hit,
+            "resolvedSpecifier": resolved_specifier,
+            "source": source,
+            "blocked": blocked
+        }));
     }
 
     // Extracts original specifier/referrer from wrapped resolve URLs when present.
@@ -1300,9 +1439,9 @@ impl ModuleLoader for DynamicModuleLoader {
             }
         }
 
-        // Allow direct hits for registry specifiers.
-        if self.reg.has(specifier) {
-            if let Ok(u) = Url::parse(specifier) {
+        // Allow direct hits for registry specifiers, including user aliases.
+        if let Some(resolved_key) = self.reg.resolve_specifier(specifier) {
+            if let Ok(u) = Url::parse(&resolved_key) {
                 return Ok(u);
             }
         }
@@ -1364,8 +1503,23 @@ impl ModuleLoader for DynamicModuleLoader {
             return deno_core::ModuleLoadResponse::Sync(Err(err));
         }
 
+        let (orig_spec, orig_referrer) =
+            Self::original_spec_and_referrer(module_specifier, maybe_referrer);
+        let is_dynamic_import = options.is_dynamic_import;
+        let cache_hit = self.reg.has(module_specifier.as_str()) || self.reg.has(&orig_spec);
+        self.emit_import_requested(&orig_spec, &orig_referrer, is_dynamic_import, cache_hit);
+
         // 1) Serve in-memory modules first
         if let Some((code, module_type)) = self.reg.get_for_load(module_specifier.as_str()) {
+            self.emit_import_resolved(
+                &orig_spec,
+                &orig_referrer,
+                is_dynamic_import,
+                true,
+                Some(module_specifier.as_str()),
+                "registry",
+                false,
+            );
             let source = ModuleSource::new(
                 module_type,
                 deno_core::ModuleSourceCode::String(code.into()),
@@ -1375,21 +1529,35 @@ impl ModuleLoader for DynamicModuleLoader {
             return deno_core::ModuleLoadResponse::Sync(Ok(source));
         }
 
-        // 2) Decode synthetic resolve URL (callback path)
-        let (orig_spec, orig_referrer) =
-            Self::original_spec_and_referrer(module_specifier, maybe_referrer);
-
-        // 3) Enforce imports policy for real module loads
+        // 2) Enforce imports policy for real module loads
         if let Some(err) = self.imports_policy_error(&orig_spec) {
+            self.emit_import_resolved(
+                &orig_spec,
+                &orig_referrer,
+                is_dynamic_import,
+                false,
+                None,
+                "policy",
+                true,
+            );
             return deno_core::ModuleLoadResponse::Sync(Err(err));
         }
 
-        // 4) Callback path
+        // 3) Callback path
         if matches!(
             self.imports_policy,
             crate::worker::state::ImportsPolicy::Callback
         ) {
             if self.callback_imports_blocked_during_eval_sync() {
+                self.emit_import_resolved(
+                    &orig_spec,
+                    &orig_referrer,
+                    is_dynamic_import,
+                    false,
+                    None,
+                    "callback",
+                    true,
+                );
                 return deno_core::ModuleLoadResponse::Sync(Err(JsErrorBox::generic(
                     "Import callbacks are unavailable during evalSync. Use eval() instead.",
                 )));
@@ -1413,14 +1581,32 @@ impl ModuleLoader for DynamicModuleLoader {
                 .await?;
 
                 match decision {
-                    ImportDecision::Block => Err(JsErrorBox::generic(format!(
-                        "Import blocked: {}",
-                        orig_spec
-                    ))),
+                    ImportDecision::Block => {
+                        this_loader.emit_import_resolved(
+                            &orig_spec,
+                            &orig_referrer,
+                            options.is_dynamic_import,
+                            false,
+                            None,
+                            "callback.block",
+                            true,
+                        );
+                        Err(JsErrorBox::generic(format!("Import blocked: {}", orig_spec)))
+                    }
 
                     ImportDecision::AllowDisk => {
                         let resolved = this_loader
                             .resolve_allow_disk_or_error(&orig_spec, &orig_referrer)?;
+
+                        this_loader.emit_import_resolved(
+                            &orig_spec,
+                            &orig_referrer,
+                            options.is_dynamic_import,
+                            false,
+                            Some(resolved.as_str()),
+                            "callback.allowDisk",
+                            false,
+                        );
 
                         this_loader
                             .load_resolved_module(
@@ -1436,6 +1622,16 @@ impl ModuleLoader for DynamicModuleLoader {
                         let resolved = this_loader
                             .resolve_rewritten_or_error(&new_spec, &orig_referrer)?;
 
+                        this_loader.emit_import_resolved(
+                            &orig_spec,
+                            &orig_referrer,
+                            options.is_dynamic_import,
+                            false,
+                            Some(resolved.as_str()),
+                            "callback.resolve",
+                            false,
+                        );
+
                         this_loader
                             .load_resolved_module(
                                 requested_specifier.clone(),
@@ -1447,15 +1643,35 @@ impl ModuleLoader for DynamicModuleLoader {
                     }
 
                     ImportDecision::SourceTyped { ext, code } => this_loader
-                        .build_source_typed_module(&requested_specifier, &ext, code),
+                        .build_source_typed_module(&requested_specifier, &ext, code)
+                        .inspect(|_| {
+                            this_loader.emit_import_resolved(
+                                &orig_spec,
+                                &orig_referrer,
+                                options.is_dynamic_import,
+                                false,
+                                Some(requested_specifier.as_str()),
+                                "callback.source",
+                                false,
+                            );
+                        }),
                 }
             }));
         }
 
-        // 5) Non-callback: allow disk loads directly
+        // 4) Non-callback: allow disk loads directly
         if self.should_load_remote_non_callback(module_specifier) {
             let this_loader = self.clone_for_async();
             let module_specifier = module_specifier.clone();
+            self.emit_import_resolved(
+                &orig_spec,
+                &orig_referrer,
+                is_dynamic_import,
+                false,
+                Some(module_specifier.as_str()),
+                "remote",
+                false,
+            );
 
             return deno_core::ModuleLoadResponse::Async(Box::pin(async move {
                 this_loader
@@ -1465,11 +1681,29 @@ impl ModuleLoader for DynamicModuleLoader {
         }
 
         if module_specifier.scheme() == "file" && !self.within_sandbox(module_specifier) {
+            self.emit_import_resolved(
+                &orig_spec,
+                &orig_referrer,
+                is_dynamic_import,
+                false,
+                Some(module_specifier.as_str()),
+                "sandbox",
+                true,
+            );
             return deno_core::ModuleLoadResponse::Sync(Err(JsErrorBox::generic(
                 "Import blocked: outside sandbox",
             )));
         }
 
+        self.emit_import_resolved(
+            &orig_spec,
+            &orig_referrer,
+            is_dynamic_import,
+            false,
+            Some(module_specifier.as_str()),
+            "fs",
+            false,
+        );
         self.fs_loader
             .load(module_specifier, maybe_referrer, options)
     }

@@ -28,7 +28,7 @@ describe("deno_worker: modules", () => {
       export const y = 10;
       export const out = x + y;
     `;
-    await expect(dw.evalModule(code)).resolves.toMatchObject({ out: 20 });
+    await expect(dw.module.eval(code)).resolves.toMatchObject({ out: 20 });
   });
 
   it("supports top-level await in modules", async () => {
@@ -37,7 +37,7 @@ describe("deno_worker: modules", () => {
       const v = await Promise.resolve(42);
       export const out = v;
     `;
-    await expect(dw.evalModule(code)).resolves.toMatchObject({ out: 42 });
+    await expect(dw.module.eval(code)).resolves.toMatchObject({ out: 42 });
   });
 
   it(
@@ -57,7 +57,7 @@ describe("deno_worker: modules", () => {
           export const out = add(x, 1);
         `;
 
-        await expect(dw.evalModule(code)).resolves.toMatchObject({ out: 4 });
+        await expect(dw.module.eval(code)).resolves.toMatchObject({ out: 4 });
       });
     },
     20_000
@@ -74,7 +74,7 @@ describe("deno_worker: modules", () => {
           export const out = 1;
         `;
 
-        await expect(dw.evalModule(code)).rejects.toBeDefined();
+        await expect(dw.module.eval(code)).rejects.toBeDefined();
       });
     },
     20_000
@@ -110,6 +110,43 @@ describe("deno_worker: modules", () => {
   it("importModule propagates import rejection", async () => {
     dw = createTestWorker({ imports: false });
     await expect(dw.importModule("virtual:nope")).rejects.toBeDefined();
+  });
+
+  it("worker.module.register and worker.module.clear manage named modules", async () => {
+    dw = createTestWorker();
+    await dw.module.register("named:api", "export const v = 123;");
+    await expect(dw.importModule("named:api")).resolves.toMatchObject({ v: 123 });
+    await expect(dw.module.clear("named:api")).resolves.toBe(true);
+    await expect(dw.importModule("named:api")).rejects.toBeDefined();
+  });
+
+  it("worker.module.eval can pin moduleName for future imports", async () => {
+    dw = createTestWorker();
+    const mod = await dw.module.eval("export const out = 77;", { moduleName: "named:pin" });
+    expect(mod.out).toBe(77);
+    await expect(dw.importModule("named:pin")).resolves.toMatchObject({ out: 77 });
+  });
+
+  it("constructor modules are registered during startup", async () => {
+    dw = createTestWorker({
+      modules: {
+        "named:startup": "export const boot = 1;",
+      },
+    });
+    await expect(dw.importModule("named:startup")).resolves.toMatchObject({ boot: 1 });
+  });
+
+  it("constructor modules are re-applied on restart", async () => {
+    dw = createTestWorker({
+      modules: {
+        "named:restart": "export const v = 55;",
+      },
+    });
+    await expect(dw.importModule("named:restart")).resolves.toMatchObject({ v: 55 });
+    await expect(dw.module.clear("named:restart")).resolves.toBe(true);
+    await expect(dw.importModule("named:restart")).rejects.toBeDefined();
+    await dw.restart();
+    await expect(dw.importModule("named:restart")).resolves.toMatchObject({ v: 55 });
   });
 
   test(

@@ -17,7 +17,7 @@ async function main() {
     });
 
     try {
-        const mod = await worker.evalModule(`
+        const mod = await worker.module.eval(`
             import { add } from "app:math";
             export const out = add(20, 22);
         `);

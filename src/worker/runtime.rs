@@ -11,6 +11,7 @@ use sys_traits::impls::RealSys;
 
 use crate::worker::dispatch::{dispatch_node_msg, handle_deno_msg};
 use crate::worker::env::{EnvRuntimeState, env_access_from_permissions, merge_env_snapshot};
+use crate::worker::env_flags::{native_stream_debug_enabled, native_stream_plane_enabled};
 use crate::worker::filesystem::{
     SandboxFs, dir_url_from_path, normalize_cwd, normalize_startup_url, sandboxed_path_list,
 };
@@ -86,7 +87,10 @@ extension!(
         op_denojs_worker_env_to_object
     ],
     esm_entry_point = "ext:deno_worker_extension/src/worker/bootstrap.js",
-    esm = ["src/worker/bootstrap.js"],
+    esm = [
+        "src/worker/bootstrap.js",
+        "src/shared/stream-envelope.ts",
+    ],
 );
 
 // Cfg items.
@@ -432,7 +436,7 @@ pub fn spawn_worker_thread(
                 .and_then(|v| u32::try_from(v).ok())
                 .filter(|v| *v > 0);
             let native_stream_plane = std::sync::Arc::new(NativeIncomingPlane::new(stream_credit_flush_bytes));
-            if std::env::var("DENO_DIRECTOR_NATIVE_STREAM_DEBUG").ok().as_deref() == Some("1") {
+            if native_stream_debug_enabled() {
                 eprintln!(
                     "[native-stream] runtime-created plane={:p} worker={}",
                     std::sync::Arc::as_ptr(&native_stream_plane),
@@ -444,7 +448,7 @@ pub fn spawn_worker_thread(
                 && let Ok(mut slot) = handle.native_stream_plane.lock()
             {
                 *slot = Some(native_stream_plane.clone());
-                if std::env::var("DENO_DIRECTOR_NATIVE_STREAM_DEBUG").ok().as_deref() == Some("1") {
+                if native_stream_debug_enabled() {
                     eprintln!(
                         "[native-stream] runtime-shared plane={:p} worker={}",
                         std::sync::Arc::as_ptr(&native_stream_plane),
@@ -484,10 +488,7 @@ pub fn spawn_worker_thread(
                 let _ = worker.js_runtime.execute_script("<consoleConfig>", script);
             }
 
-            let native_stream_plane_enabled = std::env::var("DENO_DIRECTOR_NATIVE_STREAM_PLANE")
-                .ok()
-                .map(|v| v == "1")
-                .unwrap_or(false);
+            let native_stream_plane_enabled = native_stream_plane_enabled();
             if let Some(cfg) = limits.bridge.as_ref() {
                 let mut bridge_cfg = serde_json::to_value(cfg).unwrap_or_else(|_| serde_json::json!({}));
                 if native_stream_plane_enabled && let serde_json::Value::Object(obj) = &mut bridge_cfg {

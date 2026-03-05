@@ -1,11 +1,8 @@
 // test/memory.spec.ts
 import { DenoWorker } from "../src/index";
+import { sleep } from "./helpers.time";
 import { createTestWorker } from "./helpers.worker-harness";
 import type { DenoWorkerMemory } from "../src/ts/types";
-
-function sleep(ms: number) {
-  return new Promise((r) => setTimeout(r, ms));
-}
 
 function isFiniteNumber(v: unknown): v is number {
   return typeof v === "number" && Number.isFinite(v);

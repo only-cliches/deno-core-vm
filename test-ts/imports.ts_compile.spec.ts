@@ -1,4 +1,3 @@
-import { DenoWorker } from "../src/index";
 import { createTestWorker } from "./helpers.worker-harness";
 
 describe("imports callback ts/tsx/jsx + dynamic flag", () => {
@@ -23,7 +22,7 @@ describe("imports callback ts/tsx/jsx + dynamic flag", () => {
     });
 
     try {
-      const out = await dw.evalModule(`
+      const out = await dw.module.eval(`
         import s from "virtual:static";
         const d = await import("virtual:dynamic");
         export const result = [s, d.default];
@@ -63,7 +62,7 @@ describe("imports callback ts/tsx/jsx + dynamic flag", () => {
 
     try {
       await expect(
-        dw.evalModule(`
+        dw.module.eval(`
           import v from "virtual:typed-ts";
           export const out = v;
         `),
@@ -90,7 +89,7 @@ describe("imports callback ts/tsx/jsx + dynamic flag", () => {
 
     try {
       await expect(
-        dw.evalModule(`
+        dw.module.eval(`
           import v from "virtual:typed-ts-disabled";
           export const out = v;
         `),
@@ -134,7 +133,7 @@ describe("imports callback ts/tsx/jsx + dynamic flag", () => {
 
     try {
       await expect(
-        dw.evalModule(`
+        dw.module.eval(`
           import v from "virtual:typed-tsx";
           export const out = v;
         `),
@@ -170,7 +169,7 @@ describe("imports callback ts/tsx/jsx + dynamic flag", () => {
 
     try {
       await expect(
-        dw.evalModule(`
+        dw.module.eval(`
           import v from "virtual:typed-jsx";
           export const out = v;
         `),

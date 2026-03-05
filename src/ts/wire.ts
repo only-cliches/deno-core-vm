@@ -253,7 +253,7 @@ export function dehydrateForWire(value: any): WireJson {
     return inner(value, 0);
 }
 
-/** Convenience wrapper for argument lists passed into eval/evalModule calls. */
+/** Convenience wrapper for argument lists passed into eval/module.eval calls. */
 export function dehydrateArgs(args: any[] | undefined): any[] {
     if (!Array.isArray(args)) return [];
     return args.map((a) => dehydrateForWire(a));

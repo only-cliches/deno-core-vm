@@ -42,12 +42,12 @@ async function main() {
     });
 
     try {
-        const a = await resolverOnly.evalModule(`
+        const a = await resolverOnly.module.eval(`
             import pkg from "demo-pkg";
             export const out = pkg.value;
         `);
 
-        const b = await compatMode.evalModule(`
+        const b = await compatMode.module.eval(`
             import pkg from "demo-pkg";
             export const out = pkg.value;
         `);

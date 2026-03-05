@@ -1,9 +1,6 @@
 import { DenoWorker } from "../src/index";
+import { sleep } from "./helpers.time";
 import { createTestWorker } from "./helpers.worker-harness";
-
-function sleep(ms: number) {
-  return new Promise((r) => setTimeout(r, ms));
-}
 
 describe("DenoWorker API", () => {
   let dw: DenoWorker;
@@ -60,12 +57,12 @@ describe("DenoWorker API", () => {
     expect(dw.lastExecutionStats).toHaveProperty("evalTimeMs");
   });
 
-  test("module evaluation works (evalModule)", async () => {
+  test("module evaluation works (module.eval)", async () => {
     const code = `
       export function add(a, b) { return a + b; }
       export const out = add(10, 10);
     `;
-    await expect(dw.evalModule(code)).resolves.toMatchObject({ out: 20 });
+    await expect(dw.module.eval(code)).resolves.toMatchObject({ out: 20 });
   });
 
   test("timeout limits: long-running script rejects", async () => {

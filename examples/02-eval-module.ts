@@ -3,7 +3,7 @@ import { DenoWorker } from "../src/index";
 async function main() {
     const worker = new DenoWorker();
     try {
-        const mod = await worker.evalModule(`
+        const mod = await worker.module.eval(`
             export const version = "1.0.0";
             export function add(a, b) { return a + b; }
         `);

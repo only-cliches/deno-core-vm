@@ -1,6 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 import type { EvalOptions } from "./types";
+import { buildModuleInvokeSource } from "./module-source";
 import { hydrateFromWire } from "./wire";
 
 type ModuleWrapperHost = {
@@ -67,11 +68,8 @@ export function wrapModuleNamespace<T extends Record<string, any>>(dw: ModuleWra
                 continue;
             }
 
-            const specJson = JSON.stringify(spec);
-            const nameJson = JSON.stringify(name);
-
             out[k] = (...args: any[]) => {
-                const src = `(...args) => import(${specJson}).then(m => m[${nameJson}](...args))`;
+                const src = buildModuleInvokeSource(spec, name);
                 if (isAsync) return dw.eval(src, { args });
                 return dw.evalSync(src, { args });
             };

@@ -8,10 +8,30 @@ import type { DenoWorker } from "./worker";
  * - `message`: payloads posted from inside the runtime via `postMessage(...)`.
  * - `close`: emitted when the runtime closes.
  * - `lifecycle`: control-plane lifecycle transitions (`beforeStart`, `afterStart`, etc).
+ * - `runtime`: runtime execution/import/handle events.
  */
-export type DenoWorkerEvent = "message" | "close" | "lifecycle";
+export type DenoWorkerEvent = "message" | "close" | "lifecycle" | "runtime";
 export type DenoWorkerMessageHandler = (msg: any) => void;
 export type DenoWorkerCloseHandler = () => void;
+export type DenoWorkerRuntimeEventKind =
+    | "import.requested"
+    | "import.resolved"
+    | "eval.begin"
+    | "eval.end"
+    | "evalSync.begin"
+    | "evalSync.end"
+    | "error.thrown"
+    | "handle.create"
+    | "handle.dispose"
+    | "handle.call.begin"
+    | "handle.call.end";
+export type DenoWorkerRuntimeEvent = {
+    kind: DenoWorkerRuntimeEventKind;
+    ts: number;
+    opId?: string;
+    [k: string]: any;
+};
+export type DenoWorkerRuntimeHandler = (event: DenoWorkerRuntimeEvent) => void;
 
 /**
  * Result shape for import policy callbacks.
@@ -371,9 +391,9 @@ export type DenoWorkerLimits = {
     maxHandle?: number;
     /**
      * Description: default per-evaluation timeout in milliseconds.
-     * Applies to runtime execution surfaces including `eval`, `evalSync`, `evalModule`, `importModule`, and handle operations that execute code in runtime (for example `handle.call`, `handle.apply`, `handle.await`).
+     * Applies to runtime execution surfaces including `eval`, `evalSync`, `module.eval`, `importModule`, and handle operations that execute code in runtime (for example `handle.call`, `handle.apply`, `handle.await`).
      * Can be overridden per call via:
-     * - `EvalOptions.maxEvalMs` on `eval`/`evalSync`/`evalModule`
+     * - `EvalOptions.maxEvalMs` on `eval`/`evalSync`/`module.eval`
      * - `DenoWorkerHandleExecOptions.maxEvalMs` on handle methods
      * Default: unset (no default timeout).
      * Min recommended: `10`.
@@ -384,7 +404,7 @@ export type DenoWorkerLimits = {
      * Description: default CPU-budget timeout in milliseconds.
      * Applies to the same execution surfaces as `maxEvalMs`.
      * Can be overridden per call via:
-     * - `EvalOptions.maxCpuMs` on `eval`/`evalSync`/`evalModule`
+     * - `EvalOptions.maxCpuMs` on `eval`/`evalSync`/`module.eval`
      * - `DenoWorkerHandleExecOptions.maxCpuMs` on handle methods
      * Default: unset (no default timeout).
      * Min recommended: `10`.
@@ -496,6 +516,13 @@ export type DenoWorkerOptions = {
      * Supports values, objects, and functions (including nested object functions).
      */
     globals?: Record<string, any>;
+    /**
+     * Module sources registered during worker startup.
+     *
+     * Keys are module names/specifiers used by `importModule(...)` or
+     * `worker.module.eval(..., { moduleName })` resolution paths.
+     */
+    modules?: Record<string, string>;
     /** Lifecycle hooks invoked around start/stop/crash transitions. */
     lifecycle?: DenoWorkerLifecycleHooks;
 };
@@ -608,7 +635,7 @@ export type DenoDirectorListOptions = {
 };
 
 /**
- * Evaluation call options for `eval`, `evalSync`, and `evalModule`.
+ * Evaluation call options for `eval`, `evalSync`, and `module.eval`.
  */
 export type EvalOptions = {
     /** Virtual filename used in stack traces and diagnostics. */
@@ -731,6 +758,28 @@ export type DenoWorkerStreamReader = AsyncIterable<Uint8Array> & {
 export type DenoWorkerStreamApi = {
     create(key?: string): DenoWorkerStreamWriter;
     accept(key: string): Promise<DenoWorkerStreamReader>;
+};
+
+export type DenoWorkerModuleEvalOptions = Omit<EvalOptions, "type"> & {
+    /**
+     * Optional stable module name to register before evaluating.
+     *
+     * When provided, `module.eval` first stores source under `moduleName` and
+     * then imports that module name to execute through normal module loading.
+     */
+    moduleName?: string;
+};
+
+export type DenoWorkerModuleApi = {
+    /** Evaluate module source and return callable namespace exports. */
+    eval<T extends Record<string, any> = Record<string, any>>(
+        source: string,
+        options?: DenoWorkerModuleEvalOptions,
+    ): Promise<T>;
+    /** Register module source under a stable module name for future imports/evals. */
+    register(moduleName: string, source: string): Promise<void>;
+    /** Remove a previously registered module by name. */
+    clear(moduleName: string): Promise<boolean>;
 };
 
 export type DenoWorkerHandleType =
@@ -920,6 +969,8 @@ export type NativeWorker = {
 
     /** Evaluate source as module and resolve module result/namespace. */
     evalModule?: (src: string, options?: EvalOptions) => Promise<any>;
+    registerModule?: (moduleName: string, source: string) => Promise<void>;
+    clearModule?: (moduleName: string) => Promise<boolean>;
 
     /** Last recorded execution stats snapshot. */
     lastExecutionStats: ExecStats;

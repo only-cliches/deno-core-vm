@@ -510,7 +510,7 @@ mod tests {
                     JsValueBridge::BigInt("9007199254740993".into()),
                     JsValueBridge::BufferView {
                         kind: "Uint8Array".into(),
-                        bytes: vec![1, 2, 3, 255],
+                        bytes: bytes::Bytes::from(vec![1, 2, 3, 255]).into(),
                         byte_offset: 0,
                         length: 4,
                     },
@@ -742,7 +742,10 @@ mod tests {
             serde_json::json!(256),
             serde_json::json!(511),
         ];
-        assert_eq!(parse_u8_array(&arr), Some(vec![0, 255, 0, 255]));
+        assert_eq!(
+            parse_u8_array(&arr),
+            Some(bytes::Bytes::from(vec![0, 255, 0, 255]))
+        );
     }
 
     #[test]
@@ -837,7 +840,7 @@ mod tests {
             out,
             JsValueBridge::BufferView {
                 kind: "Uint8Array".into(),
-                bytes: vec![1, 2, 255, 0],
+                bytes: bytes::Bytes::from(vec![1, 2, 255, 0]),
                 byte_offset: 0,
                 length: 4,
             },
@@ -865,7 +868,7 @@ mod tests {
             out,
             JsValueBridge::BufferView {
                 kind: "Uint8Array".into(),
-                bytes: vec![1, 2, 3],
+                bytes: bytes::Bytes::from(vec![1, 2, 3]),
                 byte_offset: 3,
                 length: 0,
             },

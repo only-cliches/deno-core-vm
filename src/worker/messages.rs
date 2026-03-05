@@ -92,6 +92,15 @@ pub enum DenoMsg {
     Close {
         deferred: PromiseSettler,
     },
+    RegisterModule {
+        module_name: String,
+        source: String,
+        deferred: PromiseSettler,
+    },
+    ClearModule {
+        module_name: String,
+        deferred: PromiseSettler,
+    },
 }
 
 impl DenoMsg {
@@ -130,6 +139,9 @@ pub enum NodeMsg {
     },
     /// Runtime is closing; invoke close callback and remove handle.
     EmitClose,
+    EmitRuntimeEvent {
+        value: JsValueBridge,
+    },
 
     Resolve {
         settler: PromiseSettler,

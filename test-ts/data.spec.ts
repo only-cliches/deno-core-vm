@@ -1,6 +1,6 @@
 import { DenoWorker } from "../src/index";
 import { createTestWorker } from "./helpers.worker-harness";
-import { assertErrorLike, isDateLike } from "./helpers.assertions";
+import { isDateLike } from "./helpers.assertions";
 
 describe("DenoWorker data and errors", () => {
   let dw: DenoWorker;
@@ -92,9 +92,6 @@ describe("DenoWorker data and errors", () => {
   });
 
   test("thrown Errors are Errors on the Node side", async () => {
-    // let result = await expect(dw.eval('(() => { throw new Error("boom"); })()'));
-    // assertErrorLike(result);
-
     await expect(dw.eval('(() => { throw new Error("boom"); })()')).rejects.toMatchObject({
       name: "Error",
       message: "boom",

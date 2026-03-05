@@ -1,4 +1,3 @@
-import { DenoWorker } from "../src/index";
 import { createTestWorker } from "./helpers.worker-harness";
 
 describe("deno_worker: limits", () => {
@@ -111,7 +110,7 @@ describe("deno_worker: limits", () => {
   );
 
   test(
-    "limits: evalModule waits behind an in-flight eval instead of failing",
+    "limits: module.eval waits behind an in-flight eval instead of failing",
     async () => {
       const dw = createTestWorker({ limits: { maxEvalMs: 2_000 }, bridge: { channelSize: 8 } });
       try {
@@ -125,7 +124,7 @@ describe("deno_worker: limits", () => {
 
         await sleep(30);
         const start = Date.now();
-        const mod = dw.evalModule(`
+        const mod = dw.module.eval(`
           export const answer = 42;
         `);
 
@@ -145,9 +144,13 @@ describe("deno_worker: limits", () => {
       const dw = createTestWorker({ limits: { maxEvalMs: 25 }, bridge: { channelSize: 8 } });
       const unhandled: string[] = [];
       const onUnhandled = (reason: unknown) => {
+        const reasonObj = typeof reason === "object" && reason !== null
+          ? (reason as Record<string, unknown>)
+          : null;
+        const hasMessage = reasonObj !== null && "message" in reasonObj;
         const msg =
-          typeof reason === "object" && reason && "message" in (reason as any)
-            ? String((reason as any).message)
+          hasMessage
+            ? String(reasonObj?.message)
             : String(reason);
         unhandled.push(msg);
       };
@@ -159,7 +162,10 @@ describe("deno_worker: limits", () => {
 
         const err = await pending.then(
           () => "",
-          (e) => String((e as any)?.message ?? e),
+          (e) => {
+            const ee = e as { message?: unknown } | null;
+            return String(ee?.message ?? e);
+          },
         );
         expect(err).toMatch(/execution terminated/i);
 

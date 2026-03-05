@@ -1,4 +1,3 @@
-import { DenoWorker } from "../src/index";
 import { createTestWorker } from "./helpers.worker-harness";
 
 async function sleep(ms: number): Promise<void> {

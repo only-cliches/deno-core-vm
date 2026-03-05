@@ -1,4 +1,3 @@
-import { DenoWorker } from "../src/index";
 import { createTestWorker } from "./helpers.worker-harness";
 
 function u8of(x: unknown): Uint8Array {

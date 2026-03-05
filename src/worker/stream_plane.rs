@@ -4,20 +4,11 @@ use std::collections::VecDeque;
 use std::sync::Condvar;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
-use std::sync::OnceLock;
 use tokio::sync::Notify;
 
-const STREAM_CREDIT_FLUSH_DEFAULT: u32 = 256 * 1024;
+use crate::worker::env_flags::native_stream_debug_enabled;
 
-fn debug_enabled() -> bool {
-  static ENABLED: OnceLock<bool> = OnceLock::new();
-  *ENABLED.get_or_init(|| {
-    std::env::var("DENO_DIRECTOR_NATIVE_STREAM_DEBUG")
-      .ok()
-      .map(|v| v == "1")
-      .unwrap_or(false)
-  })
-}
+const STREAM_CREDIT_FLUSH_DEFAULT: u32 = 256 * 1024;
 
 #[derive(Debug)]
 enum NativeStreamEvent {
@@ -82,7 +73,7 @@ impl NativeIncomingPlane {
     match self.inner.lock() {
       Ok(g) => g,
       Err(poisoned) => {
-        if debug_enabled() {
+        if native_stream_debug_enabled() {
           eprintln!("[native-stream] warning: poisoned mutex recovered");
         }
         poisoned.into_inner()
@@ -103,7 +94,7 @@ impl NativeIncomingPlane {
   pub fn has_stream(&self, stream_id: u32) -> bool {
     let inner = self.lock_inner();
     let has = inner.streams.contains_key(&stream_id);
-    if debug_enabled() && !has {
+    if native_stream_debug_enabled() && !has {
       let keys = inner.streams.keys().copied().collect::<Vec<_>>();
       eprintln!(
         "[native-stream] has_stream miss id={} plane={:p} keys={:?}",
@@ -141,7 +132,7 @@ impl NativeIncomingPlane {
         stream.native_active = true;
         found = true;
       }
-      if debug_enabled() {
+      if native_stream_debug_enabled() {
         eprintln!(
           "[native-stream] accept poll key={} id={} found={} streams={}",
           key,
@@ -195,7 +186,7 @@ impl NativeIncomingPlane {
     inner.backlog.insert(key.to_string(), stream_id);
     self.accept_notify.notify_waiters();
     self.cv.notify_all();
-    if debug_enabled() {
+    if native_stream_debug_enabled() {
       eprintln!("[native-stream] open id={} key={} plane={:p}", stream_id, key, self);
     }
     true
@@ -214,14 +205,14 @@ impl NativeIncomingPlane {
       .map(|s| s.waiting_reader)
       .unwrap_or(false);
     let Some(stream) = inner.streams.remove(&stream_id) else {
-      if debug_enabled() {
+      if native_stream_debug_enabled() {
         eprintln!("[native-stream] discard miss id={} plane={:p}", stream_id, self);
       }
       return (false, wake);
     };
     inner.key_to_id.remove(&stream.key);
     inner.backlog.remove(&stream.key);
-    if debug_enabled() {
+    if native_stream_debug_enabled() {
       eprintln!("[native-stream] discard id={} plane={:p}", stream_id, self);
     }
     self.read_notify.notify_waiters();
@@ -237,7 +228,7 @@ impl NativeIncomingPlane {
   pub fn push_chunk_with_wake(&self, stream_id: u32, chunk: Vec<u8>) -> (bool, bool) {
     let mut inner = self.lock_inner();
     let Some(stream) = inner.streams.get_mut(&stream_id) else {
-      if debug_enabled() {
+      if native_stream_debug_enabled() {
         eprintln!("[native-stream] queue pending chunk id={} bytes={}", stream_id, chunk.len());
       }
       inner
@@ -251,7 +242,7 @@ impl NativeIncomingPlane {
     };
     let wake = stream.waiting_reader;
     stream.waiting_reader = false;
-    if debug_enabled() {
+    if native_stream_debug_enabled() {
       let preview = chunk.iter().take(8).copied().collect::<Vec<_>>();
       eprintln!("[native-stream] chunk->queue id={} bytes={} head={:?}", stream_id, chunk.len(), preview);
     }
@@ -306,7 +297,7 @@ impl NativeIncomingPlane {
     stream.waiting_reader = false;
     match event {
       NativeStreamEvent::Chunk(chunk) => {
-        if debug_enabled() {
+        if native_stream_debug_enabled() {
           let preview = chunk.iter().take(8).copied().collect::<Vec<_>>();
           eprintln!("[native-stream] read-poll chunk id={} bytes={} head={:?}", stream_id, chunk.len(), preview);
         }
@@ -355,13 +346,13 @@ impl NativeIncomingPlane {
   }
 
   pub fn read_wait_sync(&self, stream_id: u32) -> NativeReadReply {
-    if debug_enabled() {
+    if native_stream_debug_enabled() {
       eprintln!("[native-stream] read-wait-sync enter id={} plane={:p}", stream_id, self);
     }
     let mut inner = self.lock_inner();
     loop {
       if !inner.streams.contains_key(&stream_id) {
-        if debug_enabled() {
+        if native_stream_debug_enabled() {
           eprintln!("[native-stream] read-wait-sync close(missing) id={}", stream_id);
         }
         return NativeReadReply {
@@ -377,7 +368,7 @@ impl NativeIncomingPlane {
       if let Some(event) = stream.queue.pop_front() {
         return match event {
           NativeStreamEvent::Chunk(chunk) => {
-            if debug_enabled() {
+            if native_stream_debug_enabled() {
               eprintln!("[native-stream] read-wait-sync chunk id={} bytes={}", stream_id, chunk.len());
             }
             NativeReadReply {
@@ -392,7 +383,7 @@ impl NativeIncomingPlane {
             }
           }
           NativeStreamEvent::Close => {
-            if debug_enabled() {
+            if native_stream_debug_enabled() {
               eprintln!("[native-stream] read-wait-sync close id={}", stream_id);
             }
             let key = stream.key.clone();
@@ -406,7 +397,7 @@ impl NativeIncomingPlane {
             }
           }
           NativeStreamEvent::Error(message) => {
-            if debug_enabled() {
+            if native_stream_debug_enabled() {
               eprintln!("[native-stream] read-wait-sync error id={}", stream_id);
             }
             let key = stream.key.clone();
@@ -424,7 +415,7 @@ impl NativeIncomingPlane {
       match self.cv.wait(inner) {
         Ok(waited) => inner = waited,
         Err(poisoned) => {
-          if debug_enabled() {
+          if native_stream_debug_enabled() {
             eprintln!("[native-stream] warning: poisoned wait mutex recovered");
           }
           inner = poisoned.into_inner();
@@ -438,7 +429,7 @@ impl NativeIncomingPlane {
     let deadline = start
       .checked_add(std::time::Duration::from_millis(timeout_ms))
       .unwrap_or_else(std::time::Instant::now);
-    if debug_enabled() {
+    if native_stream_debug_enabled() {
       eprintln!(
         "[native-stream] read-blocking start id={} timeout_ms={} initial_wait_ms={}",
         stream_id,
@@ -452,7 +443,7 @@ impl NativeIncomingPlane {
       if let Some(event) = stream.queue.pop_front() {
         return match event {
           NativeStreamEvent::Chunk(chunk) => {
-            if debug_enabled() {
+            if native_stream_debug_enabled() {
               eprintln!("[native-stream] read-blocking chunk id={} bytes={}", stream_id, chunk.len());
             }
             Some(NativeReadReply {
@@ -503,7 +494,7 @@ impl NativeIncomingPlane {
           }
         }
         Err(poisoned) => {
-          if debug_enabled() {
+          if native_stream_debug_enabled() {
             eprintln!("[native-stream] warning: poisoned wait mutex recovered");
           }
           inner = poisoned.into_inner().0;

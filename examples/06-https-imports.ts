@@ -12,7 +12,7 @@ async function main() {
     });
 
     try {
-        const mod = await worker.evalModule(`
+        const mod = await worker.module.eval(`
             import { basename } from "https://deno.land/std@0.224.0/path/mod.ts";
             export const out = basename("/tmp/example.txt");
         `);

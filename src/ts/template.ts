@@ -71,7 +71,7 @@ export class DenoWorkerTemplate {
             }
 
             for (const mod of [...asStringArray(this.options.bootstrapModules), ...asStringArray(createOptions?.bootstrapModules)]) {
-                await worker.evalModule(mod);
+                await worker.module.eval(mod);
             }
 
             if (typeof this.options.setup === "function") {

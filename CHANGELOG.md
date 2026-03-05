@@ -2,21 +2,76 @@
 
 All notable changes to this project will be documented in this file.
 
-### TODO
-- Add "on" events for import request, import resovlved, eval (begin and end), error throw, evalSync (begin and end), handle create, handle dispose, handle.call (begin and end)
-- evalModule optionally sets moduleName (bypasses imports on future loads) (evalModule with null value to clear)
 
-## [0.9.1] Mar 4, 2026
-### Changes
-- Moved `wasm` option from `limits` to `permissions` worker config object.
-- Added `ray-bench`.
-- Added `maxCpuMs` everywhere `maxEvalMs` is supported:
+## [0.9.1] Mar 5, 2026
+
+### Added
+- Added default CPU-budget timeout support (`maxCpuMs`) across runtime execution surfaces:
   - `limits.maxCpuMs` for worker defaults,
-  - `EvalOptions.maxCpuMs` for per-call overrides (`eval` / `evalSync` / `evalModule`),
+  - `EvalOptions.maxCpuMs` for per-call overrides (`eval` / `evalSync` / `worker.module.eval`),
   - `DenoWorkerHandleExecOptions.maxCpuMs` for handle operations.
-- Wired `maxCpuMs` through TS option normalization and native bridge parsing/runtime limits.
-- Enforced combined timeout behavior: when both `maxEvalMs` and `maxCpuMs` are set, runtime uses the stricter value (`min(maxEvalMs, maxCpuMs)`).
-- Updated docs/tests to cover `maxCpuMs` merge and per-call override behavior.
+- Added `bridge.streamHighWaterMarkBytes` tuning option for stream reader backpressure behavior.
+- Added an IPC benchmark suite under `ipc-bench/` (Node/Bun/Deno scenarios), including quick, restart, and sweep modes.
+- Added `npm run size:ts-js` to report compiled TypeScript output size.
+- Added native stream fast-path bridge methods (internal addon surface):
+  - `postMessageTyped`,
+  - `postStreamChunk`,
+  - `postStreamChunkRaw`,
+  - `postStreamChunkRawBin`,
+  - `postStreamChunks`,
+  - `postStreamChunksRaw`,
+  - `postStreamControl`.
+- Added `worker.module` namespace API:
+  - `worker.module.eval(source, options?)`
+  - `worker.module.register(moduleName, source)`
+  - `worker.module.clear(moduleName)`
+- Added constructor-time module shorthand `modules` (parallel to `globals`) to pre-register named modules at startup and re-apply them on restart.
+- Added runtime event channel via `worker.on("runtime", handler)` with event kinds for:
+  - imports (`import.requested`, `import.resolved`),
+  - eval lifecycle (`eval.begin/end`, `evalSync.begin/end`),
+  - user-visible thrown errors (`error.thrown`),
+  - handle lifecycle/calls (`handle.create`, `handle.dispose`, `handle.call.begin/end`).
+
+### Changed
+- Updated package publish entrypoints to `dist/`:
+  - `main: dist/index.js`
+  - `types: dist/index.d.ts`
+- Updated eval option normalization to preserve binary args (ArrayBuffer/views/SharedArrayBuffer) on hot paths instead of eagerly dehydrating to JSON wire payloads.
+- Wired `maxCpuMs` through TypeScript option normalization and Rust runtime limit parsing.
+- Runtime timeout enforcement now applies the stricter bound when both `maxEvalMs` and `maxCpuMs` are set (`min(maxEvalMs, maxCpuMs)`).
+- Refined benchmark/reporting scenarios and formatting during 0.9.1 benchmarking work.
+- `worker.module.eval` supports optional `moduleName` registration flow.
+- Migrated wasm load policy from `limits.wasm` to `permissions.wasm` (same effect, new config location).
+
+### Performance
+- Improved stream transport throughput with raw-binary and vectorized chunk paths across TS/Rust bridge code.
+- Continued bridge/codec path optimization for high-volume stream and IPC traffic.
+- Shifted benchmark focus from workload-style ray tracing measurements to IPC-centric throughput/latency measurements.
+
+### Internal
+- Extracted shared stream envelope codec into `src/shared/stream-envelope.ts` and reused it across TS worker and runtime bootstrap paths.
+- Centralized runtime env-flag parsing in Rust (`src/worker/env_flags.rs`) and wired stream/runtime toggles through that module.
+- Extracted module source helpers into `src/ts/module-source.ts` to reduce duplicated eval/import source generation logic.
+- Removed unused Rust dependency (`urlencoding`) and updated lockfile/dependency graph accordingly.
+- Performed bridge/runtime internal cleanups across wire/dispatch/stream-plane modules to support the new module API and runtime events.
+
+### Tests
+- Added runtime event coverage in `test-ts/runtime.events.spec.ts` for:
+  - eval/evalSync begin/end,
+  - import requested/resolved,
+  - handle create/call/dispose,
+  - user-visible `error.thrown`.
+- Added module API coverage for `worker.module.register`, `worker.module.clear`, and `worker.module.eval(..., { moduleName })`.
+- Added and reused shared time helpers (`test-ts/helpers.time.ts`) across tests to reduce duplicated wait/sleep utilities.
+- Updated existing test suites for API/type/cleanup changes and verified full suite pass against 0.9.1 changes.
+
+### Removed
+- Removed `limits.wasm`; use `permissions.wasm` for wasm import policy.
+- Removed `ray-bench/` in favor of `ipc-bench/`.
+- Removed top-level module methods in favor of `worker.module.*`:
+  - `evalModule(...)`
+  - `registerModule(...)`
+  - `clearModule(...)`
 
 ## [0.9.0] Mar 3, 2026
 

@@ -1,10 +1,6 @@
-import { DenoWorker } from "../src/index";
+import { sleep, waitFor } from "./helpers.time";
 import { createTestWorker } from "./helpers.worker-harness";
 import pLimit from "p-limit";
-
-function sleep(ms: number) {
-    return new Promise((r) => setTimeout(r, ms));
-}
 
 function makeBigObject(bytes: number) {
     // JSON-friendly payload that is large but deterministic
@@ -16,14 +12,6 @@ function makeBigObject(bytes: number) {
     };
 }
 
-async function waitFor(fn: () => boolean, ms: number) {
-    const start = Date.now();
-    while (Date.now() - start < ms) {
-        if (fn()) return;
-        await new Promise((r) => setTimeout(r, 10));
-    }
-    throw new Error("waitFor timeout");
-}
 
 describe("DenoWorker stress and backpressure", () => {
 
@@ -230,14 +218,12 @@ describe("DenoWorker stress and backpressure", () => {
     });
 
     test("churn: create and close repeatedly without deadlock", async () => {
-        jest.setTimeout(30_000);
-
         for (let i = 0; i < 50; i++) {
             const dw = createTestWorker();
             await dw.eval("1 + 1");
             await dw.close();
             expect(dw.isClosed()).toBe(true);
         }
-    });
+    }, 30_000);
 
 });
