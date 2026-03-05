@@ -5,9 +5,9 @@
   "main": "src/bench.ts",
   "scripts": {
     "bench": "npx tsx src/bench.ts",
-    "bench:quick": "npx tsx src/bench.ts --bytes 2048 --messages 512 --warmup 2 --iterations 3",
-    "bench:quick-fat": "npx tsx src/bench.ts --bytes 1048576 --messages 512 --warmup 2 --iterations 3",
-    "bench:quick-restart": "npx tsx src/bench.ts --bytes 2048 --restarts 128 --messages 512 --warmup 2 --iterations 3",
+    "bench:quick": "npx tsx src/bench.ts --bytes 2048 --messages 2048 --warmup 2 --iterations 3",
+    "bench:quick-fat": "npx tsx src/bench.ts --bytes 1048576 --messages 2048 --warmup 2 --iterations 3",
+    "bench:quick-restart": "npx tsx src/bench.ts --bytes 2048 --restarts 128 --messages 2048 --warmup 2 --iterations 3",
     "bench:sweep": "npx tsx src/bench.ts --bytes-list 1024,4096,65536,1048576 --restarts 64 --messages 256 --warmup 1 --iterations 3"
   },
   "keywords": [],

@@ -8,6 +8,7 @@
     "build": "cargo-cp-artifact -nc index.node -- cargo build --message-format=json-render-diagnostics",
     "build-debug": "npm run build -- && tsc --project tsconfig.idx.json",
     "build-release": "npm run build -- --release && tsc --project tsconfig.idx.json",
+    "size:ts-js": "node scripts/ts-compiled-js-size.mjs",
     "test-txt": "jest --verbose --silent=false &> test_results.txt",
     "test-json": "jest --json > test_results.json",
     "test": "npm run test:guard:any && cargo test && jest",

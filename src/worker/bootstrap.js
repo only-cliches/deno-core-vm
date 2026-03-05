@@ -588,6 +588,8 @@ globalThis.__nodeStreamBacklog = new Map();
 globalThis.__nodePendingIncomingStreamFrames = new Map();
 globalThis.__nodeStreamById = new Map();
 globalThis.__nodeStreamNameToId = new Map();
+globalThis.__nodeStreamNumericIdToId = new Map();
+globalThis.__nodeIncomingStreamsByNumeric = new Map();
 globalThis.__nodeStreamWriterCredits = new Map();
 globalThis.__nodeStreamWriterWaiters = new Map();
 globalThis.__nodePendingStreamCredits = new Map();
@@ -799,6 +801,20 @@ function registerStream(name, id) {
   }
   globalThis.__nodeStreamById.set(id, { name, localDiscarded: false, remoteDiscarded: false });
   globalThis.__nodeStreamNameToId.set(name, id);
+  const idNum = Number(id);
+  if (Number.isFinite(idNum) && idNum >= 1 && idNum <= 0xffffffff) {
+    globalThis.__nodeStreamNumericIdToId.set(Math.trunc(idNum), id);
+  }
+}
+
+function resolveStreamId(streamId) {
+  if (typeof streamId === "string") return streamId;
+  if (typeof streamId === "number" && Number.isFinite(streamId)) {
+    const n = Math.trunc(streamId) >>> 0;
+    return globalThis.__nodeStreamNumericIdToId.get(n) || String(n);
+  }
+  const s = String(streamId || "");
+  return s;
 }
 
 function addWriterCredit(id, credit) {
@@ -869,9 +885,19 @@ function tryReleaseStream(id) {
   if (!meta.localDiscarded || !meta.remoteDiscarded) return;
   globalThis.__nodeStreamById.delete(id);
   globalThis.__nodeIncomingStreams.delete(id);
+  const idNumIncoming = Number(id);
+  if (Number.isFinite(idNumIncoming) && idNumIncoming >= 1 && idNumIncoming <= 0xffffffff) {
+    globalThis.__nodeIncomingStreamsByNumeric.delete(Math.trunc(idNumIncoming) >>> 0);
+  }
   globalThis.__nodePendingIncomingStreamFrames.delete(id);
   const activeId = globalThis.__nodeStreamNameToId.get(meta.name);
   if (activeId === id) globalThis.__nodeStreamNameToId.delete(meta.name);
+  const idNum = Number(id);
+  if (Number.isFinite(idNum) && idNum >= 1 && idNum <= 0xffffffff) {
+    const n = Math.trunc(idNum) >>> 0;
+    const mapped = globalThis.__nodeStreamNumericIdToId.get(n);
+    if (mapped === id) globalThis.__nodeStreamNumericIdToId.delete(n);
+  }
   globalThis.__nodeStreamWriterCredits.delete(id);
   globalThis.__nodePendingStreamCredits.delete(id);
   const waiters = globalThis.__nodeStreamWriterWaiters.get(id);
@@ -1091,6 +1117,10 @@ function handleIncomingStreamFrame(frame) {
       reader.setOnLocalDiscard(() => markLocalDiscard(frame.id));
       reader.setOnChunkConsumed((bytes) => queueStreamCredit(frame.id, bytes));
       globalThis.__nodeIncomingStreams.set(frame.id, reader);
+      const idNum = Number(frame.id);
+      if (Number.isFinite(idNum) && idNum >= 1 && idNum <= 0xffffffff) {
+        globalThis.__nodeIncomingStreamsByNumeric.set(Math.trunc(idNum) >>> 0, reader);
+      }
       queueAcceptedStream(key, reader);
       const pending = globalThis.__nodePendingIncomingStreamFrames.get(frame.id);
       if (Array.isArray(pending) && pending.length > 0) {
@@ -1153,6 +1183,35 @@ function handleIncomingStreamFrame(frame) {
     default:
       return true;
   }
+}
+
+function routeIncomingStreamChunkFast(streamId, chunk) {
+  let id = streamId;
+  if (typeof streamId === "number" && Number.isFinite(streamId)) {
+    const n = Math.trunc(streamId) >>> 0;
+    const direct = globalThis.__nodeIncomingStreamsByNumeric.get(n);
+    if (direct) {
+      direct.pushChunk(chunk);
+      return true;
+    }
+    id = globalThis.__nodeStreamNumericIdToId.get(n) || String(n);
+  } else if (typeof streamId !== "string") {
+    id = String(streamId || "");
+  }
+  const stream = globalThis.__nodeIncomingStreams.get(id);
+  if (stream) {
+    stream.pushChunk(chunk);
+    return true;
+  }
+  if (!globalThis.__nodeStreamById.has(id)) {
+    queuePendingIncomingStreamFrame({
+      [STREAM_BRIDGE_TAG]: true,
+      t: "chunk",
+      id,
+      chunk,
+    });
+  }
+  return true;
 }
 
 const hostStreams = {
@@ -1427,58 +1486,47 @@ globalThis.__dispatchNodeTypedMessage = (type, id, payload) => {
 };
 
 globalThis.__dispatchNodeStreamChunk = (streamId, payload) => {
-  const id = typeof streamId === "string" ? streamId : String(streamId || "");
+  const id = resolveStreamId(streamId);
   if (!id) return;
   const chunk = toStreamChunk(payload);
   if (!chunk) return;
-  handleIncomingStreamFrame({
-    [STREAM_BRIDGE_TAG]: true,
-    t: "chunk",
-    id,
-    chunk,
-  });
+  routeIncomingStreamChunkFast(id, chunk);
 };
 
 globalThis.__dispatchNodeStreamChunkRaw = (streamId, payload, credit) => {
-  const id = typeof streamId === "string" ? streamId : String(streamId || "");
+  const id = resolveStreamId(streamId);
   if (!id) return;
   const c = Number(credit || 0);
   if (Number.isFinite(c) && c > 0) {
+    const creditId =
+      typeof streamId === "number" && Number.isFinite(streamId)
+        ? (globalThis.__nodeStreamNumericIdToId.get(Math.trunc(streamId) >>> 0) || id)
+        : id;
     handleIncomingStreamFrame({
       [STREAM_BRIDGE_TAG]: true,
       t: "credit",
-      id,
+      id: creditId,
       credit: c,
     });
   }
   const chunk = toStreamChunk(payload);
   if (!chunk) return;
-  handleIncomingStreamFrame({
-    [STREAM_BRIDGE_TAG]: true,
-    t: "chunk",
-    id,
-    chunk,
-  });
+  routeIncomingStreamChunkFast(streamId, chunk);
 };
 
 globalThis.__dispatchNodeStreamChunks = (streamId, payloads) => {
-  const id = typeof streamId === "string" ? streamId : String(streamId || "");
+  const id = resolveStreamId(streamId);
   if (!id) return;
   if (!Array.isArray(payloads) || payloads.length === 0) return;
   for (const payload of payloads) {
     const chunk = toStreamChunk(payload);
     if (!chunk) continue;
-    handleIncomingStreamFrame({
-      [STREAM_BRIDGE_TAG]: true,
-      t: "chunk",
-      id,
-      chunk,
-    });
+    routeIncomingStreamChunkFast(id, chunk);
   }
 };
 
 globalThis.__dispatchNodeStreamChunkVectorized = (streamId, payload) => {
-  const id = typeof streamId === "string" ? streamId : String(streamId || "");
+  const id = resolveStreamId(streamId);
   if (!id) return;
   const u8 = toStreamChunk(payload);
   if (!u8 || u8.byteLength < 4) return;
@@ -1488,12 +1536,7 @@ globalThis.__dispatchNodeStreamChunkVectorized = (streamId, payload) => {
       ((u8[off] << 24) | (u8[off + 1] << 16) | (u8[off + 2] << 8) | u8[off + 3]) >>> 0;
     off += 4;
     if (off + len > u8.byteLength) break;
-    handleIncomingStreamFrame({
-      [STREAM_BRIDGE_TAG]: true,
-      t: "chunk",
-      id,
-      chunk: u8.subarray(off, off + len),
-    });
+    routeIncomingStreamChunkFast(id, u8.subarray(off, off + len));
     off += len;
   }
 };

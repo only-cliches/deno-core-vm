@@ -34,6 +34,7 @@ import type {
 const STREAM_BRIDGE_TAG = "__denojs_worker_stream_v1";
 const STREAM_TYPED_CHUNK_PREFIX = "__denojs_worker_stream_chunk_v1:";
 const STREAM_TYPED_CHUNK_MIN_BYTES = 1;
+const STREAM_V2_ENABLED = process.env.DENO_DIRECTOR_STREAM_V2 !== "0";
 const STREAM_CHUNK_MAGIC = [0x44, 0x44, 0x53, 0x54, 0x52, 0x4d, 0x31, 0x00] as const;
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
@@ -61,6 +62,8 @@ const STREAM_DEFAULT_WINDOW_BYTES = 16 * 1024 * 1024;
 // Default credit flush threshold (256 KiB): avoids chatty credit updates while
 // keeping writers responsive under sustained transfer.
 const STREAM_CREDIT_FLUSH_THRESHOLD = 256 * 1024;
+const STREAM_V2_MAX_QUEUED_CHUNKS = 2048;
+const STREAM_V2_MAX_QUEUED_BYTES = 4 * 1024 * 1024;
 const STREAM_READER_DEFAULT_HIGH_WATER_MARK_BYTES = STREAM_DEFAULT_WINDOW_BYTES;
 const STREAM_BACKLOG_DEFAULT_LIMIT = 256;
 const STREAM_SLOT_POOL_MIN = 16;
@@ -451,16 +454,9 @@ function isStreamFrame(v: unknown): v is StreamFrame {
 /** Converts outgoing stream chunks to an efficient Uint8Array/Buffer view without copying when possible. */
 function toBinaryChunk(chunk: Uint8Array | ArrayBuffer): Uint8Array {
     if (chunk instanceof Uint8Array) {
-        if (typeof Buffer !== "undefined" && !Buffer.isBuffer(chunk)) {
-            return Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength);
-        }
         return chunk;
     }
-    const u8 = new Uint8Array(chunk);
-    if (typeof Buffer !== "undefined") {
-        return Buffer.from(u8.buffer, u8.byteOffset, u8.byteLength);
-    }
-    return u8;
+    return new Uint8Array(chunk);
 }
 
 /** Coerces unknown binary-like values into a Uint8Array view for envelope parsing. */
@@ -2053,12 +2049,6 @@ export class DenoWorker {
         let flushPromise: Promise<void> | null = null;
         let flushResolve: (() => void) | null = null;
         let flushReject: ((e: unknown) => void) | null = null;
-        let queuedFastChunks: Uint8Array[] = [];
-        let queuedFastBytes = 0;
-        let fastFlushQueued = false;
-        let fastFlushPromise: Promise<void> | null = null;
-        let fastFlushResolve: (() => void) | null = null;
-        let fastFlushReject: ((e: unknown) => void) | null = null;
         const settleFlush = (err?: unknown): void => {
             if (!flushPromise) return;
             const resolve = flushResolve;
@@ -2066,19 +2056,6 @@ export class DenoWorker {
             flushPromise = null;
             flushResolve = null;
             flushReject = null;
-            if (err !== undefined) {
-                if (reject) reject(err);
-                return;
-            }
-            if (resolve) resolve();
-        };
-        const settleFastFlush = (err?: unknown): void => {
-            if (!fastFlushPromise) return;
-            const resolve = fastFlushResolve;
-            const reject = fastFlushReject;
-            fastFlushPromise = null;
-            fastFlushResolve = null;
-            fastFlushReject = null;
             if (err !== undefined) {
                 if (reject) reject(err);
                 return;
@@ -2100,38 +2077,11 @@ export class DenoWorker {
                 settleFlush(err);
             }
         };
-        const flushFastChunks = (): void => {
-            fastFlushQueued = false;
-            if (queuedFastChunks.length === 0) {
-                settleFastFlush();
-                return;
-            }
-            const chunks = queuedFastChunks;
-            queuedFastChunks = [];
-            queuedFastBytes = 0;
-            try {
-                if (chunks.length === 1) {
-                    postChunkFast(chunks[0]);
-                } else {
-                    postChunksFast(chunks);
-                }
-                settleFastFlush();
-            } catch (err) {
-                settleFastFlush(err);
-            }
-        };
         const scheduleFlushQueuedWrites = (): void => {
             if (flushQueued) return;
             flushQueued = true;
             queueMicrotask(() => {
                 flushQueuedWrites();
-            });
-        };
-        const scheduleFastFlush = (): void => {
-            if (fastFlushQueued) return;
-            fastFlushQueued = true;
-            queueMicrotask(() => {
-                flushFastChunks();
             });
         };
         const queuePayloads = (payloads: Uint8Array[]): Promise<void> => {
@@ -2149,21 +2099,6 @@ export class DenoWorker {
             if (queuedPayloads.length >= 32) flushQueuedWrites();
             else scheduleFlushQueuedWrites();
             return pendingFlush;
-        };
-        const queueFastChunk = (chunk: Uint8Array): Promise<void> => {
-            queuedFastChunks.push(chunk);
-            queuedFastBytes += chunk.byteLength;
-            if (!fastFlushPromise) {
-                fastFlushPromise = new Promise<void>((resolve, reject) => {
-                    fastFlushResolve = resolve;
-                    fastFlushReject = reject;
-                });
-                void fastFlushPromise.catch(() => {});
-            }
-            const pending = fastFlushPromise;
-            if (queuedFastChunks.length >= 512 || queuedFastBytes >= 1024 * 1024) flushFastChunks();
-            else scheduleFastFlush();
-            return pending;
         };
         const postRawBatch = (payloads: Uint8Array[]): void => {
             if (payloads.length === 0) return;
@@ -2225,7 +2160,7 @@ export class DenoWorker {
                 postChunkFast(chunks[0]);
                 return;
             }
-            if (canPostNativeChunksRaw && useRawStreamId !== null) {
+            if (!STREAM_V2_ENABLED && canPostNativeChunksRaw && useRawStreamId !== null) {
                 const ok = (this.native as any).postStreamChunksRaw(useRawStreamId, encodeVectorizedChunks(chunks));
                 if (!ok) throw new Error("DenoWorker.postStreamChunksRaw failed: worker is closed");
                 return;
@@ -2233,6 +2168,10 @@ export class DenoWorker {
             // Coalesce when vectorized/raw path is unavailable.
             let total = 0;
             for (const chunk of chunks) total += chunk.byteLength;
+            if (typeof Buffer !== "undefined") {
+                postChunkFast(Buffer.concat(chunks, total));
+                return;
+            }
             const merged = new Uint8Array(total);
             let off = 0;
             for (const chunk of chunks) {
@@ -2240,6 +2179,52 @@ export class DenoWorker {
                 off += chunk.byteLength;
             }
             postChunkFast(merged);
+        };
+        const streamV2 =
+            STREAM_V2_ENABLED && (canPostNativeChunkRaw || canPostNativeChunk || canPostTypedChunk);
+        let queuedFastChunks: Uint8Array[] = [];
+        let queuedFastBytes = 0;
+        let fastFlushQueued = false;
+        let fastFlushError: unknown = null;
+        const flushFastChunks = (): void => {
+            fastFlushQueued = false;
+            if (queuedFastChunks.length === 0) {
+                return;
+            }
+            const chunks = queuedFastChunks;
+            queuedFastChunks = [];
+            queuedFastBytes = 0;
+            try {
+                postChunksFast(chunks);
+            } catch (err) {
+                fastFlushError = err;
+            }
+        };
+        const scheduleFastFlush = (): void => {
+            if (fastFlushQueued) return;
+            fastFlushQueued = true;
+            if (typeof setImmediate === "function") {
+                setImmediate(() => {
+                    flushFastChunks();
+                });
+                return;
+            }
+            queueMicrotask(() => {
+                flushFastChunks();
+            });
+        };
+        const queueFastChunk = (chunk: Uint8Array): void => {
+            if (!streamV2) {
+                postChunkFast(chunk);
+                return;
+            }
+            if (fastFlushError) throw fastFlushError;
+            queuedFastChunks.push(chunk);
+            queuedFastBytes += chunk.byteLength;
+            if (queuedFastChunks.length >= STREAM_V2_MAX_QUEUED_CHUNKS || queuedFastBytes >= STREAM_V2_MAX_QUEUED_BYTES) {
+                flushFastChunks();
+            }
+            else scheduleFastFlush();
         };
 
         return {
@@ -2262,7 +2247,12 @@ export class DenoWorker {
                 if (have >= u8.byteLength) {
                     this.consumeWriterCredit(id, u8.byteLength);
                     if (useTypedChunk) {
-                        return withHandledRejection(queueFastChunk(u8));
+                        try {
+                            queueFastChunk(u8);
+                            return Promise.resolve();
+                        } catch (err) {
+                            return Promise.reject(err);
+                        }
                     } else {
                         const payload = encodeChunkEnvelope(u8);
                         this.postMessageRaw(payload);
@@ -2273,7 +2263,7 @@ export class DenoWorker {
                     await this.waitForWriterCredit(id, u8.byteLength);
                     this.consumeWriterCredit(id, u8.byteLength);
                     if (useTypedChunk) {
-                        await queueFastChunk(u8);
+                        queueFastChunk(u8);
                     } else {
                         const payload = encodeChunkEnvelope(u8);
                         this.postMessageRaw(payload);
@@ -2314,7 +2304,7 @@ export class DenoWorker {
                             (canPostNativeChunkRaw || canPostNativeChunk || canPostTypedChunk) &&
                             chunk.byteLength >= STREAM_TYPED_CHUNK_MIN_BYTES;
                         if (useTypedChunk) {
-                            await queueFastChunk(chunk);
+                            queueFastChunk(chunk);
                         } else {
                             batch.push(encodeChunkEnvelope(chunk));
                             batchBytes += chunk.byteLength;
@@ -2350,6 +2340,7 @@ export class DenoWorker {
                 withHandledRejection((async () => {
                     if (done) return;
                     done = true;
+                    flushQueuedWrites();
                     flushFastChunks();
                     this.emitStreamFrame({ t: "error", id, error: String(message || "stream error") });
                     this.markRemoteDiscard(id);
@@ -2360,6 +2351,7 @@ export class DenoWorker {
                 withHandledRejection((async () => {
                     if (done) return;
                     done = true;
+                    flushQueuedWrites();
                     flushFastChunks();
                     this.emitStreamFrame({ t: "cancel", id, reason });
                     this.markRemoteDiscard(id);
