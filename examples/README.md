@@ -9,7 +9,7 @@ Run these first to see the core behavior quickly.
 - `03-globals.ts`: expose Node values/functions through `worker.global`.
 - `04-messages.ts`: event-style messaging (`postMessage` + `on("message")`).
 - `05-imports-callback.ts`: intercept and rewrite module imports dynamically.
-- `05-imports-callback.ts`: intercept and rewrite module imports dynamically (including `{ source, sourceLoader }` virtual modules).
+- `05-imports-callback.ts`: intercept and rewrite module imports dynamically (including `{ src, srcLoader }` virtual modules).
 - `06-https-imports.ts`: allow and use remote HTTPS module imports.
 - `07-node-resolve.ts`: enable Node-style module resolution where needed.
 - `08-limits.ts`: enforce runtime limits and timeout boundaries.

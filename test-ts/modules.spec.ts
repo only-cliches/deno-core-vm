@@ -87,13 +87,13 @@ describe("deno_worker: modules", () => {
         seen.push(specifier);
         if (specifier === "virtual:math") {
           return {
-            source: `
+            src: `
               export const n = 21;
               export function double(x) { return x * 2; }
               export async function plusOneAsync(x) { return x + 1; }
               export default "math-default";
             `,
-            sourceLoader: "js",
+            srcLoader: "js",
           };
         }
         return false;
@@ -128,7 +128,7 @@ describe("deno_worker: modules", () => {
     await expect(dw.module.import("named:pin")).resolves.toMatchObject({ out: 77 });
   });
 
-  it("constructor modules are registered during startup", async () => {
+  it("constructor modules accept bare string shorthand entries", async () => {
     dw = createTestWorker({
       modules: {
         "named:startup": "export const boot = 1;",
@@ -148,6 +148,49 @@ describe("deno_worker: modules", () => {
     await expect(dw.module.import("named:restart")).rejects.toBeDefined();
     await dw.restart();
     await expect(dw.module.import("named:restart")).resolves.toMatchObject({ v: 55 });
+  });
+
+  it("constructor modules support object entries with srcLoader after loader transforms", async () => {
+    dw = createTestWorker({
+      sourceLoaders: [
+        ({ src, srcLoader, kind }) => {
+          if (kind !== "module-eval") return;
+          if (srcLoader !== "app-ts") return;
+          return { src, srcLoader: "js" };
+        },
+      ],
+      modules: {
+        "named:loader-entry": {
+          src: "export const v = 99;",
+          srcLoader: "app-ts",
+        },
+      },
+    });
+
+    await expect(dw.module.import("named:loader-entry")).resolves.toMatchObject({ v: 99 });
+  });
+
+  it("constructor modules support built-in ts srcLoader entries", async () => {
+    dw = createTestWorker({
+      modules: {
+        "named:bad-loader": {
+          src: "export const v: number = 1;",
+          srcLoader: "ts",
+        },
+      },
+    });
+
+    await expect(dw.module.import("named:bad-loader")).resolves.toMatchObject({ v: 1 });
+  });
+
+  it("worker.module.eval can pin moduleName with srcLoader:'ts'", async () => {
+    dw = createTestWorker();
+    const mod = await dw.module.eval("export const out: number = 88;", {
+      moduleName: "named:pin-ts",
+      srcLoader: "ts",
+    });
+    expect(mod.out).toBe(88);
+    await expect(dw.module.import("named:pin-ts")).resolves.toMatchObject({ out: 88 });
   });
 
   it("imports:false allows declared modules and blocks everything else", async () => {

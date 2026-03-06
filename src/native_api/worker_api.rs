@@ -1285,11 +1285,28 @@ pub fn create_worker(mut cx: FunctionContext) -> JsResult<JsObject> {
         let f = JsFunction::new(&mut cx, move |mut cx| {
             let module_name = cx.argument::<JsString>(0)?.value(&mut cx);
             let source = cx.argument::<JsString>(1)?.value(&mut cx);
+            let mut loader = "js".to_string();
+            if let Some(raw) = cx.argument_opt(2) {
+                if let Ok(opts) = raw.downcast::<JsObject, _>(&mut cx) {
+                    let source_loader_value = opts
+                        .get::<JsValue, _, _>(&mut cx, "srcLoader")
+                        .or_else(|_| opts.get::<JsValue, _, _>(&mut cx, "loader"));
+                    if let Ok(v) = source_loader_value {
+                        if let Ok(s) = v.downcast::<JsString, _>(&mut cx) {
+                            let parsed = s.value(&mut cx);
+                            if matches!(parsed.as_str(), "js" | "ts" | "tsx" | "jsx") {
+                                loader = parsed;
+                            }
+                        }
+                    }
+                }
+            }
             let (deferred, promise) = cx.promise();
             let settler = PromiseSettler::new(deferred, cx.channel());
             queue_deno_msg_or_reject(id2, settler, |deferred| DenoMsg::RegisterModule {
                 module_name,
                 source,
+                loader,
                 deferred,
             });
             Ok(promise)

@@ -40,12 +40,12 @@ export type DenoSourceLoader = "js" | "ts" | "tsx" | "jsx";
 /**
  * Virtual source return shape for import policy callbacks.
  *
- * `sourceLoader` controls whether transpilation is required (`ts`/`tsx`/`jsx`) or not (`js`).
+ * `srcLoader` controls whether transpilation is required (`ts`/`tsx`/`jsx`) or not (`js`).
  * Default source loader is `"js"` when omitted.
  */
 export type ImportsCallbackSource = {
     /** Module source text to load. */
-    source: string;
+    src: string;
     /**
      * Source loader mode.
      *
@@ -59,7 +59,7 @@ export type ImportsCallbackSource = {
      * If omitted, defaults to `"js"`.
      * If worker option `sourceLoaders` is `false`, only `"js"` is permitted.
      */
-    sourceLoader?: string;
+    srcLoader?: string;
 };
 
 export type ImportsCallbackResult =
@@ -89,9 +89,9 @@ export type ImportsCallback = (
 
 export type DenoLoaderTransformContext = {
     /** Source text provided to the loader. */
-    source: string;
+    src: string;
     /** Requested source loader name for this transform step. */
-    sourceLoader: string;
+    srcLoader: string;
     /** Call site category. */
     kind: "eval" | "module-eval" | "import";
     /** Import specifier when `kind === "import"`. */
@@ -107,12 +107,12 @@ export type DenoLoaderTransformResult =
     | void
     | {
             /** Transformed source text. */
-            source: string;
+            src: string;
             /**
              * Optional next source loader to apply after this transform step.
              * Defaults to the current source loader when omitted.
              */
-            sourceLoader?: string;
+            srcLoader?: string;
       };
 
 export type DenoLoaderTransform = (
@@ -127,7 +127,7 @@ export type DenoLoaderTransform = (
  */
 export type DenoWorkerLoadersOption = DenoLoaderTransform[];
 
-/** Disable all loader behavior (custom + built-in). Only `sourceLoader: "js"` is allowed. */
+/** Disable all loader behavior (custom + built-in). Only `srcLoader: "js"` is allowed. */
 export type DenoWorkerLoadersDisabled = false;
 
 /**
@@ -289,6 +289,22 @@ export type DenoWorkerTsCompilerOption =
             jsxFragmentFactory?: string;
             /** Optional on-disk directory for transpiled compiler output cache. */
             cacheDir?: string;
+      };
+
+/** Startup module source entry used by `DenoWorkerOptions.modules`. */
+export type DenoWorkerStartupModuleSource =
+    | string // shorthand for: { src: "<code>", srcLoader: "js" }
+    | {
+            /** Module source text to register under the module name key. */
+            src: string;
+            /**
+             * Source loader mode for startup module compilation.
+             *
+             * Defaults to `"js"` when omitted.
+             * Custom loader names are allowed when `sourceLoaders` transforms rewrite
+             * them to one of the built-in runtime loaders (`js`, `ts`, `tsx`, `jsx`).
+             */
+            srcLoader?: string;
       };
 
 export type DenoWorkerBridgeOption =
@@ -551,7 +567,7 @@ export type DenoWorkerOptions = {
      *
      * Built-in runtime loaders are available for `js`, `ts`, `tsx`, and `jsx`.
      * Custom callbacks may be async and can rewrite to another source loader by returning
-     * `{ source, sourceLoader }`.
+     * `{ src, srcLoader }`.
      *
      * The built-in runtime loader always runs last, after this array completes.
      * If no source loader is set anywhere, the default source loader is `"js"`.
@@ -580,8 +596,12 @@ export type DenoWorkerOptions = {
      *
      * Keys are module names/specifiers used by `worker.module.import(...)` or
      * `worker.module.eval(..., { moduleName })` resolution paths.
+     *
+     * Value forms:
+     * - string (shorthand for `{ src: string, srcLoader: "js" }`)
+     * - object `{ src, srcLoader? }`
      */
-    modules?: Record<string, string>;
+    modules?: Record<string, DenoWorkerStartupModuleSource>;
     /** Lifecycle hooks invoked around start/stop/crash transitions. */
     lifecycle?: DenoWorkerLifecycleHooks;
 };
@@ -714,7 +734,7 @@ export type EvalOptions = {
      * If omitted, defaults to `"js"`.
      * If worker option `sourceLoaders` is `false`, only `"js"` is permitted.
      */
-    sourceLoader?: string;
+    srcLoader?: string;
     /** Positional args exposed to eval entrypoint (bridge-dehydrated). */
     args?: any[];
     /** Per-call timeout override in milliseconds. */
@@ -957,7 +977,7 @@ export type DenoWorkerModuleApi = {
         options?: DenoWorkerModuleEvalOptions,
     ): Promise<T>;
     /** Register module source under a stable module name for future imports/evals. */
-    register(moduleName: string, source: string): Promise<void>;
+    register(moduleName: string, source: string, options?: Pick<EvalOptions, "srcLoader">): Promise<void>;
     /** Remove a previously registered module by name. */
     clear(moduleName: string): Promise<boolean>;
 };
@@ -1100,7 +1120,7 @@ export type DenoWorkerHandleApi = {
      *
      * `options.maxEvalMs` is used both for creation and as the handle-level default timeout for subsequent handle calls.
      */
-    eval(source: string, options?: Omit<EvalOptions, "args" | "type" | "sourceLoader">): Promise<DenoWorkerHandle>;
+    eval(source: string, options?: Omit<EvalOptions, "args" | "type" | "srcLoader">): Promise<DenoWorkerHandle>;
 };
 
 /** Global namespace exposed on `DenoWorker.global`. */
@@ -1213,7 +1233,7 @@ export type NativeWorker = {
 
     /** Evaluate source as module and resolve module result/namespace. */
     evalModule?: <T = any>(src: string, options?: EvalOptions) => Promise<T>;
-    registerModule?: (moduleName: string, source: string) => Promise<void>;
+    registerModule?: (moduleName: string, source: string, options?: Pick<EvalOptions, "srcLoader">) => Promise<void>;
     clearModule?: (moduleName: string) => Promise<boolean>;
 
     /** Last recorded execution stats snapshot. */

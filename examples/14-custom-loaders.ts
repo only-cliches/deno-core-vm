@@ -4,16 +4,16 @@ async function main() {
     const worker = new DenoWorker({
         // Loaders run in order. Built-in loader runs after this chain.
         sourceLoaders: [
-            async ({ source, sourceLoader }) => {
+            async ({ src, srcLoader }) => {
                 // Alias custom loader name -> built-in TS transpiler.
-                if (sourceLoader === "custom-ts") {
-                    return { source, sourceLoader: "ts" };
+                if (srcLoader === "custom-ts") {
+                    return { src, srcLoader: "ts" };
                 }
 
                 // Override a custom format by compiling to JS yourself.
-                if (sourceLoader === "kv") {
+                if (srcLoader === "kv") {
                     const out: Record<string, string> = {};
-                    for (const raw of source.split("\n")) {
+                    for (const raw of src.split("\n")) {
                         const line = raw.trim();
                         if (!line || line.startsWith("#")) continue;
                         const idx = line.indexOf("=");
@@ -22,11 +22,11 @@ async function main() {
                         const value = line.slice(idx + 1).trim();
                         out[key] = value;
                     }
-                    return { source: `export default ${JSON.stringify(out)};`, sourceLoader: "js" };
+                    return { src: `export default ${JSON.stringify(out)};`, srcLoader: "js" };
                 }
 
                 // Example of hard-disabling a loader mode.
-                if (sourceLoader === "tsx") {
+                if (srcLoader === "tsx") {
                     throw new Error("tsx loader is disabled in this runtime");
                 }
             },
@@ -34,22 +34,22 @@ async function main() {
         imports: (specifier: string) => {
             if (specifier === "app:typed") {
                 return {
-                    source: `
+                    src: `
                         const n: number = 41;
                         export default n + 1;
                     `,
-                    sourceLoader: "custom-ts",
+                    srcLoader: "custom-ts",
                 };
             }
 
             if (specifier === "app:config") {
                 return {
-                    source: `
+                    src: `
                         # key=value pairs
                         env=prod
                         region=us-west-2
                     `,
-                    sourceLoader: "kv",
+                    srcLoader: "kv",
                 };
             }
 

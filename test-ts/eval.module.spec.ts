@@ -116,7 +116,7 @@ describe("module.eval: module namespace API", () => {
     }
   });
 
-  test("transpiles TypeScript in module.eval when sourceLoader:'ts' is set", async () => {
+  test("transpiles TypeScript in module.eval when srcLoader:'ts' is set", async () => {
     const dw = createTestWorker({
       console: false,
     });
@@ -133,7 +133,7 @@ describe("module.eval: module namespace API", () => {
         export type User = { id: number };
         const user: User = { id: 42 };
         export const out: number = user.id;
-      `, { sourceLoader: "ts" });
+      `, { srcLoader: "ts" });
 
       expect(mod.out).toBe(42);
     } finally {

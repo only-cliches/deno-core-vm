@@ -83,11 +83,12 @@ describe("DenoWorker API", () => {
   test("stats.cpu returns usagePercentage in the 0-100 range", async () => {
     await expect(dw.eval("for (let i = 0; i < 200_000; i++) {} 1;")).resolves.toBe(1);
 
-    const cpu = await dw.stats.cpu({ measureMs: 1000 });
+    const cpu = await dw.stats.cpu({ measureMs: 100 });
+    console.log(cpu);
     expect(typeof cpu.usagePercentage).toBe("number");
     expect(cpu.usagePercentage).toBeGreaterThanOrEqual(0);
     expect(cpu.usagePercentage).toBeLessThanOrEqual(100);
-    expect(cpu.measureMs).toBe(1000);
+    expect(cpu.measureMs).toBe(100);
     expect(typeof cpu.cpuTimeMs).toBe("number");
     expect(cpu.cpuTimeMs).toBeGreaterThanOrEqual(0);
 
@@ -96,6 +97,32 @@ describe("DenoWorker API", () => {
     expect(clamped.usagePercentage).toBeGreaterThanOrEqual(0);
     expect(clamped.usagePercentage).toBeLessThanOrEqual(100);
   });
+
+  test("stats.cpu can be sampled while a long CPU task is in flight", async () => {
+    const pending = dw.eval(`
+      (() => {
+        const end = Date.now() + 1000;
+        while (Date.now() < end) {}
+        return 123;
+      })()
+    `);
+
+    let sawActiveOps = false;
+    let sawNonZeroCpu = false;
+    for (let i = 0; i < 10; i += 1) {
+      await sleep(75);
+      const active = dw.stats.activeOps > 0;
+      if (active) sawActiveOps = true;
+
+      const cpu = await dw.stats.cpu({ measureMs: 250 });
+
+      if (active && cpu.usagePercentage > 0) sawNonZeroCpu = true;
+    }
+
+    await expect(pending).resolves.toBe(123);
+    expect(sawActiveOps).toBe(true);
+    expect(sawNonZeroCpu).toBe(true);
+  }, 15000);
 
   test("stats exposes rates/latency/eventLoopLag/stream/totals/reset", async () => {
     await expect(dw.eval("1 + 1")).resolves.toBe(2);

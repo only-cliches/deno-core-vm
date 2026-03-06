@@ -2,7 +2,30 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.9.5] Future
+## [0.9.6] Mar 6, 2026
+
+### Changed
+- Renamed eval/module loader option key from `sourceLoader` to `srcLoader` across public APIs and docs:
+  - `worker.eval(..., { srcLoader })`
+  - `worker.evalSync(..., { srcLoader })`
+  - `worker.module.eval(..., { srcLoader })`
+  - `worker.module.register(..., { srcLoader })`
+- Updated native bridge option parsing to read `srcLoader` for eval/module registration flows.
+- Clarified startup `modules` value behavior: string entries are shorthand for `{ src: "...", srcLoader: "js" }`.
+
+### Breaking Changes
+- `EvalOptions.sourceLoader` removed; use `EvalOptions.srcLoader`.
+- `module.register(..., { sourceLoader })` removed; use `{ srcLoader }`.
+
+### Tests
+- Revalidated TypeScript build (`tsc --project tsconfig.idx.json --noEmit`) after the rename.
+- Revalidated loader/eval/module suites:
+  - `test-ts/eval.spec.ts`
+  - `test-ts/eval.module.spec.ts`
+  - `test-ts/modules.spec.ts`
+  - `test-ts/imports.ts_compile.spec.ts`
+
+## [0.9.5] Mar 5, 2026
 
 ### Added
 - Added full `worker.global` handle-parity namespace API rooted at `globalThis`:
@@ -57,9 +80,9 @@ All notable changes to this project will be documented in this file.
   - moved memory API under `worker.stats.memory()`
   - moved last execution stats under `worker.stats.lastExecution`
 - Changed import callback virtual module return shape to explicit source form:
-  - `{ source: string, sourceLoader?: string }`
-  - `sourceLoader` defaults to `"js"`.
-- Changed eval/module loader option naming/docs to `sourceLoader` (default `"js"`), with built-in runtime loaders `js | ts | tsx | jsx`.
+  - `{ src: string, srcLoader?: string }`
+  - `srcLoader` defaults to `"js"`.
+- Changed eval/module loader option naming/docs to `srcLoader` (default `"js"`), with built-in runtime loaders `js | ts | tsx | jsx`.
 - Changed worker loader configuration to `sourceLoaders` callback pipeline (`Array<loaderFn>`) with async callback support.
 - Changed `sourceLoaders: false` behavior to strict JS mode (disables custom and built-in non-JS loader behavior).
 - Changed worker option normalization/merge behavior around permissions and module loader fields to correctly preserve boolean/object combinations and nested overrides.
@@ -88,8 +111,8 @@ All notable changes to this project will be documented in this file.
 - `worker.lastExecutionStats` -> `worker.stats.lastExecution`.
 - `worker.setGlobal(...)` usage replaced by `worker.global.set(...)` (and related `worker.global.*` APIs).
 - Worker option key `loaders` removed; use `sourceLoaders`.
-- `transpileTs` removed; loader/transpile behavior is now driven by `sourceLoader` + `sourceLoaders`.
-- Import callback virtual module shape now uses `{ source, sourceLoader? }` (default `sourceLoader: "js"`).
+- `transpileTs` removed; loader/transpile behavior is now driven by `srcLoader` + `sourceLoaders`.
+- Import callback virtual module shape now uses `{ src, srcLoader? }` (default `srcLoader: "js"`).
 
 ### Tests
 - Revalidated TypeScript build (`tsc --project tsconfig.idx.json --noEmit`) after API/type updates.

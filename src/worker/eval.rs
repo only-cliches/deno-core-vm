@@ -199,7 +199,7 @@ fn specifier_for_eval_filename(filename: &str, media: deno_ast::MediaType) -> Ur
 }
 
 // Maybe transpile eval source.
-fn maybe_transpile_eval_source(
+pub(crate) fn maybe_transpile_eval_source(
     limits: &RuntimeLimits,
     filename: &str,
     loader: &str,

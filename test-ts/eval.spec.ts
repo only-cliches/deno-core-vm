@@ -105,14 +105,14 @@ describe("deno_worker: eval", () => {
     expect(dw.stats.lastExecution?.evalTimeMs).toEqual(expect.any(Number));
   });
 
-  it("transpiles TypeScript for eval and evalSync when sourceLoader:'ts' is set", async () => {
-    await expect(dw.eval("const n: number = 41; n + 1;", { sourceLoader: "ts" })).resolves.toBe(42);
-    expect(dw.evalSync("const n: number = 2; n + 3;", { sourceLoader: "ts" })).toBe(5);
+  it("transpiles TypeScript for eval and evalSync when srcLoader:'ts' is set", async () => {
+    await expect(dw.eval("const n: number = 41; n + 1;", { srcLoader: "ts" })).resolves.toBe(42);
+    expect(dw.evalSync("const n: number = 2; n + 3;", { srcLoader: "ts" })).toBe(5);
   });
 
-  it("defaults eval loader to js (TypeScript syntax requires sourceLoader:'ts')", async () => {
+  it("defaults eval loader to js (TypeScript syntax requires srcLoader:'ts')", async () => {
     await expect(dw.eval("const n: number = 41; n + 1;")).rejects.toBeDefined();
-    await expect(dw.eval("const n: number = 41; n + 1;", { sourceLoader: "ts" })).resolves.toBe(42);
+    await expect(dw.eval("const n: number = 41; n + 1;", { srcLoader: "ts" })).resolves.toBe(42);
   });
 
   it("writes transpile cache entries when tsCompiler.cacheDir is set", async () => {
@@ -124,7 +124,7 @@ describe("deno_worker: eval", () => {
     });
 
     try {
-      await expect(dw.eval("const n: number = 7; n + 1;", { sourceLoader: "ts" })).resolves.toBe(8);
+      await expect(dw.eval("const n: number = 7; n + 1;", { srcLoader: "ts" })).resolves.toBe(8);
       const entries = fs.readdirSync(cacheDir);
       expect(entries.length).toBeGreaterThan(0);
     } finally {
@@ -136,15 +136,15 @@ describe("deno_worker: eval", () => {
     await dw.close();
     dw = createTestWorker({
       sourceLoaders: [
-        async ({ source, sourceLoader }) => {
-          if (sourceLoader !== "custom-ts") return;
-          return { source, sourceLoader: "ts" };
+        async ({ src, srcLoader }) => {
+          if (srcLoader !== "custom-ts") return;
+          return { src, srcLoader: "ts" };
         },
       ],
     });
 
     await expect(
-      dw.eval("const n: number = 20; n + 22;", { sourceLoader: "custom-ts" as any }),
+      dw.eval("const n: number = 20; n + 22;", { srcLoader: "custom-ts" as any }),
     ).resolves.toBe(42);
   });
 
@@ -152,7 +152,7 @@ describe("deno_worker: eval", () => {
     await dw.close();
     dw = createTestWorker({
       sourceLoaders: [
-        async ({ source }) => ({ source, sourceLoader: "js" }),
+        async ({ src }) => ({ src, srcLoader: "js" }),
       ],
     });
 
@@ -164,8 +164,8 @@ describe("deno_worker: eval", () => {
     dw = createTestWorker({ sourceLoaders: false });
 
     await expect(dw.eval("1 + 1")).resolves.toBe(2);
-    await expect(dw.eval("const n: number = 1; n;", { sourceLoader: "ts" })).rejects.toThrow(/strict js mode|sourceLoaders:\s*false/i);
-    expect(() => dw.evalSync("const n: number = 1; n;", { sourceLoader: "ts" })).toThrow(/strict js mode|sourceLoaders:\s*false/i);
+    await expect(dw.eval("const n: number = 1; n;", { srcLoader: "ts" })).rejects.toThrow(/strict js mode|sourceLoaders:\s*false/i);
+    expect(() => dw.evalSync("const n: number = 1; n;", { srcLoader: "ts" })).toThrow(/strict js mode|sourceLoaders:\s*false/i);
   });
 
   it(

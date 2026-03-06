@@ -51,6 +51,7 @@ import type {
     DenoWorkerRuntimeHandler,
     DenoWorkerStatsResetOptions,
     DenoWorkerStatsApi,
+    DenoWorkerStartupModuleSource,
     DenoWorkerStreamStats,
     DenoWorkerTotalsStats,
     DenoWorkerStreamApi,
@@ -778,6 +779,7 @@ export class DenoWorker {
     private readonly maxHandle: number;
     private readonly statsApi: DenoWorkerStatsApi;
     private readonly cpuExecutionSamples: Array<{ atMs: number; cpuTimeMs: number }> = [];
+    private readonly liveCpuOpStarts = new Map<string, number>();
     private readonly opSamples: StatsOpSample[] = [];
     private globalOpScopeDepth = 0;
     private totalsStats: DenoWorkerTotalsStats = {
@@ -799,7 +801,7 @@ export class DenoWorker {
     readonly handle: DenoWorkerHandleApi = {
         get: (path: string, options?: DenoWorkerHandleExecOptions) => this.handleGet(path, options),
         tryGet: (path: string, options?: DenoWorkerHandleExecOptions) => this.handleTryGet(path, options),
-        eval: (source: string, options?: Omit<EvalOptions, "args" | "type" | "sourceLoader">) => this.handleEval(source, options),
+        eval: (source: string, options?: Omit<EvalOptions, "args" | "type" | "srcLoader">) => this.handleEval(source, options),
     };
     /** Global namespace API for setting, reading, and calling runtime globals. */
     readonly global: DenoWorkerGlobalApi = {
@@ -834,7 +836,8 @@ export class DenoWorker {
             this.moduleApiImport<T>(specifier),
         eval: <T extends Record<string, any> = Record<string, any>>(source: string, options?: DenoWorkerModuleEvalOptions) =>
             this.moduleApiEval<T>(source, options),
-        register: (moduleName: string, source: string) => this.moduleApiRegister(moduleName, source),
+        register: (moduleName: string, source: string, options?: Pick<EvalOptions, "srcLoader">) =>
+            this.moduleApiRegister(moduleName, source, options),
         clear: (moduleName: string) => this.moduleApiClear(moduleName),
     };
     /** Runtime stats API for lightweight wrapper-level telemetry. */
@@ -883,7 +886,7 @@ export class DenoWorker {
     /** Runs a handle operation by dispatching payload through the runtime handle bridge entrypoint. */
     private async runHandleOp(
         payload: Record<string, unknown>,
-        options?: Omit<EvalOptions, "args" | "type" | "sourceLoader">,
+        options?: Omit<EvalOptions, "args" | "type" | "srcLoader">,
     ): Promise<any> {
         if (!(this.startupReady && !this.startupError && this.handleBridgeInstalled)) {
             await this.startupPromise;
@@ -900,7 +903,7 @@ export class DenoWorker {
         id: string,
         path: string,
         args: any[],
-        options?: Omit<EvalOptions, "args" | "type" | "sourceLoader">,
+        options?: Omit<EvalOptions, "args" | "type" | "srcLoader">,
     ): Promise<any> {
         if (!(this.startupReady && !this.startupError && this.handleBridgeInstalled)) {
             await this.startupPromise;
@@ -917,20 +920,20 @@ export class DenoWorker {
         id: string,
         generation: number,
         rootType: DenoWorkerHandleTypeInfo,
-        defaultExecOptions?: Omit<EvalOptions, "args" | "type" | "sourceLoader">,
+        defaultExecOptions?: Omit<EvalOptions, "args" | "type" | "srcLoader">,
     ): DenoWorkerHandle {
         let disposed = false;
         let rootTypeCache = rootType;
         const self = this;
         const toExecOptions = (
-            value?: DenoWorkerHandleExecOptions | Omit<EvalOptions, "args" | "type" | "sourceLoader">,
-        ): Omit<EvalOptions, "args" | "type" | "sourceLoader"> | undefined => {
+            value?: DenoWorkerHandleExecOptions | Omit<EvalOptions, "args" | "type" | "srcLoader">,
+        ): Omit<EvalOptions, "args" | "type" | "srcLoader"> | undefined => {
             if (!value || typeof value !== "object") return defaultExecOptions ? { ...defaultExecOptions } : undefined;
-            const out: Omit<EvalOptions, "args" | "type" | "sourceLoader"> = {};
+            const out: Omit<EvalOptions, "args" | "type" | "srcLoader"> = {};
             if (typeof value.maxEvalMs === "number") out.maxEvalMs = value.maxEvalMs;
             if (typeof value.maxCpuMs === "number") out.maxCpuMs = value.maxCpuMs;
-            if (typeof (value as Omit<EvalOptions, "args" | "type" | "sourceLoader">).filename === "string") {
-                out.filename = (value as Omit<EvalOptions, "args" | "type" | "sourceLoader">).filename;
+            if (typeof (value as Omit<EvalOptions, "args" | "type" | "srcLoader">).filename === "string") {
+                out.filename = (value as Omit<EvalOptions, "args" | "type" | "srcLoader">).filename;
             }
             if (Object.keys(out).length === 0) return defaultExecOptions ? { ...defaultExecOptions } : undefined;
             if (!defaultExecOptions) return out;
@@ -1206,13 +1209,17 @@ export class DenoWorker {
     }
 
     /** Registers a module source in native runtime without waiting on startup gates. */
-    private async registerModuleInternal(moduleName: string, source: string): Promise<void> {
+    private async registerModuleInternal(
+        moduleName: string,
+        source: string,
+        options?: Pick<EvalOptions, "srcLoader">,
+    ): Promise<void> {
         const name = String(moduleName ?? "").trim();
         if (!name) throw new Error("registerModule(moduleName, source) requires non-empty moduleName");
         if (typeof this.native.registerModule !== "function") {
             throw new Error("registerModule is not available in this runtime");
         }
-        await this.trackInFlight(this.native.registerModule(name, String(source ?? "")));
+        await this.trackInFlight(this.native.registerModule(name, String(source ?? ""), options));
     }
 
     /** Clears a module source from native runtime without waiting on startup gates. */
@@ -1226,12 +1233,12 @@ export class DenoWorker {
     }
 
     /** Initializes constructor-time globals/modules and tracks startup readiness/error state. */
-    private initializeStartup(globals?: Record<string, any>, modules?: Record<string, string>): void {
+    private initializeStartup(
+        globals?: Record<string, any>,
+        modules?: Record<string, DenoWorkerStartupModuleSource>,
+    ): void {
         const globalEntries = globals && typeof globals === "object" ? Object.entries(globals) : [];
-        const moduleEntriesRaw = modules && typeof modules === "object" ? Object.entries(modules) : [];
-        const moduleEntries = moduleEntriesRaw
-            .map(([name, source]) => [String(name ?? "").trim(), String(source ?? "")] as const)
-            .filter(([name]) => name.length > 0);
+        const moduleEntries = modules && typeof modules === "object" ? Object.entries(modules) : [];
         if (globalEntries.length === 0 && moduleEntries.length === 0) {
             this.startupReady = true;
             this.startupError = null;
@@ -1242,8 +1249,29 @@ export class DenoWorker {
         this.startupReady = false;
         this.startupError = null;
         this.startupPromise = (async () => {
-            for (const [name, source] of moduleEntries) {
-                await this.registerModuleInternal(name, source);
+            for (const [nameRaw, moduleValue] of moduleEntries) {
+                const name = String(nameRaw ?? "").trim();
+                if (!name) continue;
+
+                let source: string;
+                let srcLoader: string;
+                if (typeof moduleValue === "string") {
+                    source = moduleValue;
+                    srcLoader = "js";
+                } else if (moduleValue && typeof moduleValue === "object" && typeof (moduleValue as any).src === "string") {
+                    source = (moduleValue as any).src;
+                    srcLoader = String((moduleValue as any).srcLoader ?? "js");
+                } else {
+                    source = String(moduleValue ?? "");
+                    srcLoader = "js";
+                }
+
+                const transformed = await this.applyLoadersAsync({
+                    kind: "module-eval",
+                    src: String(source ?? ""),
+                    srcLoader: srcLoader,
+                });
+                await this.registerModuleInternal(name, transformed.src, { srcLoader: transformed.srcLoader });
             }
             for (const [k, v] of globalEntries) {
                 await this.setGlobalInternal(k, v);
@@ -1378,80 +1406,80 @@ export class DenoWorker {
         );
     }
 
-    private normalizeLoaderName(sourceLoader: unknown): string {
-        const name = typeof sourceLoader === "string" ? sourceLoader.trim() : "";
+    private normalizeLoaderName(srcLoader: unknown): string {
+        const name = typeof srcLoader === "string" ? srcLoader.trim() : "";
         return name || "js";
     }
 
     private normalizeLoaderTransformResult(
         result: unknown,
-        source: string,
-        sourceLoader: string,
+        src: string,
+        srcLoader: string,
         kind: DenoLoaderTransformContext["kind"],
-    ): { source: string; sourceLoader: string } {
-        if (result === undefined || result === null) return { source, sourceLoader };
-        if (typeof result === "string") return { source: result, sourceLoader };
+    ): { src: string; srcLoader: string } {
+        if (result === undefined || result === null) return { src, srcLoader };
+        if (typeof result === "string") return { src: result, srcLoader };
 
         if (result && typeof result === "object") {
-            const nextSource = (result as any).source;
-            if (typeof nextSource !== "string") {
-                throw new Error("Loader callback object result must include string `source`.");
+            const nextSrc = (result as any).src;
+            if (typeof nextSrc !== "string") {
+                throw new Error("Loader callback object result must include string `src`.");
             }
-            const nextLoader = this.normalizeLoaderName((result as any).sourceLoader ?? (result as any).loader ?? sourceLoader);
-            return { source: nextSource, sourceLoader: nextLoader };
+            const nextLoader = this.normalizeLoaderName((result as any).srcLoader ?? srcLoader);
+            return { src: nextSrc, srcLoader: nextLoader };
         }
 
         throw new Error(
-            `Loader callback returned invalid value for ${kind}; expected string, { source, sourceLoader? }, or undefined.`,
+            `Loader callback returned invalid value for ${kind}; expected string, { src, srcLoader? }, or undefined.`,
         );
     }
 
-    private assertBuiltinSourceLoader(sourceLoader: string, kind: DenoLoaderTransformContext["kind"]): DenoSourceLoader {
-        if (!BUILTIN_SOURCE_LOADERS.has(sourceLoader)) {
+    private assertBuiltinSourceLoader(srcLoader: string, kind: DenoLoaderTransformContext["kind"]): DenoSourceLoader {
+        if (!BUILTIN_SOURCE_LOADERS.has(srcLoader)) {
             throw new Error(
-                `Unresolved sourceLoader '${sourceLoader}' for ${kind}. Loaders must resolve to one of: js, ts, tsx, jsx.`,
+                `Unresolved srcLoader '${srcLoader}' for ${kind}. Loaders must resolve to one of: js, ts, tsx, jsx.`,
             );
         }
-        return sourceLoader as DenoSourceLoader;
+        return srcLoader as DenoSourceLoader;
     }
 
-    private assertLoaderAllowedOrThrow(sourceLoader: string, kind: DenoLoaderTransformContext["kind"]): void {
+    private assertLoaderAllowedOrThrow(srcLoader: string, kind: DenoLoaderTransformContext["kind"]): void {
         if (!this.loadersStrictJsOnly) return;
-        if (sourceLoader === "js") return;
+        if (srcLoader === "js") return;
         throw new Error(
-            `sourceLoader '${sourceLoader}' is not allowed for ${kind} because worker was created with sourceLoaders: false (strict js mode).`,
+            `srcLoader '${srcLoader}' is not allowed for ${kind} because worker was created with sourceLoaders: false (strict js mode).`,
         );
     }
 
-    private async applyLoadersAsync(input: DenoLoaderTransformContext): Promise<{ source: string; sourceLoader: DenoSourceLoader }> {
-        let source = input.source;
-        let loader = this.normalizeLoaderName(input.sourceLoader);
+    private async applyLoadersAsync(input: DenoLoaderTransformContext): Promise<{ src: string; srcLoader: DenoSourceLoader }> {
+        let src = input.src;
+        let loader = this.normalizeLoaderName(input.srcLoader);
         this.assertLoaderAllowedOrThrow(loader, input.kind);
         for (const transform of this.loaderTransforms) {
-            const result = await transform({ ...input, source, sourceLoader: loader });
-            const next = this.normalizeLoaderTransformResult(result, source, loader, input.kind);
-            source = next.source;
-            loader = next.sourceLoader;
+            const result = await transform({ ...input, src, srcLoader: loader });
+            const next = this.normalizeLoaderTransformResult(result, src, loader, input.kind);
+            src = next.src;
+            loader = next.srcLoader;
             this.assertLoaderAllowedOrThrow(loader, input.kind);
         }
-        return { source, sourceLoader: this.assertBuiltinSourceLoader(loader, input.kind) };
+        return { src, srcLoader: this.assertBuiltinSourceLoader(loader, input.kind) };
     }
 
-    private applyLoadersSync(input: DenoLoaderTransformContext): { source: string; sourceLoader: DenoSourceLoader } {
-        let source = input.source;
-        let loader = this.normalizeLoaderName(input.sourceLoader);
+    private applyLoadersSync(input: DenoLoaderTransformContext): { src: string; srcLoader: DenoSourceLoader } {
+        let src = input.src;
+        let loader = this.normalizeLoaderName(input.srcLoader);
         this.assertLoaderAllowedOrThrow(loader, input.kind);
         for (const transform of this.loaderTransforms) {
-            const result = transform({ ...input, source, sourceLoader: loader });
+            const result = transform({ ...input, src, srcLoader: loader });
             if (this.isPromiseLike(result)) {
                 throw new Error("Sync evaluation cannot use async loaders; use eval(...) or module.eval(...).");
             }
-            const next = this.normalizeLoaderTransformResult(result, source, loader, input.kind);
-            source = next.source;
-            loader = next.sourceLoader;
+            const next = this.normalizeLoaderTransformResult(result, src, loader, input.kind);
+            src = next.src;
+            loader = next.srcLoader;
             this.assertLoaderAllowedOrThrow(loader, input.kind);
         }
-        return { source, sourceLoader: this.assertBuiltinSourceLoader(loader, input.kind) };
+        return { src, srcLoader: this.assertBuiltinSourceLoader(loader, input.kind) };
     }
 
     private async normalizeImportCallbackResult(
@@ -1461,18 +1489,18 @@ export class DenoWorker {
         isDynamicImport?: boolean,
     ): Promise<ImportsCallbackResult> {
         if (!decision || typeof decision !== "object" || Array.isArray(decision)) return decision;
-        const source = (decision as any).source;
-        if (typeof source !== "string") return decision;
+        const src = (decision as any).src;
+        if (typeof src !== "string") return decision;
 
-        const { source: nextSource, sourceLoader } = await this.applyLoadersAsync({
+        const { src: nextSrc, srcLoader } = await this.applyLoadersAsync({
             kind: "import",
-            source,
-            sourceLoader: (decision as any).sourceLoader ?? (decision as any).loader ?? "js",
+            src,
+            srcLoader: (decision as any).srcLoader ?? "js",
             specifier,
             referrer,
             isDynamicImport,
         });
-        return { source: nextSource, sourceLoader };
+        return { src: nextSrc, srcLoader };
     }
 
     private createNativeOptions(options?: DenoWorkerOptions): DenoWorkerOptions | undefined {
@@ -1491,10 +1519,10 @@ export class DenoWorker {
         return out;
     }
 
-    private buildResolvedEvalOptions(options: EvalOptions | undefined, sourceLoader: DenoSourceLoader): EvalOptions | undefined {
-        if (!options && sourceLoader === "js") return undefined;
+    private buildResolvedEvalOptions(options: EvalOptions | undefined, srcLoader: DenoSourceLoader): EvalOptions | undefined {
+        if (!options && srcLoader === "js") return undefined;
         const out: EvalOptions = { ...(options ?? {}) };
-        if (sourceLoader !== "js" || options?.sourceLoader !== undefined) out.sourceLoader = sourceLoader;
+        if (srcLoader !== "js" || options?.srcLoader !== undefined) out.srcLoader = srcLoader;
         return normalizeEvalOptions(out);
     }
 
@@ -2045,6 +2073,11 @@ export class DenoWorker {
             if (sample.atMs < cutoffMs) continue;
             cpuTimeMs += sample.cpuTimeMs;
         }
+        for (const startedAt of this.liveCpuOpStarts.values()) {
+            const from = Math.max(cutoffMs, startedAt);
+            if (from >= now) continue;
+            cpuTimeMs += now - from;
+        }
 
         const usagePercentageRaw = (cpuTimeMs / measureMs) * 100;
         const usagePercentage = Number.isFinite(usagePercentageRaw)
@@ -2056,6 +2089,16 @@ export class DenoWorker {
             measureMs,
             cpuTimeMs,
         };
+    }
+
+    /** Marks the start of an in-flight runtime execution segment for live CPU usage estimation. */
+    private beginLiveCpuTracking(key: string): void {
+        this.liveCpuOpStarts.set(key, Date.now());
+    }
+
+    /** Marks the end of an in-flight runtime execution segment. */
+    private endLiveCpuTracking(key: string): void {
+        this.liveCpuOpStarts.delete(key);
     }
 
     private normalizeWindowMs(value: unknown, fallback: number): number {
@@ -3426,7 +3469,7 @@ export class DenoWorker {
         const id = this.nextHandleId();
         const opId = `handle.create:${id}`;
         this.emitRuntimeEvent({ kind: "handle.create", opId, handleId: id, source: "path", path: p });
-        const defaultExecOptions: Omit<EvalOptions, "args" | "type" | "sourceLoader"> | undefined =
+        const defaultExecOptions: Omit<EvalOptions, "args" | "type" | "srcLoader"> | undefined =
             typeof options?.maxEvalMs === "number" || typeof options?.maxCpuMs === "number"
                 ? {
                     ...(typeof options?.maxEvalMs === "number" ? { maxEvalMs: options.maxEvalMs } : {}),
@@ -3456,14 +3499,14 @@ export class DenoWorker {
     }
 
     /** Creates a new runtime handle by evaluating source and using its result as handle root. */
-    private async handleEval(source: string, options?: Omit<EvalOptions, "args" | "type" | "sourceLoader">): Promise<DenoWorkerHandle> {
+    private async handleEval(source: string, options?: Omit<EvalOptions, "args" | "type" | "srcLoader">): Promise<DenoWorkerHandle> {
         const src = String(source ?? "");
         if (!src.trim()) throw new Error("handle.eval(source) requires non-empty source");
         this.ensureHandleCapacity();
         const id = this.nextHandleId();
         const opId = `handle.create:${id}`;
         this.emitRuntimeEvent({ kind: "handle.create", opId, handleId: id, source: "eval" });
-        const defaultExecOptions: Omit<EvalOptions, "args" | "type" | "sourceLoader"> | undefined =
+        const defaultExecOptions: Omit<EvalOptions, "args" | "type" | "srcLoader"> | undefined =
             options &&
             (typeof options.maxEvalMs === "number" ||
                 typeof options.maxCpuMs === "number" ||
@@ -3506,25 +3549,29 @@ export class DenoWorker {
             }
             let opKind: StatsOpKind | null = "eval";
             let startedAt = Date.now();
+            const liveCpuKey = `cpu:${opId}`;
             try {
                 const transformed = await this.applyLoadersAsync({
                     kind: "eval",
-                    source: String(src),
-                    sourceLoader: options?.sourceLoader ?? (options as any)?.loader ?? "js",
+                    src: String(src),
+                    srcLoader: options?.srcLoader ?? (options as any)?.loader ?? "js",
                 });
-                opKind = this.classifyEvalOp(transformed.source);
+                opKind = this.classifyEvalOp(transformed.src);
                 startedAt = Date.now();
+                if (opKind) this.beginLiveCpuTracking(liveCpuKey);
                 const raw = await this.trackInFlight(
                     this.native.eval(
-                        transformed.source,
-                        this.buildResolvedEvalOptions(options, transformed.sourceLoader),
+                        transformed.src,
+                        this.buildResolvedEvalOptions(options, transformed.srcLoader),
                     ),
                 );
+                if (opKind) this.endLiveCpuTracking(liveCpuKey);
                 this.recordLastExecutionSample();
                 if (opKind) this.recordOpSample(opKind, Date.now() - startedAt, true);
                 this.emitRuntimeEvent({ kind: "eval.end", opId, ok: true });
                 return hydrateFromWire(raw) as T;
             } catch (e) {
+                if (opKind) this.endLiveCpuTracking(liveCpuKey);
                 this.recordLastExecutionSample();
                 if (opKind) this.recordOpSample(opKind, Date.now() - startedAt, false);
                 const hydrated = hydrateFromWire(e);
@@ -3566,14 +3613,14 @@ export class DenoWorker {
         try {
             const transformed = this.applyLoadersSync({
                 kind: "eval",
-                source: String(src),
-                sourceLoader: options?.sourceLoader ?? (options as any)?.loader ?? "js",
+                src: String(src),
+                srcLoader: options?.srcLoader ?? (options as any)?.loader ?? "js",
             });
-            opKind = this.classifyEvalOp(transformed.source);
+            opKind = this.classifyEvalOp(transformed.src);
             startedAt = Date.now();
             const raw = this.native.evalSync(
-                transformed.source,
-                this.buildResolvedEvalOptions(options, transformed.sourceLoader),
+                transformed.src,
+                this.buildResolvedEvalOptions(options, transformed.srcLoader),
             );
             this.recordLastExecutionSample();
             if (opKind) this.recordOpSample(opKind, Date.now() - startedAt, true);
@@ -3596,52 +3643,51 @@ export class DenoWorker {
         await this.startupPromise;
         const transformed = await this.applyLoadersAsync({
             kind: "module-eval",
-            source: String(source),
-            sourceLoader: options?.sourceLoader ?? (options as any)?.loader ?? "js",
+            src: String(source),
+            srcLoader: options?.srcLoader ?? (options as any)?.loader ?? "js",
         });
         const moduleName = typeof options?.moduleName === "string" ? options.moduleName.trim() : "";
         if (moduleName) {
-            if (transformed.sourceLoader !== "js") {
-                throw new Error(
-                    "module.eval(..., { moduleName }) requires source loader pipeline to resolve to 'js'.",
-                );
-            }
-            await this.registerModuleInternal(moduleName, transformed.source);
+            await this.registerModuleInternal(moduleName, transformed.src, { srcLoader: transformed.srcLoader });
             return this.moduleApiImport<T>(moduleName);
         }
 
         let raw: any;
         let usedNativeEvalModule = false;
         let nativeStartedAt = Date.now();
+        const nativeCpuKey = `cpu:module:${randomUUID()}`;
         try {
             if (typeof this.native.evalModule === "function") {
                 usedNativeEvalModule = true;
                 nativeStartedAt = Date.now();
+                this.beginLiveCpuTracking(nativeCpuKey);
                 raw = await this.trackInFlight(
                     this.native.evalModule(
-                        transformed.source,
+                        transformed.src,
                         normalizeEvalOptions({
                             ...(options ?? {}),
                             type: "module",
-                            ...(transformed.sourceLoader !== "js" || options?.sourceLoader !== undefined
-                                ? { sourceLoader: transformed.sourceLoader }
+                            ...(transformed.srcLoader !== "js" || options?.srcLoader !== undefined
+                                ? { srcLoader: transformed.srcLoader }
                                 : {}),
                         }),
                     ),
                 );
             } else {
-                raw = await this.eval(transformed.source, {
+                raw = await this.eval(transformed.src, {
                     ...(options ?? {}),
                     type: "module",
-                    sourceLoader: transformed.sourceLoader,
+                    srcLoader: transformed.srcLoader,
                 });
             }
             if (usedNativeEvalModule) {
+                this.endLiveCpuTracking(nativeCpuKey);
                 this.recordLastExecutionSample();
                 this.recordOpSample("eval", Date.now() - nativeStartedAt, true);
             }
         } catch (e) {
             if (usedNativeEvalModule) {
+                this.endLiveCpuTracking(nativeCpuKey);
                 this.recordLastExecutionSample();
                 this.recordOpSample("eval", Date.now() - nativeStartedAt, false);
             }
@@ -3651,9 +3697,13 @@ export class DenoWorker {
     }
 
     /** Module API entrypoint: register module source under a stable module name. */
-    private async moduleApiRegister(moduleName: string, source: string): Promise<void> {
+    private async moduleApiRegister(
+        moduleName: string,
+        source: string,
+        options?: Pick<EvalOptions, "srcLoader">,
+    ): Promise<void> {
         await this.startupPromise;
-        await this.registerModuleInternal(moduleName, source);
+        await this.registerModuleInternal(moduleName, source, options);
     }
 
     /** Module API entrypoint: clear a previously registered module by name. */

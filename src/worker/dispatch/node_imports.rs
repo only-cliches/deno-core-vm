@@ -60,13 +60,10 @@ fn interpret_value(cx: &mut TaskContext, v: Handle<JsValue>) -> Option<ImportDec
         }
     }
 
-    if let Ok(source_val) = obj.get_value(cx, "source") {
+    if let Ok(source_val) = obj.get_value(cx, "src") {
         if let Ok(source_str) = source_val.downcast::<JsString, _>(cx) {
             let mut loader = "js".to_string();
-            let source_loader_val = obj
-                .get_value(cx, "sourceLoader")
-                .or_else(|_| obj.get_value(cx, "loader"));
-            if let Ok(loader_val) = source_loader_val {
+            if let Ok(loader_val) = obj.get_value(cx, "srcLoader") {
                 if let Ok(loader_str) = loader_val.downcast::<JsString, _>(cx) {
                     let maybe_loader = loader_str.value(cx);
                     if matches!(maybe_loader.as_str(), "js" | "ts" | "tsx" | "jsx") {

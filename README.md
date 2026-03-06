@@ -80,7 +80,7 @@ const sandbox = await worker.module.eval(`
             fingerprint: btoa(rawData.secret).substring(0, 12) 
         };
     }
-`, {sourceLoader: "ts"}); // enable TS compiler
+`, {srcLoader: "ts"}); // enable TS compiler
 
 // 4) Call the Deno export from Node
 console.log("[Node.js] Triggering Deno sandbox...");
@@ -190,19 +190,39 @@ If you already have a module specifier, use `worker.module.import(...)`:
 
 ```ts
 const worker = new DenoWorker({
-  modules: { // declare available modules
-    "app:math": "export const add = (a: number, b: number) => a + b;",
+  modules: { // declare available startup modules
+    "app:math": {src: "export const add = (a: number, b: number): number => a + b;", srcLoader: "ts"},
   },
-  imports: false, // block all non-registered imports; only `modules` entries are resolvable
+  imports: false, // block non-registered imports; only `modules` entries are resolvable
 });
 
 const math = await worker.module.import("app:math");
-console.log(await math.add(2, 3)); // 5
+console.log(math.add(2, 3)); // 5
 
 // throws:
 const another_module = await worker.module.import("another_module");
 
 await worker.close();
+```
+
+`modules` also supports loader-aware entries:
+
+```ts
+const worker = new DenoWorker({
+  sourceLoaders: [
+    ({ srcLoader, src }) => {
+      if (srcLoader !== "app-ts") return;
+      // Map custom loader name to built-in TS transpilation.
+      return { src, srcLoader: "ts" };
+    },
+  ],
+  modules: {
+    "app:config": {
+      src: `export const env: string = "prod";`,
+      srcLoader: "app-ts",
+    },
+  },
+});
 ```
 
 When you need dynamic resolution (instead of a fixed allowlist in `modules`), use the `imports` interceptor.
@@ -228,8 +248,8 @@ const Secret = await import("untrusted-dynamic");  // Dynamic import
 Let's build an interceptor that blocks dynamic imports for security, uses a custom in-memory cache, and compiles a proprietary module scheme (`app:`) on the fly.
 
 Return shape note for `imports` callbacks:
-- `{ source: string, sourceLoader?: string }`
-- `sourceLoader` defaults to `"js"` when omitted.
+- `{ src: string, srcLoader?: string }`
+- `srcLoader` defaults to `"js"` when omitted.
 - Final runtime source loader must resolve to one of `"js" | "ts" | "tsx" | "jsx"`.
 - When `sourceLoaders: false` is set on the worker, only `"js"` is allowed.
 
@@ -241,10 +261,10 @@ const moduleCache = new Map<string, string>();
 
 const worker = new DenoWorker({
   sourceLoaders: [
-    async ({ source, sourceLoader }) => {
-      if (sourceLoader !== "app-ts") return;
+    async ({ src, srcLoader }) => {
+      if (srcLoader !== "app-ts") return;
       // Rewrite custom loader names to built-in runtime loaders.
-      return { source, sourceLoader: "ts" };
+      return { src, srcLoader: "ts" };
     },
   ],
   
@@ -264,7 +284,7 @@ const worker = new DenoWorker({
       
       // Check our Node-side cache first!
       if (moduleCache.has(moduleName)) {
-        return { source: moduleCache.get(moduleName)!, sourceLoader: "app-ts" }; // Serve from memory
+        return { src: moduleCache.get(moduleName)!, srcLoader: "app-ts" }; // Serve from memory
       }
 
       // Simulate fetching or compiling custom code (e.g., from a DB or remote API)
@@ -274,7 +294,7 @@ const worker = new DenoWorker({
       moduleCache.set(moduleName, compiledTsCode);
 
       // Feed it source code directly into Deno's memory as a TypeScript module!
-      return { source: compiledTsCode, sourceLoader: "app-ts" }; 
+      return { src: compiledTsCode, srcLoader: "app-ts" }; 
     }
 
     // 3. Fallback: Allow normal resolution for everything else
@@ -469,7 +489,7 @@ await resolveWorker.close();
 
 ### 🧪 Custom Loaders in 20 Seconds
 
-`sourceLoader` defaults to `"js"`.  
+`srcLoader` defaults to `"js"`.  
 Built-in runtime loaders are `"js"`, `"ts"`, `"tsx"`, and `"jsx"`.  
 If final source loader is `"ts"`, `"tsx"`, or `"jsx"`, the built-in transpiler runs.
 
@@ -481,17 +501,17 @@ import { DenoWorker } from "deno-director";
 
 const worker = new DenoWorker({
   sourceLoaders: [
-    async ({ source, sourceLoader }) => {
-      if (sourceLoader !== "custom-ts") return;
+    async ({ src, srcLoader }) => {
+      if (srcLoader !== "custom-ts") return;
       // Rewrite custom loader name to built-in TS loader.
-      return { source, sourceLoader: "ts" };
+      return { src, srcLoader: "ts" };
     },
   ],
 });
 
 const out = await worker.eval<number>(
   "const n: number = 41; n + 1;",
-  { sourceLoader: "custom-ts" },
+  { srcLoader: "custom-ts" },
 );
 
 console.log(out); // 42
@@ -570,7 +590,7 @@ Evaluates JavaScript or TypeScript asynchronously.
 Evaluates JavaScript or TypeScript synchronously (blocks Node event loop while waiting).
 * `module.eval<T>(src: string, options?: DenoWorkerModuleEvalOptions): Promise<T>`
 Evaluates the source as an ES Module and returns a callable Proxy namespace to the exports.
-* `module.register(moduleName: string, source: string): Promise<void>`
+* `module.register(moduleName: string, source: string, options?: { srcLoader?: string }): Promise<void>`
 Registers source under a module name for future imports.
 * `module.clear(moduleName: string): Promise<boolean>`
 Clears a previously registered module by name.
@@ -579,7 +599,7 @@ Imports a module specifier through the runtime import pipeline and returns a cal
 * `stream.connect(key: string): Promise<Duplex>`
 Opens a bidirectional stream session and returns a Node.js `Duplex` stream.
 
-`EvalOptions.sourceLoader` (and `module.eval(..., { sourceLoader })`) defaults to `"js"`.
+`EvalOptions.srcLoader` (and `module.eval(..., { srcLoader })`) defaults to `"js"`.
 Use `"ts"`, `"tsx"`, or `"jsx"` to request TS/JSX transpilation for that call.
 Custom loader names are supported through `DenoWorkerOptions.sourceLoaders` callback pipelines.
 - async iteration: `for await (const chunk of reader) { ... }`
@@ -688,24 +708,24 @@ type DenoWorkerOptions = {
     net?: boolean | string[];   // Allow network, or specific domains/ports
     env?: boolean | string[];   // Allow env access, or specific variables
     run?: boolean | string[];   // Allow subprocess execution (high risk)
-    ffi?: boolean;              // Allow Foreign Function Interface
-    sys?: boolean;              // OS Info access
+    ffi?: boolean | string[];   // Allow FFI (global or allow-list)
+    sys?: boolean | string[];   // OS Info access (global or allow-list)
     import?: boolean | string[]; // Deno import capability permission allow-list
     hrtime?: boolean;           // High-resolution timing access
     wasm?: boolean;             // Enable/disable .wasm module loading (default true)
   };
-  env?: Record<string, string>; // Custom environment variables
+  env?: string | Record<string, string>; // Dotenv path or explicit environment map
   envFile?: string | boolean;   // Load from a .env file
   nodeCompat?: boolean;         // Enable Node compatibility mode
   imports?: boolean | ImportsCallback; // Custom module resolution interceptor
-  sourceLoaders?: false | Array<(ctx: { // process custom sourceLoader values. jsx, tsx and ts handled by buit in loader
-    source: string;
-    sourceLoader: string;
+  sourceLoaders?: false | Array<(ctx: { // process custom source loader values. jsx, tsx and ts handled by built-in loader
+    src: string;
+    srcLoader: string;
     kind: "eval" | "module-eval" | "import";
     specifier?: string;
     referrer?: string;
     isDynamicImport?: boolean;
-  }) => string | { source: string; sourceLoader?: string } | void | Promise<string | { source: string; sourceLoader?: string } | void>>;
+  }) => string | { src: string; srcLoader?: string } | void | Promise<string | { src: string; srcLoader?: string } | void>>;
   tsCompiler?: {                 // TS/JSX transpiler options
     jsx?: "react" | "react-jsx" | "react-jsxdev" | "preserve";
     jsxFactory?: string;
@@ -723,6 +743,9 @@ type DenoWorkerOptions = {
   };
   console?: DenoWorkerConsoleOption; // Route/disable console methods
   inspect?: boolean | { host?: string; port?: number; break?: boolean; }; // V8 Debugging
+  globals?: Record<string, any>; // Startup globals applied to globalThis
+  modules?: Record<string, string | { src: string; srcLoader?: string }>; // string shorthand => { src: string, srcLoader: "js" }
+  lifecycle?: DenoWorkerLifecycleHooks; // beforeStart/afterStart/beforeStop/afterStop/onCrash hooks
 };
 
 ```
@@ -732,14 +755,17 @@ Source-loader notes:
 - Callback return values:
   - `undefined`/`void`: no change
   - `string`: replace source, keep current source loader
-  - `{ source, sourceLoader? }`: replace source and optionally switch source loader
+  - `{ src, srcLoader? }`: replace source and optionally switch source loader
 - `evalSync` cannot run async source-loader callbacks.
 - If source loader is omitted everywhere, default is `"js"`.
 - Built-in runtime loader runs last, after all callbacks.
 - `sourceLoaders: false` enables strict JS mode:
   - disables custom callbacks and built-in TS/TSX/JSX transpilation
   - only final source loader `"js"` is allowed
-- For `module.eval(..., { moduleName })`, final `sourceLoader` must resolve to `"js"` because named registration stores JS source directly.
+- For `module.eval(..., { moduleName })`, built-in loaders (`"js"`, `"ts"`, `"tsx"`, `"jsx"`) are supported.
+- For `modules` startup registration entries, object form `{ src, srcLoader? }` is supported.
+- For `modules` startup registration entries, string values are shorthand for `{ src: "...", srcLoader: "js" }`.
+- Custom loader names must still resolve (through `sourceLoaders`) to a built-in runtime loader.
 
 `EvalOptions` (used by `eval`, `evalSync`, and `module.eval`) in practice:
 
@@ -747,14 +773,14 @@ Source-loader notes:
 type EvalOptions = {
   filename?: string;
   type?: "script" | "module";
-  sourceLoader?: string; // default "js"
+  srcLoader?: string; // default "js"
   args?: any[];
   maxEvalMs?: number;
   maxCpuMs?: number;
 };
 ```
 
-`sourceLoader` behavior:
+`srcLoader` behavior:
 - Built-in values:
   - `"js"`: no transpilation
   - `"ts" | "tsx" | "jsx"`: built-in transpilation
@@ -763,7 +789,7 @@ type EvalOptions = {
   - if unresolved by the end of the pipeline, the call is rejected
 - `sourceLoaders: false`:
   - only `"js"` is accepted
-  - any non-`"js"` `sourceLoader` is rejected for eval/module/import flows
+  - any non-`"js"` `srcLoader` is rejected for eval/module/import flows
 
 `imports` callback virtual modules:
 
@@ -771,7 +797,7 @@ type EvalOptions = {
 type ImportsCallbackResult =
   | boolean
   | { resolve: string }
-  | { source: string; sourceLoader?: string }; // default sourceLoader is "js"
+  | { src: string; srcLoader?: string }; // default srcLoader is "js"
 ```
 
 ## Notes

@@ -112,7 +112,7 @@ impl EvalOptions {
         }
 
         let source_loader_value = obj
-            .get::<JsValue, _, _>(cx, "sourceLoader")
+            .get::<JsValue, _, _>(cx, "srcLoader")
             .or_else(|_| obj.get::<JsValue, _, _>(cx, "loader"));
         if let Ok(v) = source_loader_value {
             if let Ok(s) = v.downcast::<JsString, _>(cx) {

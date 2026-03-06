@@ -95,6 +95,7 @@ pub enum DenoMsg {
     RegisterModule {
         module_name: String,
         source: String,
+        loader: String,
         deferred: PromiseSettler,
     },
     ClearModule {

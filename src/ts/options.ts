@@ -39,14 +39,14 @@ export function normalizeEvalOptions(options?: EvalOptions): EvalOptions | undef
     const out: EvalOptions = {};
     if (typeof options.filename === "string") out.filename = options.filename;
     if (options.type === "module") out.type = "module";
-    const sourceLoader = (options as any).sourceLoader ?? (options as any).loader;
+    const srcLoader = (options as any).srcLoader ?? (options as any).loader;
     if (
-        sourceLoader === "js" ||
-        sourceLoader === "ts" ||
-        sourceLoader === "tsx" ||
-        sourceLoader === "jsx"
+        srcLoader === "js" ||
+        srcLoader === "ts" ||
+        srcLoader === "tsx" ||
+        srcLoader === "jsx"
     ) {
-        out.sourceLoader = sourceLoader;
+        out.srcLoader = srcLoader;
     }
     if ("args" in options) {
         out.args = Array.isArray(options.args)

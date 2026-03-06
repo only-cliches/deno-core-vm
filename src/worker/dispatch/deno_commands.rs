@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use crate::bridge::types::{EvalOptions, JsValueBridge};
 use crate::worker::env_flags::{native_stream_debug_enabled, native_stream_plane_enabled};
-use crate::worker::eval::eval_in_runtime;
+use crate::worker::eval::{eval_in_runtime, maybe_transpile_eval_source};
 use crate::worker::messages::{DenoMsg, EvalReply, ExecStats, NodeMsg, ResolvePayload};
 use crate::worker::state::RuntimeLimits;
 use crate::worker::stream_plane::NativeIncomingPlane;
@@ -96,8 +96,9 @@ pub async fn handle_deno_msg(
         DenoMsg::RegisterModule {
             module_name,
             source,
+            loader,
             deferred,
-        } => handle_register_module_msg(worker, worker_id, module_name, source, deferred).await,
+        } => handle_register_module_msg(worker, worker_id, limits, module_name, source, loader, deferred).await,
         DenoMsg::ClearModule {
             module_name,
             deferred,
@@ -840,8 +841,10 @@ async fn handle_set_global_msg(
 async fn handle_register_module_msg(
     worker: &mut MainWorker,
     worker_id: usize,
+    limits: &RuntimeLimits,
     module_name: String,
     source: String,
+    loader: String,
     deferred: crate::bridge::promise::PromiseSettler,
 ) -> bool {
     let module_name = module_name.trim().to_string();
@@ -868,13 +871,37 @@ async fn handle_register_module_msg(
         return false;
     }
 
+    let final_source = match maybe_transpile_eval_source(limits, &module_name, &loader, &source) {
+        Ok(s) => s,
+        Err(error) => {
+            if let Some(tx) = get_node_tx(worker_id) {
+                send_node_msg_or_reject(
+                    &tx,
+                    NodeMsg::Resolve {
+                        settler: deferred,
+                        payload: ResolvePayload::Result {
+                            result: Err(error),
+                            stats: ExecStats {
+                                cpu_time_ms: 0.0,
+                                eval_time_ms: 0.0,
+                            },
+                        },
+                    },
+                )
+                .await;
+            } else {
+                deferred.reject_with_error("Node thread is unavailable");
+            }
+            return false;
+        }
+    };
     {
         let state = worker.js_runtime.op_state();
         let reg = state
             .borrow()
             .borrow::<crate::worker::modules::ModuleRegistry>()
             .clone();
-        reg.put_named_persistent(&module_name, &source, deno_core::ModuleType::JavaScript);
+        reg.put_named_persistent(&module_name, &final_source, deno_core::ModuleType::JavaScript);
     }
 
     if let Some(tx) = get_node_tx(worker_id) {
