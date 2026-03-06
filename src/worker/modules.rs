@@ -1012,10 +1012,32 @@ impl DynamicModuleLoader {
             return ap.is_none() || ap == port;
         }
 
-        if let Some((h, p)) = allow.rsplit_once(':') {
-            if h.contains(']') || h.contains('[') {
-                return h.eq_ignore_ascii_case(host);
+        // Bracketed IPv6 host with optional explicit port, e.g. "[::1]:443".
+        if let Some(rest) = allow.strip_prefix('[') {
+            let Some((ipv6_host, tail)) = rest.split_once(']') else {
+                return false;
+            };
+            if ipv6_host.is_empty() || !ipv6_host.eq_ignore_ascii_case(host) {
+                return false;
             }
+            if tail.is_empty() {
+                return true;
+            }
+            let Some(port_s) = tail.strip_prefix(':') else {
+                return false;
+            };
+            let Ok(parsed_port) = port_s.parse::<u16>() else {
+                return false;
+            };
+            return Some(parsed_port) == port;
+        }
+
+        // Unbracketed IPv6 literals contain multiple ':'; treat as host-only entries.
+        if allow.matches(':').count() > 1 {
+            return allow.eq_ignore_ascii_case(host);
+        }
+
+        if let Some((h, p)) = allow.rsplit_once(':') {
             let Ok(pp) = p.parse::<u16>() else {
                 return false;
             };
@@ -1858,6 +1880,17 @@ mod tests {
 
         assert!(loader.ensure_remote_load_allowed(&ok).is_ok());
         assert!(loader.ensure_remote_load_allowed(&bad).is_err());
+    }
+
+    #[test]
+    // Internal helper for module loading and import policy flow; it handles ipv6 host-port matching correctly.
+    fn match_host_port_ipv6_respects_port_constraints() {
+        assert!(DynamicModuleLoader::match_host_port("[::1]:443", "::1", Some(443)));
+        assert!(!DynamicModuleLoader::match_host_port("[::1]:443", "::1", Some(8443)));
+        assert!(DynamicModuleLoader::match_host_port("[::1]", "::1", Some(8443)));
+        assert!(DynamicModuleLoader::match_host_port("::1", "::1", Some(8443)));
+        assert!(!DynamicModuleLoader::match_host_port("[::1]x", "::1", Some(443)));
+        assert!(!DynamicModuleLoader::match_host_port("[::1]:notaport", "::1", Some(443)));
     }
 
     #[test]

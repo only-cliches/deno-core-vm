@@ -67,7 +67,7 @@ function callCapturedRaw(captured, name, ...args) {
 
 async function callCapturedAwait(captured, name, ...args) {
   if (
-    (name === OP_STREAM_ACCEPT_ASYNC || name === OP_STREAM_READ_ASYNC) &&
+    (name === OP_STREAM_ACCEPT_ASYNC || name === OP_STREAM_READ_ASYNC || name === OP_STREAM_READ_ASYNC_RAW) &&
     typeof coreOpAsync === "function"
   ) {
     return await coreOpAsync(name, ...args);
@@ -77,7 +77,7 @@ async function callCapturedAwait(captured, name, ...args) {
     if (isThenable(out)) return await out;
     // Some runtimes expose async ops as callable IDs/functions without thenables.
     if (
-      (name === OP_STREAM_ACCEPT_ASYNC || name === OP_STREAM_READ_ASYNC) &&
+      (name === OP_STREAM_ACCEPT_ASYNC || name === OP_STREAM_READ_ASYNC || name === OP_STREAM_READ_ASYNC_RAW) &&
       typeof coreOpAsync === "function"
     ) {
       return await coreOpAsync(name, ...args);
@@ -114,6 +114,7 @@ const OP_STREAM_ACCEPT = "op_denojs_worker_stream_accept";
 const OP_STREAM_ACCEPT_ASYNC = "op_denojs_worker_stream_accept_async";
 const OP_STREAM_READ = "op_denojs_worker_stream_read";
 const OP_STREAM_READ_ASYNC = "op_denojs_worker_stream_read_async";
+const OP_STREAM_READ_ASYNC_RAW = "op_denojs_worker_stream_read_async_raw";
 const OP_STREAM_READ_RAW = "op_denojs_worker_stream_read_raw";
 const OP_STREAM_TAKE_CHUNK = "op_denojs_worker_stream_take_chunk";
 const OP_STREAM_DISCARD = "op_denojs_worker_stream_discard";
@@ -135,6 +136,7 @@ const CAP_STREAM_ACCEPT = getOpEntry(OP_STREAM_ACCEPT);
 const CAP_STREAM_ACCEPT_ASYNC = getOpEntry(OP_STREAM_ACCEPT_ASYNC);
 const CAP_STREAM_READ = getOpEntry(OP_STREAM_READ);
 const CAP_STREAM_READ_ASYNC = getOpEntry(OP_STREAM_READ_ASYNC);
+const CAP_STREAM_READ_ASYNC_RAW = getOpEntry(OP_STREAM_READ_ASYNC_RAW);
 const CAP_STREAM_READ_RAW = getOpEntry(OP_STREAM_READ_RAW);
 const CAP_STREAM_TAKE_CHUNK = getOpEntry(OP_STREAM_TAKE_CHUNK);
 const CAP_STREAM_DISCARD = getOpEntry(OP_STREAM_DISCARD);
@@ -1002,6 +1004,9 @@ function makeNativeAcceptedStreamReader(idNum) {
   const id = String(idNum >>> 0);
   let done = false;
   let pendingRaw = null;
+  const canUseAsyncRawRead =
+    CAP_STREAM_READ_ASYNC_RAW &&
+    (CAP_STREAM_READ_ASYNC_RAW.kind === "function" || CAP_STREAM_READ_ASYNC_RAW.kind === "number");
   const clearWaiter = () => {
     const waiter = globalThis.__nodeNativeStreamReadWaiters.get(id);
     if (waiter) {
@@ -1020,7 +1025,11 @@ function makeNativeAcceptedStreamReader(idNum) {
         let raw = pendingRaw;
         pendingRaw = null;
         if (!raw) {
-          raw = callCapturedRaw(CAP_STREAM_READ_RAW, OP_STREAM_READ_RAW, idNum >>> 0);
+          if (canUseAsyncRawRead) {
+            raw = await callCapturedAwait(CAP_STREAM_READ_ASYNC_RAW, OP_STREAM_READ_ASYNC_RAW, idNum >>> 0);
+          } else {
+            raw = callCapturedRaw(CAP_STREAM_READ_RAW, OP_STREAM_READ_RAW, idNum >>> 0);
+          }
         }
         if (!(raw instanceof Uint8Array)) {
           raw = toStreamChunk(raw);
@@ -1031,6 +1040,9 @@ function makeNativeAcceptedStreamReader(idNum) {
         }
         const tag = raw[0] >>> 0;
         if (tag === 0) {
+          if (canUseAsyncRawRead) {
+            continue;
+          }
           await new Promise((resolve) => {
             globalThis.__nodeNativeStreamReadWaiters.set(id, resolve);
             let immediate = callCapturedRaw(CAP_STREAM_READ_RAW, OP_STREAM_READ_RAW, idNum >>> 0);

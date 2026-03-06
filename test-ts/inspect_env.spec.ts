@@ -122,13 +122,13 @@ describe("inspect + envFile", () => {
     }
   });
 
-  test("envFile true loads .env from cwd upward", async () => {
+  test("envFile true loads .env from cwd only (no parent traversal)", async () => {
     const root = await mkTempDir("denojs-worker-envfile-");
     const nested = path.join(root, "a", "b", "c");
     await fs.mkdir(nested, { recursive: true });
 
     const key = `TEST_ENV_${Date.now()}`;
-    await writeFile(path.join(root, ".env"), `${key}=from-dotenv\n`);
+    await writeFile(path.join(nested, ".env"), `${key}=from-dotenv\n`);
 
     const dw = createTestWorker({
       cwd: nested,
@@ -139,6 +139,29 @@ describe("inspect + envFile", () => {
     try {
       const v = await dw.eval(`Deno.env.get("${key}")`);
       expect(v).toBe("from-dotenv");
+    } finally {
+      if (!dw.isClosed()) await dw.close();
+      await rmRF(root);
+    }
+  });
+
+  test("envFile true does not load parent .env outside worker cwd", async () => {
+    const root = await mkTempDir("denojs-worker-envfile-parent-");
+    const nested = path.join(root, "nested");
+    await fs.mkdir(nested, { recursive: true });
+
+    const key = `TEST_ENV_${Date.now()}`;
+    await writeFile(path.join(root, ".env"), `${key}=parent-secret\n`);
+
+    const dw = createTestWorker({
+      cwd: nested,
+      envFile: true,
+      permissions: { env: true, read: true },
+    });
+
+    try {
+      const v = await dw.eval(`Deno.env.get("${key}")`);
+      expect(v).toBeUndefined();
     } finally {
       if (!dw.isClosed()) await dw.close();
       await rmRF(root);
@@ -173,7 +196,7 @@ describe("inspect + envFile", () => {
     await fs.mkdir(nested, { recursive: true });
 
     const key = `TEST_ENV_${Date.now()}`;
-    await writeFile(path.join(root, ".env"), `${key}=from-dotenv-local\n`);
+    await writeFile(path.join(nested, ".env"), `${key}=from-dotenv-local\n`);
 
     const dw1 = createTestWorker({
       cwd: nested,

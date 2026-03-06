@@ -532,7 +532,7 @@ const worker = new DenoWorker({
     NODE_ENV: "production"
   },
   
-  // OR 2. Auto-load from a .env file (searches upwards from cwd by default)
+  // OR 2. Auto-load from a .env file in the worker cwd
   // envFile: true, 
 
   // OR 3. provide exact file to load, errors out if the file doesn't exist

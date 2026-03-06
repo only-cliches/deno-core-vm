@@ -1,0 +1,14 @@
+{
+  "name": "ray-bench",
+  "version": "1.0.0",
+  "description": "Distributed raytracer benchmark over Deno worker threads",
+  "main": "src/bench.ts",
+  "scripts": {
+    "bench": "npx tsx src/bench.ts",
+    "bench:quick": "npx tsx src/bench.ts --width 320 --height 180 --samples 4 --max-depth 2 --workers-list 1,2,4,8 --warmup 1 --iterations 2",
+    "bench:hd": "npx tsx src/bench.ts --width 1280 --height 720 --samples 8 --max-depth 6 --workers-list 1,2,4,8 --warmup 2 --iterations 3"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC"
+}

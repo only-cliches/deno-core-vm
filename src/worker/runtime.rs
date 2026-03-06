@@ -27,7 +27,8 @@ use crate::worker::ops::{
     op_denojs_worker_post_message_bin, op_denojs_worker_stream_accept,
     op_denojs_worker_stream_accept_async, op_denojs_worker_stream_discard,
     op_denojs_worker_stream_read, op_denojs_worker_stream_read_async,
-    op_denojs_worker_stream_read_raw, op_denojs_worker_stream_take_chunk,
+    op_denojs_worker_stream_read_async_raw, op_denojs_worker_stream_read_raw,
+    op_denojs_worker_stream_take_chunk,
 };
 use crate::worker::stream_plane::NativeIncomingPlane;
 use crate::worker::state::RuntimeLimits;
@@ -78,6 +79,7 @@ extension!(
         op_denojs_worker_stream_accept_async,
         op_denojs_worker_stream_read,
         op_denojs_worker_stream_read_async,
+        op_denojs_worker_stream_read_async_raw,
         op_denojs_worker_stream_read_raw,
         op_denojs_worker_stream_take_chunk,
         op_denojs_worker_stream_discard,

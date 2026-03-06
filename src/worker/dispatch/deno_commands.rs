@@ -117,7 +117,7 @@ pub async fn handle_deno_msg(
     }
 }
 
-fn payload_to_chunk_bytes(payload: &JsValueBridge) -> Option<&[u8]> {
+fn payload_to_chunk_bytes(payload: &JsValueBridge) -> Option<Bytes> {
     let JsValueBridge::BufferView {
         bytes,
         byte_offset,
@@ -129,7 +129,7 @@ fn payload_to_chunk_bytes(payload: &JsValueBridge) -> Option<&[u8]> {
     };
     let start = (*byte_offset).min(bytes.len());
     let end = start.checked_add(*length)?.min(bytes.len());
-    Some(&bytes.as_ref()[start..end])
+    Some(bytes.slice(start..end))
 }
 
 fn native_stream_plane(worker: &mut MainWorker) -> Option<Arc<NativeIncomingPlane>> {
@@ -399,7 +399,7 @@ fn handle_post_stream_chunk_msg(
         && let Some(chunk) = payload_to_chunk_bytes(&payload)
         && let Some(plane) = native_stream_plane(worker)
     {
-        let (_, wake) = plane.push_chunk_with_wake(id_num, chunk.to_vec());
+        let (_, wake) = plane.push_chunk_with_wake(id_num, chunk);
         if wake {
             let _ = dispatch_native_stream_poke(worker, id_num);
         }
@@ -451,7 +451,7 @@ fn handle_post_stream_chunks_msg(
     }
     // Vectorize into one binary payload when all chunks are binary payloads.
     let mut all_binary = !payloads.is_empty();
-    let mut merged_chunks: Vec<&[u8]> = Vec::with_capacity(payloads.len());
+    let mut merged_chunks: Vec<Bytes> = Vec::with_capacity(payloads.len());
     let mut merged_cap = 0usize;
     for payload in &payloads {
         let Some(chunk) = payload_to_chunk_bytes(payload) else {
@@ -465,14 +465,14 @@ fn handle_post_stream_chunks_msg(
         let mut merged = Vec::<u8>::with_capacity(merged_cap);
         for chunk in merged_chunks {
             merged.extend_from_slice(&(chunk.len() as u32).to_be_bytes());
-            merged.extend_from_slice(chunk);
+            merged.extend_from_slice(chunk.as_ref());
         }
         let id_num = stream_id.parse::<u32>().unwrap_or(0);
         if id_num > 0 {
             if native_stream_plane_enabled()
                 && let Some(plane) = native_stream_plane(worker)
             {
-                let (_, wake) = plane.push_vectorized_with_wake(id_num, &merged);
+                let (_, wake) = plane.push_vectorized_with_wake(id_num, Bytes::from(merged));
                 if wake {
                     let _ = dispatch_native_stream_poke(worker, id_num);
                 }
@@ -542,7 +542,7 @@ fn handle_post_stream_chunk_raw_msg(
         && let Some(plane) = native_stream_plane(worker)
     {
         let _ = credit;
-        let (_, wake) = plane.push_chunk_with_wake(stream_id, chunk.to_vec());
+        let (_, wake) = plane.push_chunk_with_wake(stream_id, chunk);
         if wake {
             let _ = dispatch_native_stream_poke(worker, stream_id);
         }
@@ -593,7 +593,7 @@ fn handle_post_stream_chunk_raw_bin_msg(
         && let Some(plane) = native_stream_plane(worker)
     {
         let _ = credit;
-        let (_, wake) = plane.push_chunk_with_wake(stream_id, payload);
+        let (_, wake) = plane.push_chunk_with_wake(stream_id, Bytes::from(payload));
         if wake {
             let _ = dispatch_native_stream_poke(worker, stream_id);
         }

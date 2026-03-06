@@ -266,14 +266,21 @@ fn within_base_dir(base_dir: &Path, candidate: &Path) -> bool {
     cand_abs.starts_with(&base_abs)
 }
 
-// Find dotenv upwards.
-fn find_dotenv_upwards(start_dir: &Path) -> Option<PathBuf> {
-    // Walk up to filesystem root, first .env wins.
+// Find dotenv upwards without escaping the configured sandbox base directory.
+fn find_dotenv_upwards(start_dir: &Path, sandbox_base_dir: &Path) -> Option<PathBuf> {
+    // Walk up to (and including) sandbox base, first .env wins.
+    let sandbox_base = canonicalize_or_lexical(sandbox_base_dir);
     let mut cur = canonicalize_or_lexical(start_dir);
     loop {
+        if !within_base_dir(&sandbox_base, &cur) {
+            return None;
+        }
         let cand = cur.join(".env");
         if cand.is_file() {
             return Some(cand);
+        }
+        if cur == sandbox_base {
+            return None;
         }
         let parent = cur.parent().map(|p| p.to_path_buf());
         let Some(p) = parent else {
@@ -656,7 +663,7 @@ impl WorkerCreateOptions {
             if !(v.is_a::<JsUndefined, _>(cx) || v.is_a::<JsNull, _>(cx)) {
                 if let Ok(b) = v.downcast::<JsBoolean, _>(cx) {
                     if b.value(cx) {
-                        if let Some(p) = find_dotenv_upwards(&base_cwd) {
+                        if let Some(p) = find_dotenv_upwards(&base_cwd, &base_cwd) {
                             let map = load_dotenv_file_strict(cx, &p)?;
                             out.runtime_options.env = Some(EnvConfig::Map(map));
                         }

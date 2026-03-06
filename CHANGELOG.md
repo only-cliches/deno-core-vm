@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.12] Future
+
+### Fixed
+- Hardened `permissions.net` / `permissions.import` host allow-list matching for IPv6 entries:
+  - bracketed IPv6 `host:port` values now enforce port constraints correctly
+  - malformed bracketed IPv6 entries are rejected instead of falling back to host-only matching
+- Hardened `envFile: true` loading to stay within the worker `cwd` sandbox:
+  - automatic `.env` discovery no longer traverses parent directories outside the configured worker cwd
+
+### Changed
+- Updated docs to reflect sandbox-bounded `envFile: true` behavior (cwd-local discovery).
+
+### Tests
+- Added IPv6 permission matching regression coverage in Rust module-loader tests.
+- Added `envFile: true` sandbox-boundary regression coverage in Jest inspect/env tests.
+
 ## [0.9.6] Mar 6, 2026
 
 ### Changed

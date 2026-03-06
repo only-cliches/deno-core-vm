@@ -33,7 +33,7 @@ fn stream_plane_from_state(state: &OpState) -> Option<std::sync::Arc<NativeIncom
 
 #[derive(Default)]
 pub struct NativeReadScratch {
-    chunks: Mutex<HashMap<u32, VecDeque<Vec<u8>>>>,
+    chunks: Mutex<HashMap<u32, VecDeque<Bytes>>>,
 }
 
 // Wraps raw bytes as a `Uint8Array` bridge value for zero-copy-friendly binary dispatch.
@@ -205,6 +205,7 @@ pub fn op_denojs_worker_stream_take_chunk(state: &mut OpState, #[smi] stream_id:
     let out = guard
         .get_mut(&stream_id)
         .and_then(VecDeque::pop_front)
+        .map(|chunk| chunk.to_vec())
         .unwrap_or_default();
     if guard.get(&stream_id).is_some_and(|q| q.is_empty()) {
         guard.remove(&stream_id);
@@ -276,6 +277,44 @@ pub async fn op_denojs_worker_stream_read_async(
         NativeReadEvent::Error(message) => serde_json::json!({ "kind": "error", "message": message }),
     };
     v
+}
+
+#[op2(async(lazy), nofast)]
+#[buffer]
+pub async fn op_denojs_worker_stream_read_async_raw(
+    state: std::rc::Rc<std::cell::RefCell<OpState>>,
+    #[smi] stream_id: i32,
+) -> Vec<u8> {
+    if stream_id <= 0 {
+        let mut out = Vec::from([3u8]);
+        out.extend_from_slice(b"Invalid native stream id");
+        return out;
+    }
+    let Some(plane) = state
+        .borrow()
+        .try_borrow::<std::sync::Arc<NativeIncomingPlane>>()
+        .cloned()
+    else {
+        let mut out = Vec::from([3u8]);
+        out.extend_from_slice(b"Native stream plane missing in OpState");
+        return out;
+    };
+
+    match plane.read_wait_event(stream_id as u32).await {
+        NativeReadEvent::Chunk(chunk) => {
+            let mut out = Vec::with_capacity(1 + chunk.len());
+            out.push(1u8);
+            out.extend_from_slice(chunk.as_ref());
+            out
+        }
+        NativeReadEvent::Close => vec![2u8],
+        NativeReadEvent::Error(message) => {
+            let mut out = Vec::with_capacity(1 + message.len());
+            out.push(3u8);
+            out.extend_from_slice(message.as_bytes());
+            out
+        }
+    }
 }
 
 // Worker-native stream discard (incoming stream data plane).

@@ -1,4 +1,5 @@
 use serde::Serialize;
+use bytes::Bytes;
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::sync::atomic::AtomicU64;
@@ -16,7 +17,7 @@ const STREAM_TELEMETRY_LOG_EVERY_CHUNKS: u64 = 16 * 1024;
 
 #[derive(Debug)]
 enum NativeStreamEvent {
-  Chunk(Vec<u8>),
+  Chunk(Bytes),
   Close,
   Error(String),
 }
@@ -86,7 +87,7 @@ pub struct NativeReadReply {
 }
 
 pub enum NativeReadEvent {
-  Chunk(Vec<u8>),
+  Chunk(Bytes),
   Close,
   Error(String),
 }
@@ -267,11 +268,11 @@ impl NativeIncomingPlane {
     (true, wake)
   }
 
-  pub fn push_chunk(&self, stream_id: u32, chunk: Vec<u8>) -> bool {
+  pub fn push_chunk(&self, stream_id: u32, chunk: Bytes) -> bool {
     self.push_chunk_with_wake(stream_id, chunk).0
   }
 
-  pub fn push_chunk_with_wake(&self, stream_id: u32, chunk: Vec<u8>) -> (bool, bool) {
+  pub fn push_chunk_with_wake(&self, stream_id: u32, chunk: Bytes) -> (bool, bool) {
     let chunk_len = chunk.len() as u64;
     let mut inner = self.lock_inner();
     let Some(stream) = inner.streams.get_mut(&stream_id) else {
@@ -300,7 +301,7 @@ impl NativeIncomingPlane {
     (true, wake)
   }
 
-  pub fn push_vectorized_with_wake(&self, stream_id: u32, vectorized: &[u8]) -> (bool, bool) {
+  pub fn push_vectorized_with_wake(&self, stream_id: u32, vectorized: Bytes) -> (bool, bool) {
     let mut inner = self.lock_inner();
     let mut off = 0usize;
     let mut pushed_any = false;
@@ -310,20 +311,21 @@ impl NativeIncomingPlane {
     let wake = if let Some(stream) = inner.streams.get_mut(&stream_id) {
       let wake = stream.waiting_reader;
       stream.waiting_reader = false;
-      while off + 4 <= vectorized.len() {
+      let raw = vectorized.as_ref();
+      while off + 4 <= raw.len() {
         let len = u32::from_be_bytes([
-          vectorized[off],
-          vectorized[off + 1],
-          vectorized[off + 2],
-          vectorized[off + 3],
+          raw[off],
+          raw[off + 1],
+          raw[off + 2],
+          raw[off + 3],
         ]) as usize;
         off += 4;
-        if off + len > vectorized.len() {
+        if off + len > raw.len() {
           break;
         }
         stream
           .queue
-          .push_back(NativeStreamEvent::Chunk(vectorized[off..off + len].to_vec()));
+          .push_back(NativeStreamEvent::Chunk(vectorized.slice(off..off + len)));
         pushed_any = true;
         pushed_chunks += 1;
         pushed_bytes += len as u64;
@@ -332,18 +334,19 @@ impl NativeIncomingPlane {
       wake
     } else {
       let pending = inner.pending_by_id.entry(stream_id).or_default();
-      while off + 4 <= vectorized.len() {
+      let raw = vectorized.as_ref();
+      while off + 4 <= raw.len() {
         let len = u32::from_be_bytes([
-          vectorized[off],
-          vectorized[off + 1],
-          vectorized[off + 2],
-          vectorized[off + 3],
+          raw[off],
+          raw[off + 1],
+          raw[off + 2],
+          raw[off + 3],
         ]) as usize;
         off += 4;
-        if off + len > vectorized.len() {
+        if off + len > raw.len() {
           break;
         }
-        pending.push_back(NativeStreamEvent::Chunk(vectorized[off..off + len].to_vec()));
+        pending.push_back(NativeStreamEvent::Chunk(vectorized.slice(off..off + len)));
         pushed_any = true;
         pushed_chunks += 1;
         pushed_bytes += len as u64;
