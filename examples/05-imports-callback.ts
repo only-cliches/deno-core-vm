@@ -2,13 +2,20 @@ import { DenoWorker } from "../src/index";
 
 async function main() {
     const worker = new DenoWorker({
+        sourceLoaders: [
+            async ({ source, sourceLoader }) => {
+                if (sourceLoader !== "app-ts") return;
+                return { source, sourceLoader: "ts" };
+            },
+        ],
         imports: (specifier: string) => {
             if (specifier === "app:math") {
                 return {
-                    js: `
-                        export const add = (a, b) => a + b;
+                    source: `
+                        export const add = (a: number, b: number) => a + b;
                         export default { add };
                     `,
+                    sourceLoader: "app-ts",
                 };
             }
 

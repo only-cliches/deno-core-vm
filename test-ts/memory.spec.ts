@@ -18,7 +18,7 @@ function expectBoolean(v: unknown, label: string) {
   if (typeof v !== "boolean") throw new Error(`Expected boolean for ${label}`);
 }
 
-describe("DenoWorker memory()", () => {
+describe("DenoWorker stats.memory()", () => {
   let dw: DenoWorker;
 
   beforeEach(() => {
@@ -29,15 +29,15 @@ describe("DenoWorker memory()", () => {
     if (dw && !dw.isClosed()) await dw.close();
   });
 
-  test("memory() rejects after close", async () => {
+  test("stats.memory() rejects after close", async () => {
     await dw.close();
     expect(dw.isClosed()).toBe(true);
 
-    await expect(dw.memory()).rejects.toBeDefined();
+    await expect(dw.stats.memory()).rejects.toBeDefined();
   });
 
-  test("memory() returns heapStatistics and heapSpaceStatistics", async () => {
-    const mem = await dw.memory();
+  test("stats.memory() returns heapStatistics and heapSpaceStatistics", async () => {
+    const mem = await dw.stats.memory();
 
     expect(mem).toBeDefined();
     expect(typeof mem).toBe("object");
@@ -87,8 +87,8 @@ describe("DenoWorker memory()", () => {
     }
   });
 
-  test("memory() reflects allocations after creating pressure", async () => {
-    const before = await dw.memory();
+  test("stats.memory() reflects allocations after creating pressure", async () => {
+    const before = await dw.stats.memory();
 
     const beforeUsed = before.heapStatistics.usedHeapSize as number;
     expectFiniteNumber(beforeUsed, "before.heapStatistics.usedHeapSize");
@@ -106,7 +106,7 @@ describe("DenoWorker memory()", () => {
     // Give V8 a moment to account for stats. This reduces flakiness.
     await sleep(25);
 
-    const after = await dw.memory();
+    const after = await dw.stats.memory();
 
     const afterUsed = after.heapStatistics.usedHeapSize as number;
     expectFiniteNumber(afterUsed, "after.heapStatistics.usedHeapSize");

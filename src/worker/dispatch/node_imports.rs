@@ -60,14 +60,28 @@ fn interpret_value(cx: &mut TaskContext, v: Handle<JsValue>) -> Option<ImportDec
         }
     }
 
-    for ext in ["js", "ts", "tsx", "jsx"] {
-        if let Ok(vv) = obj.get_value(cx, ext) {
-            if let Ok(ss) = vv.downcast::<JsString, _>(cx) {
-                return Some(ImportDecision::SourceTyped {
-                    ext: ext.to_string(),
-                    code: ss.value(cx),
-                });
+    if let Ok(source_val) = obj.get_value(cx, "source") {
+        if let Ok(source_str) = source_val.downcast::<JsString, _>(cx) {
+            let mut loader = "js".to_string();
+            let source_loader_val = obj
+                .get_value(cx, "sourceLoader")
+                .or_else(|_| obj.get_value(cx, "loader"));
+            if let Ok(loader_val) = source_loader_val {
+                if let Ok(loader_str) = loader_val.downcast::<JsString, _>(cx) {
+                    let maybe_loader = loader_str.value(cx);
+                    if matches!(maybe_loader.as_str(), "js" | "ts" | "tsx" | "jsx") {
+                        loader = maybe_loader;
+                    } else {
+                        return Some(ImportDecision::Block);
+                    }
+                } else if !(loader_val.is_a::<JsUndefined, _>(cx) || loader_val.is_a::<JsNull, _>(cx)) {
+                    return Some(ImportDecision::Block);
+                }
             }
+            return Some(ImportDecision::SourceTyped {
+                ext: loader,
+                code: source_str.value(cx),
+            });
         }
     }
 

@@ -16,6 +16,14 @@ import {
 } from "../shared/stream-envelope";
 import { dehydrateForWire, hydrateFromWire } from "./wire";
 import type {
+    DenoWorkerCpuOptions,
+    DenoWorkerCpuStats,
+    DenoWorkerEventLoopLagOptions,
+    DenoWorkerEventLoopLagStats,
+    DenoLoaderTransform,
+    DenoLoaderTransformContext,
+    DenoSourceLoader,
+    ImportsCallbackResult,
     DenoWorkerHandleApplyOp,
     DenoWorkerHandleAwaitOptions,
     DenoWorkerHandleExecOptions,
@@ -36,8 +44,15 @@ import type {
     DenoWorkerModuleEvalOptions,
     DenoWorkerOptions,
     DenoWorkerRestartOptions,
+    DenoWorkerLatencyStats,
+    DenoWorkerRatesOptions,
+    DenoWorkerRatesStats,
     DenoWorkerRuntimeEvent,
     DenoWorkerRuntimeHandler,
+    DenoWorkerStatsResetOptions,
+    DenoWorkerStatsApi,
+    DenoWorkerStreamStats,
+    DenoWorkerTotalsStats,
     DenoWorkerStreamApi,
     DenoWorkerStreamReader,
     DenoWorkerStreamWriter,
@@ -74,6 +89,16 @@ const STREAM_SLOT_POOL_SCALE_DEN = 2;
 const STREAM_SLOT_POOL_HYSTERESIS = 8;
 const STREAM_SLOT_POOL_TUNE_INTERVAL = 16;
 const HANDLE_DEFAULT_MAX = 128;
+const CPU_USAGE_DEFAULT_MEASURE_MS = 1000;
+const CPU_USAGE_MIN_MEASURE_MS = 10;
+const CPU_USAGE_MAX_MEASURE_MS = 60_000;
+const STATS_WINDOW_DEFAULT_MS = 1000;
+const STATS_WINDOW_MIN_MS = 10;
+const STATS_WINDOW_MAX_MS = 60_000;
+const EVENT_LOOP_LAG_DEFAULT_MS = 100;
+type StatsOpKind = "eval" | "handle" | "global" | "message";
+type StatsOpSample = { atMs: number; kind: StatsOpKind; durationMs: number; ok: boolean };
+const BUILTIN_SOURCE_LOADERS = new Set(["js", "ts", "tsx", "jsx"]);
 const WIRE_MARKER_KEY_SET = new Set([
     "__undef",
     "__num",
@@ -669,6 +694,16 @@ class StreamReaderImpl implements DenoWorkerStreamReader {
         }
     }
 
+    /** Lightweight internal snapshot used by wrapper-level stats aggregation. */
+    snapshotBuffered(): { queuedChunks: number; queuedBytes: number } {
+        let queuedChunks = 0;
+        for (const ev of this.queue) {
+            if (ev.kind !== "chunk") continue;
+            queuedChunks += 1;
+        }
+        return { queuedChunks, queuedBytes: this.bufferedBytes };
+    }
+
     /** Exposes this reader as an async iterator yielding incoming binary chunks. */
     [Symbol.asyncIterator](): AsyncIterableIterator<Uint8Array> {
         const self = this;
@@ -696,6 +731,9 @@ export class DenoWorker {
     private closeRequested = false;
     private readonly lifecycleHooks?: DenoWorkerLifecycleHooks;
     private readonly creationOptions?: DenoWorkerOptions;
+    private readonly nativeOptions?: DenoWorkerOptions;
+    private readonly loaderTransforms: DenoLoaderTransform[];
+    private readonly loadersStrictJsOnly: boolean;
     private readonly messageHandlers = new Set<DenoWorkerMessageHandler>();
     private readonly closeHandlers = new Set<DenoWorkerCloseHandler>();
     private readonly lifecycleHandlers = new Set<DenoWorkerLifecycleHandler>();
@@ -738,6 +776,19 @@ export class DenoWorker {
     private handleBridgeInstalled = false;
     private readonly activeHandleIds = new Set<string>();
     private readonly maxHandle: number;
+    private readonly statsApi: DenoWorkerStatsApi;
+    private readonly cpuExecutionSamples: Array<{ atMs: number; cpuTimeMs: number }> = [];
+    private readonly opSamples: StatsOpSample[] = [];
+    private globalOpScopeDepth = 0;
+    private totalsStats: DenoWorkerTotalsStats = {
+        ops: 0,
+        errors: 0,
+        restarts: 0,
+        messagesOut: 0,
+        messagesIn: 0,
+        bytesOut: 0,
+        bytesIn: 0,
+    };
     /** Stream transport API for creating writers and accepting incoming readers. */
     readonly stream: DenoWorkerStreamApi = {
         connect: (key: string) => this.streamConnect(key),
@@ -748,7 +799,7 @@ export class DenoWorker {
     readonly handle: DenoWorkerHandleApi = {
         get: (path: string, options?: DenoWorkerHandleExecOptions) => this.handleGet(path, options),
         tryGet: (path: string, options?: DenoWorkerHandleExecOptions) => this.handleTryGet(path, options),
-        eval: (source: string, options?: Omit<EvalOptions, "args" | "type">) => this.handleEval(source, options),
+        eval: (source: string, options?: Omit<EvalOptions, "args" | "type" | "sourceLoader">) => this.handleEval(source, options),
     };
     /** Global namespace API for setting, reading, and calling runtime globals. */
     readonly global: DenoWorkerGlobalApi = {
@@ -786,6 +837,10 @@ export class DenoWorker {
         register: (moduleName: string, source: string) => this.moduleApiRegister(moduleName, source),
         clear: (moduleName: string) => this.moduleApiClear(moduleName),
     };
+    /** Runtime stats API for lightweight wrapper-level telemetry. */
+    get stats(): DenoWorkerStatsApi {
+        return this.statsApi;
+    }
 
     /** Allocates the next unique handle id scoped to the current native epoch. */
     private nextHandleId(): string {
@@ -828,7 +883,7 @@ export class DenoWorker {
     /** Runs a handle operation by dispatching payload through the runtime handle bridge entrypoint. */
     private async runHandleOp(
         payload: Record<string, unknown>,
-        options?: Omit<EvalOptions, "args" | "type">,
+        options?: Omit<EvalOptions, "args" | "type" | "sourceLoader">,
     ): Promise<any> {
         if (!(this.startupReady && !this.startupError && this.handleBridgeInstalled)) {
             await this.startupPromise;
@@ -845,7 +900,7 @@ export class DenoWorker {
         id: string,
         path: string,
         args: any[],
-        options?: Omit<EvalOptions, "args" | "type">,
+        options?: Omit<EvalOptions, "args" | "type" | "sourceLoader">,
     ): Promise<any> {
         if (!(this.startupReady && !this.startupError && this.handleBridgeInstalled)) {
             await this.startupPromise;
@@ -862,20 +917,20 @@ export class DenoWorker {
         id: string,
         generation: number,
         rootType: DenoWorkerHandleTypeInfo,
-        defaultExecOptions?: Omit<EvalOptions, "args" | "type">,
+        defaultExecOptions?: Omit<EvalOptions, "args" | "type" | "sourceLoader">,
     ): DenoWorkerHandle {
         let disposed = false;
         let rootTypeCache = rootType;
         const self = this;
         const toExecOptions = (
-            value?: DenoWorkerHandleExecOptions | Omit<EvalOptions, "args" | "type">,
-        ): Omit<EvalOptions, "args" | "type"> | undefined => {
+            value?: DenoWorkerHandleExecOptions | Omit<EvalOptions, "args" | "type" | "sourceLoader">,
+        ): Omit<EvalOptions, "args" | "type" | "sourceLoader"> | undefined => {
             if (!value || typeof value !== "object") return defaultExecOptions ? { ...defaultExecOptions } : undefined;
-            const out: Omit<EvalOptions, "args" | "type"> = {};
+            const out: Omit<EvalOptions, "args" | "type" | "sourceLoader"> = {};
             if (typeof value.maxEvalMs === "number") out.maxEvalMs = value.maxEvalMs;
             if (typeof value.maxCpuMs === "number") out.maxCpuMs = value.maxCpuMs;
-            if (typeof (value as Omit<EvalOptions, "args" | "type">).filename === "string") {
-                out.filename = (value as Omit<EvalOptions, "args" | "type">).filename;
+            if (typeof (value as Omit<EvalOptions, "args" | "type" | "sourceLoader">).filename === "string") {
+                out.filename = (value as Omit<EvalOptions, "args" | "type" | "sourceLoader">).filename;
             }
             if (Object.keys(out).length === 0) return defaultExecOptions ? { ...defaultExecOptions } : undefined;
             if (!defaultExecOptions) return out;
@@ -1263,7 +1318,7 @@ export class DenoWorker {
     /** Constructs a new native worker instance and routes creation failures through crash hooks. */
     private createNative(requested: boolean): NativeWorker {
         try {
-            return (nativeAddon as any).DenoWorker(normalizeWorkerOptions(this.creationOptions)) as NativeWorker;
+            return (nativeAddon as any).DenoWorker(normalizeWorkerOptions(this.nativeOptions)) as NativeWorker;
         } catch (e) {
             try {
                 this.lifecycleHooks?.onCrash?.({
@@ -1315,6 +1370,134 @@ export class DenoWorker {
         return true;
     }
 
+    private isPromiseLike(value: unknown): value is Promise<unknown> {
+        return (
+            value !== null &&
+            (typeof value === "object" || typeof value === "function") &&
+            typeof (value as any).then === "function"
+        );
+    }
+
+    private normalizeLoaderName(sourceLoader: unknown): string {
+        const name = typeof sourceLoader === "string" ? sourceLoader.trim() : "";
+        return name || "js";
+    }
+
+    private normalizeLoaderTransformResult(
+        result: unknown,
+        source: string,
+        sourceLoader: string,
+        kind: DenoLoaderTransformContext["kind"],
+    ): { source: string; sourceLoader: string } {
+        if (result === undefined || result === null) return { source, sourceLoader };
+        if (typeof result === "string") return { source: result, sourceLoader };
+
+        if (result && typeof result === "object") {
+            const nextSource = (result as any).source;
+            if (typeof nextSource !== "string") {
+                throw new Error("Loader callback object result must include string `source`.");
+            }
+            const nextLoader = this.normalizeLoaderName((result as any).sourceLoader ?? (result as any).loader ?? sourceLoader);
+            return { source: nextSource, sourceLoader: nextLoader };
+        }
+
+        throw new Error(
+            `Loader callback returned invalid value for ${kind}; expected string, { source, sourceLoader? }, or undefined.`,
+        );
+    }
+
+    private assertBuiltinSourceLoader(sourceLoader: string, kind: DenoLoaderTransformContext["kind"]): DenoSourceLoader {
+        if (!BUILTIN_SOURCE_LOADERS.has(sourceLoader)) {
+            throw new Error(
+                `Unresolved sourceLoader '${sourceLoader}' for ${kind}. Loaders must resolve to one of: js, ts, tsx, jsx.`,
+            );
+        }
+        return sourceLoader as DenoSourceLoader;
+    }
+
+    private assertLoaderAllowedOrThrow(sourceLoader: string, kind: DenoLoaderTransformContext["kind"]): void {
+        if (!this.loadersStrictJsOnly) return;
+        if (sourceLoader === "js") return;
+        throw new Error(
+            `sourceLoader '${sourceLoader}' is not allowed for ${kind} because worker was created with sourceLoaders: false (strict js mode).`,
+        );
+    }
+
+    private async applyLoadersAsync(input: DenoLoaderTransformContext): Promise<{ source: string; sourceLoader: DenoSourceLoader }> {
+        let source = input.source;
+        let loader = this.normalizeLoaderName(input.sourceLoader);
+        this.assertLoaderAllowedOrThrow(loader, input.kind);
+        for (const transform of this.loaderTransforms) {
+            const result = await transform({ ...input, source, sourceLoader: loader });
+            const next = this.normalizeLoaderTransformResult(result, source, loader, input.kind);
+            source = next.source;
+            loader = next.sourceLoader;
+            this.assertLoaderAllowedOrThrow(loader, input.kind);
+        }
+        return { source, sourceLoader: this.assertBuiltinSourceLoader(loader, input.kind) };
+    }
+
+    private applyLoadersSync(input: DenoLoaderTransformContext): { source: string; sourceLoader: DenoSourceLoader } {
+        let source = input.source;
+        let loader = this.normalizeLoaderName(input.sourceLoader);
+        this.assertLoaderAllowedOrThrow(loader, input.kind);
+        for (const transform of this.loaderTransforms) {
+            const result = transform({ ...input, source, sourceLoader: loader });
+            if (this.isPromiseLike(result)) {
+                throw new Error("Sync evaluation cannot use async loaders; use eval(...) or module.eval(...).");
+            }
+            const next = this.normalizeLoaderTransformResult(result, source, loader, input.kind);
+            source = next.source;
+            loader = next.sourceLoader;
+            this.assertLoaderAllowedOrThrow(loader, input.kind);
+        }
+        return { source, sourceLoader: this.assertBuiltinSourceLoader(loader, input.kind) };
+    }
+
+    private async normalizeImportCallbackResult(
+        decision: ImportsCallbackResult,
+        specifier: string,
+        referrer?: string,
+        isDynamicImport?: boolean,
+    ): Promise<ImportsCallbackResult> {
+        if (!decision || typeof decision !== "object" || Array.isArray(decision)) return decision;
+        const source = (decision as any).source;
+        if (typeof source !== "string") return decision;
+
+        const { source: nextSource, sourceLoader } = await this.applyLoadersAsync({
+            kind: "import",
+            source,
+            sourceLoader: (decision as any).sourceLoader ?? (decision as any).loader ?? "js",
+            specifier,
+            referrer,
+            isDynamicImport,
+        });
+        return { source: nextSource, sourceLoader };
+    }
+
+    private createNativeOptions(options?: DenoWorkerOptions): DenoWorkerOptions | undefined {
+        if (!options) return undefined;
+        const out: DenoWorkerOptions = { ...options };
+        delete (out as any).sourceLoaders;
+
+        if (typeof options.imports === "function") {
+            const imports = options.imports;
+            out.imports = async (specifier: string, referrer?: string, isDynamicImport?: boolean) => {
+                const decision = await imports(specifier, referrer, isDynamicImport);
+                return await this.normalizeImportCallbackResult(decision, specifier, referrer, isDynamicImport);
+            };
+        }
+
+        return out;
+    }
+
+    private buildResolvedEvalOptions(options: EvalOptions | undefined, sourceLoader: DenoSourceLoader): EvalOptions | undefined {
+        if (!options && sourceLoader === "js") return undefined;
+        const out: EvalOptions = { ...(options ?? {}) };
+        if (sourceLoader !== "js" || options?.sourceLoader !== undefined) out.sourceLoader = sourceLoader;
+        return normalizeEvalOptions(out);
+    }
+
     /** Wires native message/close events to wrapper message routing, stream handling, and lifecycle flow. */
     private bindNativeEvents(native: NativeWorker, epoch: number): void {
         native.on("message", (msg: any) => {
@@ -1324,6 +1507,8 @@ export class DenoWorker {
             if (this.handleIncomingStreamFrame(msg)) return;
             const hydrated = this.canBypassWireHydration(msg) ? msg : hydrateFromWire(msg);
             if (this.handleIncomingStreamFrame(hydrated)) return;
+            this.totalsStats.messagesIn += 1;
+            this.totalsStats.bytesIn += this.estimatePayloadBytes(hydrated);
             if (this.messageHandlers.size === 0) return;
             for (const cb of [...this.messageHandlers]) {
                 try {
@@ -1810,6 +1995,243 @@ export class DenoWorker {
         }
     }
 
+    /** Reads the latest native execution stats snapshot with defensive shape checks. */
+    private readLastExecutionStats(): ExecStats {
+        const v: any = (this.native as any).lastExecutionStats;
+        if (!v || typeof v !== "object") return {};
+
+        const cpu = v.cpuTimeMs;
+        const evalt = v.evalTimeMs;
+        if (typeof cpu === "number" && typeof evalt === "number") {
+            return { cpuTimeMs: cpu, evalTimeMs: evalt };
+        }
+        return {};
+    }
+
+    /** Records CPU milliseconds from the most recently completed runtime operation. */
+    private recordLastExecutionSample(): void {
+        const st = this.readLastExecutionStats();
+        const cpuTimeMs = st.cpuTimeMs;
+        if (typeof cpuTimeMs !== "number" || !Number.isFinite(cpuTimeMs) || cpuTimeMs < 0) return;
+
+        const now = Date.now();
+        this.cpuExecutionSamples.push({ atMs: now, cpuTimeMs });
+        this.pruneCpuSamples(now - CPU_USAGE_MAX_MEASURE_MS);
+    }
+
+    /** Drops stale CPU samples outside the configured retention horizon. */
+    private pruneCpuSamples(cutoffMs: number): void {
+        let removeCount = 0;
+        for (const sample of this.cpuExecutionSamples) {
+            if (sample.atMs >= cutoffMs) break;
+            removeCount += 1;
+        }
+        if (removeCount > 0) this.cpuExecutionSamples.splice(0, removeCount);
+    }
+
+    /** Computes 0-100 usage percentage from recent sampled runtime CPU milliseconds. */
+    private computeCpuUsage(options?: DenoWorkerCpuOptions): DenoWorkerCpuStats {
+        const rawMs = Number(options?.measureMs);
+        const measureMs = Number.isFinite(rawMs)
+            ? Math.min(CPU_USAGE_MAX_MEASURE_MS, Math.max(CPU_USAGE_MIN_MEASURE_MS, Math.trunc(rawMs)))
+            : CPU_USAGE_DEFAULT_MEASURE_MS;
+
+        const now = Date.now();
+        const cutoffMs = now - measureMs;
+        this.pruneCpuSamples(now - CPU_USAGE_MAX_MEASURE_MS);
+
+        let cpuTimeMs = 0;
+        for (const sample of this.cpuExecutionSamples) {
+            if (sample.atMs < cutoffMs) continue;
+            cpuTimeMs += sample.cpuTimeMs;
+        }
+
+        const usagePercentageRaw = (cpuTimeMs / measureMs) * 100;
+        const usagePercentage = Number.isFinite(usagePercentageRaw)
+            ? Math.min(100, Math.max(0, usagePercentageRaw))
+            : 0;
+
+        return {
+            usagePercentage,
+            measureMs,
+            cpuTimeMs,
+        };
+    }
+
+    private normalizeWindowMs(value: unknown, fallback: number): number {
+        const raw = Number(value);
+        if (!Number.isFinite(raw)) return fallback;
+        return Math.min(STATS_WINDOW_MAX_MS, Math.max(STATS_WINDOW_MIN_MS, Math.trunc(raw)));
+    }
+
+    private recordOpSample(kind: StatsOpKind, durationMs: number, ok: boolean): void {
+        const atMs = Date.now();
+        const normalizedDuration = Number.isFinite(durationMs) && durationMs >= 0 ? durationMs : 0;
+        this.opSamples.push({ atMs, kind, durationMs: normalizedDuration, ok });
+        this.pruneOpSamples(atMs - STATS_WINDOW_MAX_MS);
+        this.totalsStats.ops += 1;
+        if (!ok) this.totalsStats.errors += 1;
+    }
+
+    private pruneOpSamples(cutoffMs: number): void {
+        let removeCount = 0;
+        for (const sample of this.opSamples) {
+            if (sample.atMs >= cutoffMs) break;
+            removeCount += 1;
+        }
+        if (removeCount > 0) this.opSamples.splice(0, removeCount);
+    }
+
+    private computeRates(options?: DenoWorkerRatesOptions): DenoWorkerRatesStats {
+        const windowMs = this.normalizeWindowMs(options?.windowMs, STATS_WINDOW_DEFAULT_MS);
+        const now = Date.now();
+        const cutoffMs = now - windowMs;
+        this.pruneOpSamples(now - STATS_WINDOW_MAX_MS);
+
+        let evalCount = 0;
+        let handleCount = 0;
+        let globalCount = 0;
+        let messageCount = 0;
+        for (const sample of this.opSamples) {
+            if (sample.atMs < cutoffMs) continue;
+            if (sample.kind === "eval") evalCount += 1;
+            else if (sample.kind === "handle") handleCount += 1;
+            else if (sample.kind === "global") globalCount += 1;
+            else if (sample.kind === "message") messageCount += 1;
+        }
+
+        const scale = 1000 / windowMs;
+        return {
+            windowMs,
+            evalPerSec: evalCount * scale,
+            handlePerSec: handleCount * scale,
+            globalPerSec: globalCount * scale,
+            messagesPerSec: messageCount * scale,
+        };
+    }
+
+    private percentileFromSorted(values: number[], percentile: number): number {
+        if (values.length === 0) return 0;
+        if (percentile <= 0) return values[0];
+        if (percentile >= 100) return values[values.length - 1];
+        const rank = Math.ceil((percentile / 100) * values.length) - 1;
+        const index = Math.min(values.length - 1, Math.max(0, rank));
+        return values[index];
+    }
+
+    private computeLatency(options?: DenoWorkerRatesOptions): DenoWorkerLatencyStats {
+        const windowMs = this.normalizeWindowMs(options?.windowMs, STATS_WINDOW_DEFAULT_MS);
+        const now = Date.now();
+        const cutoffMs = now - windowMs;
+        this.pruneOpSamples(now - STATS_WINDOW_MAX_MS);
+
+        const values: number[] = [];
+        for (const sample of this.opSamples) {
+            if (sample.atMs < cutoffMs) continue;
+            values.push(sample.durationMs);
+        }
+        if (values.length === 0) {
+            return { windowMs, count: 0, avgMs: 0, p50Ms: 0, p95Ms: 0, p99Ms: 0, maxMs: 0 };
+        }
+        values.sort((a, b) => a - b);
+        let sum = 0;
+        for (const v of values) sum += v;
+
+        return {
+            windowMs,
+            count: values.length,
+            avgMs: sum / values.length,
+            p50Ms: this.percentileFromSorted(values, 50),
+            p95Ms: this.percentileFromSorted(values, 95),
+            p99Ms: this.percentileFromSorted(values, 99),
+            maxMs: values[values.length - 1],
+        };
+    }
+
+    private async measureEventLoopLag(options?: DenoWorkerEventLoopLagOptions): Promise<DenoWorkerEventLoopLagStats> {
+        const measureMs = this.normalizeWindowMs(options?.measureMs, EVENT_LOOP_LAG_DEFAULT_MS);
+        const started = Date.now();
+        await new Promise<void>((resolve) => setTimeout(resolve, measureMs));
+        const elapsedMs = Date.now() - started;
+        return {
+            measureMs,
+            lagMs: Math.max(0, elapsedMs - measureMs),
+        };
+    }
+
+    private getStreamStats(): DenoWorkerStreamStats {
+        let queuedChunks = 0;
+        let queuedBytes = 0;
+        for (const reader of this.streamIncoming.values()) {
+            const snap = reader.snapshotBuffered();
+            queuedChunks += snap.queuedChunks;
+            queuedBytes += snap.queuedBytes;
+        }
+        for (const pending of this.pendingIncomingStreamFrames.values()) {
+            for (const frame of pending) {
+                if (frame.t !== "chunk" || !(frame.chunk instanceof Uint8Array)) continue;
+                queuedChunks += 1;
+                queuedBytes += frame.chunk.byteLength;
+            }
+        }
+        let creditDebtBytes = 0;
+        for (const credit of this.streamWriterCredits.values()) {
+            const current = Number.isFinite(credit) ? Math.max(0, Math.trunc(credit)) : 0;
+            creditDebtBytes += Math.max(0, this.streamWindowBytes - current);
+        }
+        return {
+            activeStreams: this.streamById.size,
+            queuedChunks,
+            queuedBytes,
+            creditDebtBytes,
+            backlogSize: this.streamBacklog.size,
+        };
+    }
+
+    private resetStats(options?: DenoWorkerStatsResetOptions): void {
+        this.cpuExecutionSamples.length = 0;
+        this.opSamples.length = 0;
+        if (options?.keepTotals) return;
+        this.totalsStats = {
+            ops: 0,
+            errors: 0,
+            restarts: 0,
+            messagesOut: 0,
+            messagesIn: 0,
+            bytesOut: 0,
+            bytesIn: 0,
+        };
+    }
+
+    private estimatePayloadBytes(value: unknown): number {
+        if (value == null) return 0;
+        if (typeof Buffer !== "undefined" && Buffer.isBuffer(value)) return value.byteLength;
+        if (value instanceof Uint8Array) return value.byteLength;
+        if (value instanceof ArrayBuffer) return value.byteLength;
+        if (typeof SharedArrayBuffer !== "undefined" && value instanceof SharedArrayBuffer) return value.byteLength;
+        if (typeof ArrayBuffer !== "undefined" && typeof ArrayBuffer.isView === "function" && ArrayBuffer.isView(value)) {
+            return (value as ArrayBufferView).byteLength;
+        }
+        if (typeof value === "string") return Buffer.byteLength(value, "utf8");
+        if (typeof value === "number" || typeof value === "boolean" || typeof value === "bigint") {
+            return Buffer.byteLength(String(value), "utf8");
+        }
+        try {
+            const json = JSON.stringify(value);
+            return typeof json === "string" ? Buffer.byteLength(json, "utf8") : 0;
+        } catch {
+            return 0;
+        }
+    }
+
+    private classifyEvalOp(source: string): StatsOpKind | null {
+        if (source === HANDLE_RUNTIME_INSTALL_SOURCE) return null;
+        if (source === HANDLE_RUNTIME_RUN_SOURCE || source === HANDLE_RUNTIME_CALL_SOURCE) {
+            return this.globalOpScopeDepth > 0 ? "global" : "handle";
+        }
+        return "eval";
+    }
+
     /**
      * Create a runtime-backed worker.
      *
@@ -1819,6 +2241,67 @@ export class DenoWorker {
     constructor(options?: DenoWorkerOptions) {
         this.lifecycleHooks = options?.lifecycle;
         this.creationOptions = options;
+        const self = this;
+        const statsApi = {} as DenoWorkerStatsApi;
+        Object.defineProperty(statsApi, "activeOps", {
+            enumerable: true,
+            configurable: false,
+            get() {
+                return self.inFlightRejectors.size;
+            },
+        });
+        Object.defineProperty(statsApi, "lastExecution", {
+            enumerable: true,
+            configurable: false,
+            get() {
+                return self.readLastExecutionStats();
+            },
+        });
+        statsApi.cpu = async (options?: DenoWorkerCpuOptions) => {
+            await self.startupPromise;
+            return self.computeCpuUsage(options);
+        };
+        statsApi.rates = async (options?: DenoWorkerRatesOptions) => {
+            await self.startupPromise;
+            return self.computeRates(options);
+        };
+        statsApi.latency = async (options?: DenoWorkerRatesOptions) => {
+            await self.startupPromise;
+            return self.computeLatency(options);
+        };
+        statsApi.eventLoopLag = async (options?: DenoWorkerEventLoopLagOptions) => {
+            await self.startupPromise;
+            return await self.measureEventLoopLag(options);
+        };
+        Object.defineProperty(statsApi, "stream", {
+            enumerable: true,
+            configurable: false,
+            get() {
+                return self.getStreamStats();
+            },
+        });
+        Object.defineProperty(statsApi, "totals", {
+            enumerable: true,
+            configurable: false,
+            get() {
+                return { ...self.totalsStats };
+            },
+        });
+        statsApi.reset = (options?: DenoWorkerStatsResetOptions) => {
+            self.resetStats(options);
+        };
+        statsApi.memory = async () => {
+            await self.startupPromise;
+            const raw = await self.trackInFlight(self.native.memory());
+            return coerceMemoryPayload(raw);
+        };
+        this.statsApi = statsApi;
+        const sourceLoadersOpt = options?.sourceLoaders;
+        this.loadersStrictJsOnly = sourceLoadersOpt === false;
+        this.loaderTransforms = Array.isArray(sourceLoadersOpt)
+            ? sourceLoadersOpt.filter((x): x is DenoLoaderTransform => typeof x === "function")
+            : [];
+        this.nativeOptions = this.createNativeOptions(options);
         const parsedMaxHandle = Number((options as any)?.limits?.maxHandle);
         this.maxHandle =
             Number.isFinite(parsedMaxHandle) && parsedMaxHandle >= 1
@@ -1941,15 +2424,23 @@ export class DenoWorker {
      * Throws when runtime is closed.
      */
     postMessage(msg: any): void {
+        const started = Date.now();
         const typedEnvelope = this.extractTypedMessageEnvelope(msg);
         if (typedEnvelope && typeof this.native.postMessageTyped === "function") {
             if (!this.native.postMessageTyped(typedEnvelope.type, typedEnvelope.id, typedEnvelope.payload)) {
+                this.recordOpSample("message", Date.now() - started, false);
                 throw new Error("DenoWorker.postMessage failed: worker is closed");
             }
+            this.totalsStats.messagesOut += 1;
+            this.totalsStats.bytesOut += this.estimatePayloadBytes(typedEnvelope.payload);
+            this.recordOpSample("message", Date.now() - started, true);
             return;
         }
         const payload = this.isBinaryLikeValue(msg) ? msg : dehydrateForWire(msg);
         this.postMessageRaw(payload);
+        this.totalsStats.messagesOut += 1;
+        this.totalsStats.bytesOut += this.estimatePayloadBytes(payload);
+        this.recordOpSample("message", Date.now() - started, true);
     }
 
     /** Posts a pre-serialized payload directly to native message channel. */
@@ -1970,7 +2461,9 @@ export class DenoWorker {
      * Throws if worker is closed.
      */
     postMessages(msgs: any[]): number {
+        const started = Date.now();
         if (this.isClosed()) {
+            this.recordOpSample("message", Date.now() - started, false);
             throw new Error("DenoWorker.postMessages failed: worker is closed");
         }
         if (!Array.isArray(msgs) || msgs.length === 0) return 0;
@@ -1978,8 +2471,14 @@ export class DenoWorker {
         const payloads = msgs.map((m) => (this.isBinaryLikeValue(m) ? m : dehydrateForWire(m)));
         const sent = (this.native as any).postMessages(payloads) as number;
         if (sent !== payloads.length) {
+            this.recordOpSample("message", Date.now() - started, false);
             throw new Error("DenoWorker.postMessages failed: worker is closed");
         }
+        this.totalsStats.messagesOut += sent;
+        let bytes = 0;
+        for (let i = 0; i < sent; i += 1) bytes += this.estimatePayloadBytes(payloads[i]);
+        this.totalsStats.bytesOut += bytes;
+        this.recordOpSample("message", Date.now() - started, true);
         return sent;
     }
 
@@ -1993,7 +2492,15 @@ export class DenoWorker {
         if (!Array.isArray(msgs) || msgs.length === 0) return 0;
         const payloads = msgs.map((m) => (this.isBinaryLikeValue(m) ? m : dehydrateForWire(m)));
         const sent = (this.native as any).postMessages(payloads);
-        return typeof sent === "number" && Number.isFinite(sent) ? sent : 0;
+        if (typeof sent === "number" && Number.isFinite(sent) && sent > 0) {
+            this.totalsStats.messagesOut += sent;
+            let bytes = 0;
+            for (let i = 0; i < sent; i += 1) bytes += this.estimatePayloadBytes(payloads[i]);
+            this.totalsStats.bytesOut += bytes;
+            this.recordOpSample("message", 0, true);
+            return sent;
+        }
+        return 0;
     }
 
     /**
@@ -2005,10 +2512,22 @@ export class DenoWorker {
         if (this.isClosed()) return false;
         const typedEnvelope = this.extractTypedMessageEnvelope(msg);
         if (typedEnvelope && typeof this.native.postMessageTyped === "function") {
-            return this.native.postMessageTyped(typedEnvelope.type, typedEnvelope.id, typedEnvelope.payload);
+            const ok = this.native.postMessageTyped(typedEnvelope.type, typedEnvelope.id, typedEnvelope.payload);
+            if (ok) {
+                this.totalsStats.messagesOut += 1;
+                this.totalsStats.bytesOut += this.estimatePayloadBytes(typedEnvelope.payload);
+                this.recordOpSample("message", 0, true);
+            }
+            return ok;
         }
         const payload = this.isBinaryLikeValue(msg) ? msg : dehydrateForWire(msg);
-        return this.native.postMessage(payload);
+        const ok = this.native.postMessage(payload);
+        if (ok) {
+            this.totalsStats.messagesOut += 1;
+            this.totalsStats.bytesOut += this.estimatePayloadBytes(payload);
+            this.recordOpSample("message", 0, true);
+        }
+        return ok;
     }
 
     /** Returns stable directional keys for bidirectional `stream.connect(key)` sessions. */
@@ -2625,24 +3144,6 @@ export class DenoWorker {
     }
 
     /**
-     * Last known execution stats from the native runtime.
-     *
-     * Values are updated after successful/failed eval operations.
-     */
-    get lastExecutionStats(): ExecStats {
-        const v: any = (this.native as any).lastExecutionStats;
-        if (!v || typeof v !== "object") return {};
-
-        const cpu = v.cpuTimeMs;
-        const evalt = v.evalTimeMs;
-
-        if (typeof cpu === "number" && typeof evalt === "number") {
-            return { cpuTimeMs: cpu, evalTimeMs: evalt };
-        }
-        return {};
-    }
-
-    /**
      * Actual inspector port bound by the runtime.
      *
      * Returns `undefined` when inspector is disabled or not bound.
@@ -2757,18 +3258,8 @@ export class DenoWorker {
         this.bindNativeEvents(this.native, this.nativeEpoch);
         this.initializeStartup(this.creationOptions?.globals, this.creationOptions?.modules);
         await this.startupPromise;
+        this.totalsStats.restarts += 1;
         this.invokeHook("afterStart");
-    }
-
-    /**
-     * Query V8 heap memory stats for the runtime.
-     *
-     * Waits for constructor globals startup to finish before querying memory.
-     */
-    async memory(): Promise<DenoWorkerMemory> {
-        await this.startupPromise;
-        const raw = await this.trackInFlight(this.native.memory());
-        return coerceMemoryPayload(raw);
     }
 
     /** Runs a callback with a temporary handle rooted at `globalThis` and always disposes it. */
@@ -2776,12 +3267,14 @@ export class DenoWorker {
         options: DenoWorkerHandleExecOptions | undefined,
         fn: (handle: DenoWorkerHandle) => Promise<T>,
     ): Promise<T> {
+        this.globalOpScopeDepth += 1;
         await this.startupPromise;
         const handle = await this.handleGet("globalThis", options);
         try {
             return await fn(handle);
         } finally {
             await handle.dispose(options).catch(() => undefined);
+            this.globalOpScopeDepth = Math.max(0, this.globalOpScopeDepth - 1);
         }
     }
 
@@ -2791,12 +3284,14 @@ export class DenoWorker {
         options: DenoWorkerHandleExecOptions | undefined,
         fn: (handle: DenoWorkerHandle) => Promise<T>,
     ): Promise<T> {
+        this.globalOpScopeDepth += 1;
         await this.startupPromise;
         const handle = await this.handleGet(path, options);
         try {
             return await fn(handle);
         } finally {
             await handle.dispose(options).catch(() => undefined);
+            this.globalOpScopeDepth = Math.max(0, this.globalOpScopeDepth - 1);
         }
     }
 
@@ -2931,7 +3426,7 @@ export class DenoWorker {
         const id = this.nextHandleId();
         const opId = `handle.create:${id}`;
         this.emitRuntimeEvent({ kind: "handle.create", opId, handleId: id, source: "path", path: p });
-        const defaultExecOptions: Omit<EvalOptions, "args" | "type"> | undefined =
+        const defaultExecOptions: Omit<EvalOptions, "args" | "type" | "sourceLoader"> | undefined =
             typeof options?.maxEvalMs === "number" || typeof options?.maxCpuMs === "number"
                 ? {
                     ...(typeof options?.maxEvalMs === "number" ? { maxEvalMs: options.maxEvalMs } : {}),
@@ -2961,14 +3456,14 @@ export class DenoWorker {
     }
 
     /** Creates a new runtime handle by evaluating source and using its result as handle root. */
-    private async handleEval(source: string, options?: Omit<EvalOptions, "args" | "type">): Promise<DenoWorkerHandle> {
+    private async handleEval(source: string, options?: Omit<EvalOptions, "args" | "type" | "sourceLoader">): Promise<DenoWorkerHandle> {
         const src = String(source ?? "");
         if (!src.trim()) throw new Error("handle.eval(source) requires non-empty source");
         this.ensureHandleCapacity();
         const id = this.nextHandleId();
         const opId = `handle.create:${id}`;
         this.emitRuntimeEvent({ kind: "handle.create", opId, handleId: id, source: "eval" });
-        const defaultExecOptions: Omit<EvalOptions, "args" | "type"> | undefined =
+        const defaultExecOptions: Omit<EvalOptions, "args" | "type" | "sourceLoader"> | undefined =
             options &&
             (typeof options.maxEvalMs === "number" ||
                 typeof options.maxCpuMs === "number" ||
@@ -3009,11 +3504,29 @@ export class DenoWorker {
                 this.emitRuntimeEvent({ kind: "eval.end", opId, ok: false });
                 throw this.startupError;
             }
+            let opKind: StatsOpKind | null = "eval";
+            let startedAt = Date.now();
             try {
-                const raw = await this.trackInFlight(this.native.eval(src, normalizeEvalOptions(options)));
+                const transformed = await this.applyLoadersAsync({
+                    kind: "eval",
+                    source: String(src),
+                    sourceLoader: options?.sourceLoader ?? (options as any)?.loader ?? "js",
+                });
+                opKind = this.classifyEvalOp(transformed.source);
+                startedAt = Date.now();
+                const raw = await this.trackInFlight(
+                    this.native.eval(
+                        transformed.source,
+                        this.buildResolvedEvalOptions(options, transformed.sourceLoader),
+                    ),
+                );
+                this.recordLastExecutionSample();
+                if (opKind) this.recordOpSample(opKind, Date.now() - startedAt, true);
                 this.emitRuntimeEvent({ kind: "eval.end", opId, ok: true });
                 return hydrateFromWire(raw) as T;
             } catch (e) {
+                this.recordLastExecutionSample();
+                if (opKind) this.recordOpSample(opKind, Date.now() - startedAt, false);
                 const hydrated = hydrateFromWire(e);
                 this.emitRuntimeEvent({ kind: "eval.end", opId, ok: false });
                 this.emitThrownError(opId, "eval", hydrated);
@@ -3048,11 +3561,27 @@ export class DenoWorker {
             this.emitRuntimeEvent({ kind: "evalSync.end", opId, ok: false });
             throw this.startupError;
         }
+        let opKind: StatsOpKind | null = "eval";
+        let startedAt = Date.now();
         try {
-            const raw = this.native.evalSync(src, normalizeEvalOptions(options));
+            const transformed = this.applyLoadersSync({
+                kind: "eval",
+                source: String(src),
+                sourceLoader: options?.sourceLoader ?? (options as any)?.loader ?? "js",
+            });
+            opKind = this.classifyEvalOp(transformed.source);
+            startedAt = Date.now();
+            const raw = this.native.evalSync(
+                transformed.source,
+                this.buildResolvedEvalOptions(options, transformed.sourceLoader),
+            );
+            this.recordLastExecutionSample();
+            if (opKind) this.recordOpSample(opKind, Date.now() - startedAt, true);
             this.emitRuntimeEvent({ kind: "evalSync.end", opId, ok: true });
             return hydrateFromWire(raw) as T;
         } catch (e) {
+            this.recordLastExecutionSample();
+            if (opKind) this.recordOpSample(opKind, Date.now() - startedAt, false);
             const hydrated = hydrateFromWire(e);
             this.emitRuntimeEvent({ kind: "evalSync.end", opId, ok: false });
             this.emitThrownError(opId, "evalSync", hydrated);
@@ -3065,22 +3594,57 @@ export class DenoWorker {
         options?: DenoWorkerModuleEvalOptions,
     ): Promise<T> {
         await this.startupPromise;
+        const transformed = await this.applyLoadersAsync({
+            kind: "module-eval",
+            source: String(source),
+            sourceLoader: options?.sourceLoader ?? (options as any)?.loader ?? "js",
+        });
         const moduleName = typeof options?.moduleName === "string" ? options.moduleName.trim() : "";
         if (moduleName) {
-            await this.registerModuleInternal(moduleName, source);
+            if (transformed.sourceLoader !== "js") {
+                throw new Error(
+                    "module.eval(..., { moduleName }) requires source loader pipeline to resolve to 'js'.",
+                );
+            }
+            await this.registerModuleInternal(moduleName, transformed.source);
             return this.moduleApiImport<T>(moduleName);
         }
 
         let raw: any;
+        let usedNativeEvalModule = false;
+        let nativeStartedAt = Date.now();
         try {
             if (typeof this.native.evalModule === "function") {
+                usedNativeEvalModule = true;
+                nativeStartedAt = Date.now();
                 raw = await this.trackInFlight(
-                    this.native.evalModule(source, normalizeEvalOptions({ ...(options ?? {}), type: "module" })),
+                    this.native.evalModule(
+                        transformed.source,
+                        normalizeEvalOptions({
+                            ...(options ?? {}),
+                            type: "module",
+                            ...(transformed.sourceLoader !== "js" || options?.sourceLoader !== undefined
+                                ? { sourceLoader: transformed.sourceLoader }
+                                : {}),
+                        }),
+                    ),
                 );
             } else {
-                raw = await this.eval(source, { ...(options ?? {}), type: "module" });
+                raw = await this.eval(transformed.source, {
+                    ...(options ?? {}),
+                    type: "module",
+                    sourceLoader: transformed.sourceLoader,
+                });
+            }
+            if (usedNativeEvalModule) {
+                this.recordLastExecutionSample();
+                this.recordOpSample("eval", Date.now() - nativeStartedAt, true);
             }
         } catch (e) {
+            if (usedNativeEvalModule) {
+                this.recordLastExecutionSample();
+                this.recordOpSample("eval", Date.now() - nativeStartedAt, false);
+            }
             throw hydrateFromWire(e);
         }
         return wrapModuleNamespace<T>(this, hydrateFromWire(raw));

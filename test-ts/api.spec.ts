@@ -21,19 +21,19 @@ describe("DenoWorker API", () => {
     expect(() => dw.postMessage({ a: 1 })).toThrow(/postMessage failed/i);
   });
 
-  test("lastExecutionStats updates after evalSync and contains finite numbers", async () => {
-    const st0 = dw.lastExecutionStats;
+  test("stats.lastExecution updates after evalSync and contains finite numbers", async () => {
+    const st0 = dw.stats.lastExecution;
     expect(st0).toBeDefined();
 
     expect(dw.evalSync("41 + 1")).toBe(42);
-    const st1 = dw.lastExecutionStats;
+    const st1 = dw.stats.lastExecution;
     expect(typeof st1.cpuTimeMs).toBe("number");
     expect(typeof st1.evalTimeMs).toBe("number");
     expect(Number.isFinite(st1.cpuTimeMs!)).toBe(true);
     expect(Number.isFinite(st1.evalTimeMs!)).toBe(true);
 
     await expect(dw.eval("2 + 3")).resolves.toBe(5);
-    const st2 = dw.lastExecutionStats;
+    const st2 = dw.stats.lastExecution;
     expect(typeof st2.cpuTimeMs).toBe("number");
     expect(typeof st2.evalTimeMs).toBe("number");
     expect(Number.isFinite(st2.cpuTimeMs!)).toBe(true);
@@ -50,11 +50,99 @@ describe("DenoWorker API", () => {
     expect(dw.evalSync("1 + 2")).toBe(3);
   });
 
-  test("captures lastExecutionStats when available", async () => {
+  test("captures stats.lastExecution when available", async () => {
     await dw.eval("1 + 1");
-    expect(dw.lastExecutionStats).toBeDefined();
-    expect(dw.lastExecutionStats).toHaveProperty("cpuTimeMs");
-    expect(dw.lastExecutionStats).toHaveProperty("evalTimeMs");
+    expect(dw.stats.lastExecution).toBeDefined();
+    expect(dw.stats.lastExecution).toHaveProperty("cpuTimeMs");
+    expect(dw.stats.lastExecution).toHaveProperty("evalTimeMs");
+  });
+
+  test("stats.activeOps reflects tracked async runtime operations", async () => {
+    await dw.global.set(
+      "nodeDelayForStats",
+      async () => {
+        await sleep(80);
+        return 1;
+      },
+    );
+
+    expect(dw.stats.activeOps).toBe(0);
+    const pending = dw.eval(`
+      (async () => {
+        await nodeDelayForStats();
+        return 42;
+      })()
+    `);
+
+    await sleep(10);
+    expect(dw.stats.activeOps).toBeGreaterThan(0);
+    await expect(pending).resolves.toBe(42);
+    expect(dw.stats.activeOps).toBe(0);
+  });
+
+  test("stats.cpu returns usagePercentage in the 0-100 range", async () => {
+    await expect(dw.eval("for (let i = 0; i < 200_000; i++) {} 1;")).resolves.toBe(1);
+
+    const cpu = await dw.stats.cpu({ measureMs: 1000 });
+    expect(typeof cpu.usagePercentage).toBe("number");
+    expect(cpu.usagePercentage).toBeGreaterThanOrEqual(0);
+    expect(cpu.usagePercentage).toBeLessThanOrEqual(100);
+    expect(cpu.measureMs).toBe(1000);
+    expect(typeof cpu.cpuTimeMs).toBe("number");
+    expect(cpu.cpuTimeMs).toBeGreaterThanOrEqual(0);
+
+    const clamped = await dw.stats.cpu({ measureMs: 1 });
+    expect(clamped.measureMs).toBe(10);
+    expect(clamped.usagePercentage).toBeGreaterThanOrEqual(0);
+    expect(clamped.usagePercentage).toBeLessThanOrEqual(100);
+  });
+
+  test("stats exposes rates/latency/eventLoopLag/stream/totals/reset", async () => {
+    await expect(dw.eval("1 + 1")).resolves.toBe(2);
+    await expect(dw.global.get<number>("Math.PI")).resolves.toBeCloseTo(Math.PI);
+    const handle = await dw.handle.get("Math");
+    await expect(handle.get<number>("PI")).resolves.toBeCloseTo(Math.PI);
+    await handle.dispose();
+
+    const rates = await dw.stats.rates({ windowMs: 1000 });
+    expect(rates.windowMs).toBe(1000);
+    expect(rates.evalPerSec).toBeGreaterThanOrEqual(0);
+    expect(rates.handlePerSec).toBeGreaterThanOrEqual(0);
+    expect(rates.globalPerSec).toBeGreaterThanOrEqual(0);
+    expect(rates.messagesPerSec).toBeGreaterThanOrEqual(0);
+
+    const latency = await dw.stats.latency({ windowMs: 1000 });
+    expect(latency.windowMs).toBe(1000);
+    expect(latency.count).toBeGreaterThanOrEqual(0);
+    expect(latency.avgMs).toBeGreaterThanOrEqual(0);
+    expect(latency.maxMs).toBeGreaterThanOrEqual(0);
+
+    const lag = await dw.stats.eventLoopLag({ measureMs: 20 });
+    expect(lag.measureMs).toBe(20);
+    expect(lag.lagMs).toBeGreaterThanOrEqual(0);
+
+    const stream = dw.stats.stream;
+    expect(stream.activeStreams).toBeGreaterThanOrEqual(0);
+    expect(stream.queuedChunks).toBeGreaterThanOrEqual(0);
+    expect(stream.queuedBytes).toBeGreaterThanOrEqual(0);
+    expect(stream.creditDebtBytes).toBeGreaterThanOrEqual(0);
+    expect(stream.backlogSize).toBeGreaterThanOrEqual(0);
+
+    const totals = dw.stats.totals;
+    expect(totals.ops).toBeGreaterThanOrEqual(0);
+    expect(totals.errors).toBeGreaterThanOrEqual(0);
+    expect(totals.restarts).toBeGreaterThanOrEqual(0);
+    expect(totals.messagesOut).toBeGreaterThanOrEqual(0);
+    expect(totals.messagesIn).toBeGreaterThanOrEqual(0);
+    expect(totals.bytesOut).toBeGreaterThanOrEqual(0);
+    expect(totals.bytesIn).toBeGreaterThanOrEqual(0);
+
+    dw.stats.reset();
+    const afterReset = dw.stats.totals;
+    expect(afterReset.ops).toBe(0);
+    expect(afterReset.errors).toBe(0);
+    expect(afterReset.messagesOut).toBe(0);
+    expect(afterReset.messagesIn).toBe(0);
   });
 
   test("module evaluation works (module.eval)", async () => {

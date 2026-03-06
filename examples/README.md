@@ -1,33 +1,44 @@
 # Examples
 
-Simple usage examples for `deno-director`.
+Run these first to see the core behavior quickly.
 
-## Files
+## What Each Example Proves
 
-- `01-basic-eval.ts`: basic `eval` and `evalSync`.
-- `02-eval-module.ts`: `worker.module.eval` and export access.
-- `03-globals.ts`: inject globals/functions with `global.set`.
-- `04-messages.ts`: worker `postMessage` + host `message` listener.
-- `05-imports-callback.ts`: custom import callback and virtual modules.
-- `06-https-imports.ts`: remote HTTPS imports.
-- `07-node-resolve.ts`: `moduleLoader.nodeResolve` and `nodeCompat`.
-- `08-limits.ts`: `limits.maxEvalMs` and memory limits.
-- `09-console-routing.ts`: custom console handlers.
-- `10-director.ts`: manage multiple workers with `DenoDirector`.
-- `11-streams.ts`: byte-stream bridge with `stream.connect(...)` (Node `Duplex` + worker stream lanes).
-- `12-handles.ts`: runtime value handles (`handle.get` / `handle.eval` / `handle.tryGet`).
+- `01-basic-eval.ts`: run code in Deno from Node with `eval` and `evalSync`.
+- `02-eval-module.ts`: evaluate module source and call exported functions.
+- `03-globals.ts`: expose Node values/functions through `worker.global`.
+- `04-messages.ts`: event-style messaging (`postMessage` + `on("message")`).
+- `05-imports-callback.ts`: intercept and rewrite module imports dynamically.
+- `05-imports-callback.ts`: intercept and rewrite module imports dynamically (including `{ source, sourceLoader }` virtual modules).
+- `06-https-imports.ts`: allow and use remote HTTPS module imports.
+- `07-node-resolve.ts`: enable Node-style module resolution where needed.
+- `08-limits.ts`: enforce runtime limits and timeout boundaries.
+- `09-console-routing.ts`: route/silence sandbox console output.
+- `10-director.ts`: orchestrate multiple workers with labels/tags (great base for serverless-style warm pools).
+- `11-streams.ts`: move raw bytes over the stream bridge (`Duplex` on Node side).
+- `12-handles.ts`: operate on long-lived runtime object graphs with handles.
+- `13-serverless-style.ts`: Node HTTP server that routes by `Host` header to warm runtime pools.
+- `14-custom-loaders.ts`: chain custom loader callbacks to alias, override, or block loader modes.
 
-## Running
+## Run One
 
-These examples are intentionally minimal and may require adapting options for your environment.
+From repo root:
 
-These files are set up for running inside this repository and import from:
+```bash
+npx tsx examples/01-basic-eval.ts
+```
+
+Swap the filename to run any other example.
+
+## Import Path Note
+
+Inside this repo, examples import from source:
 
 ```ts
 import { DenoWorker } from "../src/index";
 ```
 
-If you copy them into an app that installed the package, replace with:
+In a normal app that installed the package, use:
 
 ```ts
 import { DenoWorker } from "deno-director";

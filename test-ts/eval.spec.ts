@@ -97,22 +97,22 @@ describe("deno_worker: eval", () => {
     expect(result).toBe("called");
   });
 
-  it("updates lastExecutionStats after eval", async () => {
-    expect(dw.lastExecutionStats).toBeDefined();
+  it("updates stats.lastExecution after eval", async () => {
+    expect(dw.stats.lastExecution).toBeDefined();
     await dw.eval("1 + 1");
-    expect(dw.lastExecutionStats).toBeDefined();
-    expect(dw.lastExecutionStats?.cpuTimeMs).toEqual(expect.any(Number));
-    expect(dw.lastExecutionStats?.evalTimeMs).toEqual(expect.any(Number));
+    expect(dw.stats.lastExecution).toBeDefined();
+    expect(dw.stats.lastExecution?.cpuTimeMs).toEqual(expect.any(Number));
+    expect(dw.stats.lastExecution?.evalTimeMs).toEqual(expect.any(Number));
   });
 
-  it("transpiles TypeScript for eval and evalSync when top-level transpileTs is enabled", async () => {
-    await dw.close();
-    dw = createTestWorker({
-      transpileTs: true,
-    });
+  it("transpiles TypeScript for eval and evalSync when sourceLoader:'ts' is set", async () => {
+    await expect(dw.eval("const n: number = 41; n + 1;", { sourceLoader: "ts" })).resolves.toBe(42);
+    expect(dw.evalSync("const n: number = 2; n + 3;", { sourceLoader: "ts" })).toBe(5);
+  });
 
-    await expect(dw.eval("const n: number = 41; n + 1;")).resolves.toBe(42);
-    expect(dw.evalSync("const n: number = 2; n + 3;")).toBe(5);
+  it("defaults eval loader to js (TypeScript syntax requires sourceLoader:'ts')", async () => {
+    await expect(dw.eval("const n: number = 41; n + 1;")).rejects.toBeDefined();
+    await expect(dw.eval("const n: number = 41; n + 1;", { sourceLoader: "ts" })).resolves.toBe(42);
   });
 
   it("writes transpile cache entries when tsCompiler.cacheDir is set", async () => {
@@ -120,17 +120,52 @@ describe("deno_worker: eval", () => {
     const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "deno-director-ts-cache-"));
 
     dw = createTestWorker({
-      transpileTs: true,
       tsCompiler: { cacheDir },
     });
 
     try {
-      await expect(dw.eval("const n: number = 7; n + 1;")).resolves.toBe(8);
+      await expect(dw.eval("const n: number = 7; n + 1;", { sourceLoader: "ts" })).resolves.toBe(8);
       const entries = fs.readdirSync(cacheDir);
       expect(entries.length).toBeGreaterThan(0);
     } finally {
       fs.rmSync(cacheDir, { recursive: true, force: true });
     }
+  });
+
+  it("supports async custom loader chains for eval", async () => {
+    await dw.close();
+    dw = createTestWorker({
+      sourceLoaders: [
+        async ({ source, sourceLoader }) => {
+          if (sourceLoader !== "custom-ts") return;
+          return { source, sourceLoader: "ts" };
+        },
+      ],
+    });
+
+    await expect(
+      dw.eval("const n: number = 20; n + 22;", { sourceLoader: "custom-ts" as any }),
+    ).resolves.toBe(42);
+  });
+
+  it("evalSync rejects when a custom loader is async", async () => {
+    await dw.close();
+    dw = createTestWorker({
+      sourceLoaders: [
+        async ({ source }) => ({ source, sourceLoader: "js" }),
+      ],
+    });
+
+    expect(() => dw.evalSync("1 + 1")).toThrow(/sync evaluation cannot use async loaders/i);
+  });
+
+  it("sourceLoaders:false enforces strict js mode (no built-in ts/tsx/jsx loader)", async () => {
+    await dw.close();
+    dw = createTestWorker({ sourceLoaders: false });
+
+    await expect(dw.eval("1 + 1")).resolves.toBe(2);
+    await expect(dw.eval("const n: number = 1; n;", { sourceLoader: "ts" })).rejects.toThrow(/strict js mode|sourceLoaders:\s*false/i);
+    expect(() => dw.evalSync("const n: number = 1; n;", { sourceLoader: "ts" })).toThrow(/strict js mode|sourceLoaders:\s*false/i);
   });
 
   it(

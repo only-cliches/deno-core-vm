@@ -5,16 +5,16 @@ describe("imports callback ts/tsx/jsx + dynamic flag", () => {
     const seen: Array<{ specifier: string; isDynamicImport?: boolean }> = [];
 
     const dw = createTestWorker({
-      transpileTs: true,
       permissions: { import: true },
       imports: (specifier: string, _referrer?: string, isDynamicImport?: boolean) => {
         seen.push({ specifier, isDynamicImport });
 
         if (specifier === "virtual:static") {
-          return { js: "export default 1;" };
+          // loader omitted => defaults to "js"
+          return { source: "export default 1;" };
         }
         if (specifier === "virtual:dynamic") {
-          return { js: "export default 2;" };
+          return { source: "export default 2;", sourceLoader: "js" };
         }
 
         return false;
@@ -45,17 +45,17 @@ describe("imports callback ts/tsx/jsx + dynamic flag", () => {
     }
   });
 
-  test("imports callback can return { ts }", async () => {
+  test("imports callback can return { source, sourceLoader: 'ts' }", async () => {
     const dw = createTestWorker({
-      transpileTs: true,
       permissions: { import: true },
       imports: (specifier: string) => {
         if (specifier !== "virtual:typed-ts") return false;
         return {
-          ts: `
+          source: `
             const n: number = 41;
             export default n + 1;
           `,
+          sourceLoader: "ts",
         };
       },
     });
@@ -72,17 +72,14 @@ describe("imports callback ts/tsx/jsx + dynamic flag", () => {
     }
   });
 
-  test("imports callback { ts } rejects with guidance when transpileTs is disabled", async () => {
+  test("imports callback rejects unresolved custom loader names", async () => {
     const dw = createTestWorker({
-      transpileTs: false,
       permissions: { import: true },
       imports: (specifier: string) => {
-        if (specifier !== "virtual:typed-ts-disabled") return false;
+        if (specifier !== "virtual:typed-custom-unresolved") return false;
         return {
-          ts: `
-            const n: number = 1;
-            export default n;
-          `,
+          source: `export default 1;`,
+          sourceLoader: "custom-unresolved",
         };
       },
     });
@@ -90,18 +87,75 @@ describe("imports callback ts/tsx/jsx + dynamic flag", () => {
     try {
       await expect(
         dw.module.eval(`
-          import v from "virtual:typed-ts-disabled";
+          import v from "virtual:typed-custom-unresolved";
           export const out = v;
         `),
-      ).rejects.toThrow(/transpileTs:\s*true/i);
+      ).rejects.toThrow(/Import blocked/i);
     } finally {
       await dw.close();
     }
   });
 
-  test("imports callback can return { tsx } with tsCompiler jsxFactory settings", async () => {
+  test("imports callback can use arbitrary custom loaders resolved by async loader callbacks", async () => {
     const dw = createTestWorker({
-      transpileTs: true,
+      permissions: { import: true },
+      sourceLoaders: [
+        async ({ source, sourceLoader }) => {
+          if (sourceLoader !== "typed-ts") return;
+          return { source, sourceLoader: "ts" };
+        },
+      ],
+      imports: (specifier: string) => {
+        if (specifier !== "virtual:typed-via-custom-loader") return false;
+        return {
+          source: `
+            const n: number = 41;
+            export default n + 1;
+          `,
+          sourceLoader: "typed-ts",
+        };
+      },
+    });
+
+    try {
+      await expect(
+        dw.module.eval(`
+          import v from "virtual:typed-via-custom-loader";
+          export const out = v;
+        `),
+      ).resolves.toMatchObject({ out: 42 });
+    } finally {
+      await dw.close();
+    }
+  });
+
+  test("sourceLoaders:false rejects non-js import loaders (strict js mode)", async () => {
+    const dw = createTestWorker({
+      sourceLoaders: false,
+      permissions: { import: true },
+      imports: (specifier: string) => {
+        if (specifier !== "virtual:strict-js-only") return false;
+        return {
+          source: `const n: number = 1; export default n;`,
+          sourceLoader: "ts",
+        };
+      },
+    });
+
+    try {
+      await expect(
+        dw.module.eval(`
+          import v from "virtual:strict-js-only";
+          export const out = v;
+        `),
+      ).rejects.toThrow(/strict js mode|sourceLoaders:\s*false|Import blocked/i);
+    } finally {
+      await dw.close();
+    }
+  });
+
+  test("imports callback can return { source, sourceLoader: 'tsx' } with tsCompiler jsxFactory settings", async () => {
+    const dw = createTestWorker({
       tsCompiler: {
         jsx: "react",
         jsxFactory: "h",
@@ -111,7 +165,7 @@ describe("imports callback ts/tsx/jsx + dynamic flag", () => {
       imports: (specifier: string) => {
         if (specifier !== "virtual:typed-tsx") return false;
         return {
-          tsx: `
+          source: `
             declare global {
               namespace JSX {
                 interface IntrinsicElements {
@@ -127,6 +181,7 @@ describe("imports callback ts/tsx/jsx + dynamic flag", () => {
             const out = <div value="ok" />;
             export default out;
           `,
+          sourceLoader: "tsx",
         };
       },
     });
@@ -143,9 +198,8 @@ describe("imports callback ts/tsx/jsx + dynamic flag", () => {
     }
   });
 
-  test("imports callback can return { jsx } with tsCompiler jsxFactory settings", async () => {
+  test("imports callback can return { source, sourceLoader: 'jsx' } with tsCompiler jsxFactory settings", async () => {
     const dw = createTestWorker({
-      transpileTs: true,
       tsCompiler: {
         jsx: "react",
         jsxFactory: "h",
@@ -155,7 +209,7 @@ describe("imports callback ts/tsx/jsx + dynamic flag", () => {
       imports: (specifier: string) => {
         if (specifier !== "virtual:typed-jsx") return false;
         return {
-          jsx: `
+          source: `
             function h(tag, props) {
               return tag + ":" + props.value;
             }
@@ -163,6 +217,7 @@ describe("imports callback ts/tsx/jsx + dynamic flag", () => {
             const out = <div value="ok-jsx" />;
             export default out;
           `,
+          sourceLoader: "jsx",
         };
       },
     });

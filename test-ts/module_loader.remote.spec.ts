@@ -85,7 +85,7 @@ describe("moduleLoader.httpsResolve MVP", () => {
     }
   });
 
-  test("remote ts import works with httpsResolve+transpileTs", async () => {
+  test("remote ts import works with httpsResolve", async () => {
     let srv: { base: string; close: () => Promise<void> } | undefined;
     const cacheDir = await makeTempCacheDir();
     try {
@@ -103,7 +103,6 @@ describe("moduleLoader.httpsResolve MVP", () => {
 
     const dw = createTestWorker({
       imports: true,
-      transpileTs: true,
       moduleLoader: { httpsResolve: true, httpResolve: true, cacheDir },
       permissions: { import: true, net: true },
     });
@@ -134,7 +133,6 @@ describe("moduleLoader.httpsResolve MVP", () => {
     }
 
     const dw = createTestWorker({
-      transpileTs: true,
       moduleLoader: { httpsResolve: true, httpResolve: true, cacheDir },
       permissions: { import: true, net: true },
     });
@@ -152,7 +150,7 @@ describe("moduleLoader.httpsResolve MVP", () => {
     }
   });
 
-  test("remote ts import is rejected when transpileTs is false", async () => {
+  test("remote ts import works by default (no explicit transpile flag needed)", async () => {
     let srv: { base: string; close: () => Promise<void> } | undefined;
     const cacheDir = await makeTempCacheDir();
     try {
@@ -166,7 +164,6 @@ describe("moduleLoader.httpsResolve MVP", () => {
 
     const dw = createTestWorker({
       imports: true,
-      transpileTs: false,
       moduleLoader: { httpsResolve: true, httpResolve: true, cacheDir },
       permissions: { import: true, net: true },
     });
@@ -176,7 +173,7 @@ describe("moduleLoader.httpsResolve MVP", () => {
         import { v } from "${srv.base}/oak/mod.ts";
         export const out = v;
       `;
-      await expect(dw.module.eval(src)).rejects.toBeTruthy();
+      await expect(dw.module.eval(src)).resolves.toMatchObject({ out: 7 });
     } finally {
       if (!dw.isClosed()) await dw.close();
       await srv.close();
@@ -197,7 +194,6 @@ describe("moduleLoader.httpsResolve MVP", () => {
 
     const dw = createTestWorker({
       imports: () => true,
-      transpileTs: true,
       moduleLoader: { httpsResolve: true, httpResolve: true },
       permissions: { import: true, net: false },
     });
@@ -230,7 +226,6 @@ describe("moduleLoader.httpsResolve MVP", () => {
 
     const dw = createTestWorker({
       imports: true,
-      transpileTs: true,
       moduleLoader: { httpsResolve: true, httpResolve: true },
       permissions: { import: [srv.base], net: true },
     });
@@ -312,7 +307,6 @@ describe("moduleLoader.httpsResolve MVP", () => {
 
     const dw = createTestWorker({
       imports: true,
-      transpileTs: true,
       moduleLoader: { httpResolve: true, maxPayloadBytes: 1024 },
       permissions: { import: true, net: true },
     });
@@ -342,7 +336,6 @@ describe("moduleLoader.httpsResolve MVP", () => {
 
     const ok = createTestWorker({
       imports: true,
-      transpileTs: true,
       moduleLoader: { httpsResolve: true, httpResolve: true },
       permissions: { import: [srv.base], net: true },
     });
@@ -408,7 +401,6 @@ describe("moduleLoader.httpsResolve MVP", () => {
     const allow = `${srv.base}/q`;
     const dw = createTestWorker({
       imports: true,
-      transpileTs: true,
       moduleLoader: { httpsResolve: true, httpResolve: true },
       permissions: { import: [allow], net: true },
     });

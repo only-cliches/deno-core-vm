@@ -87,12 +87,13 @@ describe("deno_worker: modules", () => {
         seen.push(specifier);
         if (specifier === "virtual:math") {
           return {
-            js: `
+            source: `
               export const n = 21;
               export function double(x) { return x * 2; }
               export async function plusOneAsync(x) { return x + 1; }
               export default "math-default";
             `,
+            sourceLoader: "js",
           };
         }
         return false;

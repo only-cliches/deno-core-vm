@@ -39,6 +39,15 @@ export function normalizeEvalOptions(options?: EvalOptions): EvalOptions | undef
     const out: EvalOptions = {};
     if (typeof options.filename === "string") out.filename = options.filename;
     if (options.type === "module") out.type = "module";
+    const sourceLoader = (options as any).sourceLoader ?? (options as any).loader;
+    if (
+        sourceLoader === "js" ||
+        sourceLoader === "ts" ||
+        sourceLoader === "tsx" ||
+        sourceLoader === "jsx"
+    ) {
+        out.sourceLoader = sourceLoader;
+    }
     if ("args" in options) {
         out.args = Array.isArray(options.args)
             ? options.args.map((a) => {
@@ -245,7 +254,8 @@ export function normalizeWorkerOptions(options?: DenoWorkerOptions): DenoWorkerW
     o.moduleLoader = normalizeModuleLoaderOption(o.moduleLoader);
     o.bridge = normalizeBridgeOption(o.bridge);
     delete o.channelSize;
-    if (typeof o.transpileTs !== "boolean") delete o.transpileTs;
+    delete o.sourceLoaders;
+    delete o.transpileTs;
     o.tsCompiler = normalizeTsCompilerOption(o.tsCompiler);
     delete o.nodeResolve;
     if ((o.moduleLoader?.httpsResolve === true || o.moduleLoader?.httpResolve === true) && o.imports === undefined) {

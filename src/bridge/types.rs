@@ -58,6 +58,7 @@ pub enum JsValueBridge {
 pub struct EvalOptions {
     pub filename: String,
     pub is_module: bool,
+    pub loader: String,
     pub args: Vec<JsValueBridge>,
     pub args_provided: bool,
     pub max_eval_ms: Option<u64>,
@@ -70,6 +71,7 @@ impl Default for EvalOptions {
         Self {
             filename: "Unnamed Script".to_string(),
             is_module: false,
+            loader: "js".to_string(),
             args: vec![],
             args_provided: false,
             max_eval_ms: None,
@@ -106,6 +108,18 @@ impl EvalOptions {
         if let Ok(v) = obj.get::<JsValue, _, _>(cx, "type") {
             if let Ok(s) = v.downcast::<JsString, _>(cx) {
                 out.is_module = s.value(cx) == "module";
+            }
+        }
+
+        let source_loader_value = obj
+            .get::<JsValue, _, _>(cx, "sourceLoader")
+            .or_else(|_| obj.get::<JsValue, _, _>(cx, "loader"));
+        if let Ok(v) = source_loader_value {
+            if let Ok(s) = v.downcast::<JsString, _>(cx) {
+                let loader = s.value(cx);
+                if matches!(loader.as_str(), "js" | "ts" | "tsx" | "jsx") {
+                    out.loader = loader;
+                }
             }
         }
 

@@ -2,7 +2,7 @@
 
 # 🦕 Deno Director 🎬
 
-**Embed, Orchestrate, and Sandbox Deno V8 Isolates Directly Inside Node.js.**
+**Run Deno inside Node.js like you own both runtimes.**
 
 </div>
 
@@ -10,30 +10,29 @@
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.0+-blue.svg)](https://www.typescriptlang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-Node.js is legendary. Deno is secure by default. **What if you didn't have to choose?**
+**Deno Director** is a native Rust/Neon bridge that lets your Node process spin up isolated Deno runtimes, execute TS/JSX directly, stream bytes, call functions both ways, and keep strict permission boundaries.
 
-**Deno Director** is a native Rust/Neon module that embeds the Deno runtime natively into your Node.js process. It allows you to spin up lightning-fast, heavily sandboxed, completely isolated V8 threads, and control them from Node.js.
-
-Whether you are building a multi-tenant edge-compute platform, executing untrusted third-party code, or just want to use Deno's native TypeScript and URL-import capabilities inside your legacy Node.js monolith, Deno Director is the ultimate weapon.
+You get one process, two ecosystems, and clean runtime seperation.
 
 ## 🔥 Why Deno Director?
 
-* **Zero-Serialization Friction:** Unlike standard IPC, Deno Director uses a highly optimized native bridge. Pass `Map`, `Set`, `ArrayBuffer`, `Date`, `RegExp`, native `Error` objects, **recursive values**, and even **Functions** across the Node/Deno boundary without losing fidelity.
-* **Wield Host Functions:** Pass a Node.js function *into* the Deno sandbox. Call it from Deno, and it executes in Node. Synchronously or asynchronously.
-* **Ironclad Sandboxing:** Every worker is a Deno isolate. You have absolute control over `read`, `write`, `net`, `env`, and `ffi` permissions. Lock it down.
-* **Native TypeScript & JSX:** Evaluate TS/JSX directly in `eval`, `evalSync`, `worker.module.eval`, and import pipelines. No build step required. Deno Director handles transpilation on the fly.
-* **Fleet Orchestration:** Spin up thousands of runtimes. Tag them, label them, and manage their lifecycles seamlessly with the built-in `DenoDirector` orchestration class.
-* **Telemetry:** Extract granular V8 heap space statistics and exact CPU/Wall-clock execution times for every script evaluation.
+* **Native bridge, not toy IPC:** move `Map`, `Set`, typed arrays, `Date`, `RegExp`, `Error`, recursive objects, and functions across runtimes with type fidelity intact.
+* **Host function bridging:** inject Node functions into Deno and call them from sandboxed code, sync or async.
+* **Real sandbox controls:** enforce `read`, `write`, `net`, `env`, `run`, `ffi`, `sys`, `import`, `hrtime`, and `wasm` permissions per worker.
+* **TS/JSX first-class:** run TypeScript and TSX through `eval`, `evalSync`, and module APIs with built-in transpilation.
+* **Fast stream transport:** push bytes through `worker.stream.connect(...)` when message-style APIs are not enough.
+* **Handles and global ops:** mutate and inspect runtime object graphs through `worker.handle.*` and `worker.global.*` APIs.
+* **Fleet controls:** orchestrate large runtime pools with `DenoDirector`.
+* **Serverless-style execution:** spin up short-lived, permission-scoped Deno runtimes per request when isolation matters most.
+* **Telemetry:** read heap stats and execution timing without duct tape.
 
 ## 💡 How it works
 
-- **One Node.js process** hosts **many Deno runtimes**.
-- Each `DenoWorker` is a **separate V8 isolate** (and is treated as an isolated runtime boundary within the same process).
-- Calls and values cross the Node and Deno boundary using a **native bridge** backed by V8 serialization plus function bridging for host callbacks.
-- You control **Deno permissions** per worker (`read`, `write`, `net`, `env`, `ffi`, `sys`) plus optional host side policies like import interception and console routing.
-- You can enforce **timeouts and memory limits** per worker, and capture execution stats per evaluation.
-
----
+- One Node process hosts many Deno runtimes.
+- Each `DenoWorker` is an isolated V8 boundary.
+- Values cross through a native bridge with wire hydration + function bridging.
+- You set runtime policy per worker: permissions, import interception, console routing, timeouts, memory limits, startup hooks.
+- If needed, scale to many workers with `DenoDirector`.
 
 ## 🚀 Quick Start
 
@@ -42,20 +41,18 @@ npm install deno-director
 
 ```
 
-### 🚀 The Basics: Evaluated TS and Host Callbacks
+### 🚀 The Basics: TS Evaluation + Host Callback Bridge
 
 ```ts
 import { DenoWorker } from "deno-director";
 
-// 1. Boot a locked-down V8 isolate
+// 1) Boot a locked-down isolate
 const worker = new DenoWorker({
-    // Deno cannot touch the network or the disk. It only knows what we feed it.
-    permissions: { net: false, read: false, env: false },
-    // automatically compile any TS provided to the runtime.
-    transpileTs: true
+    // Sandbox first. Deno sees only what you allow.
+    permissions: { net: false, read: false, env: false }
 });
 
-// 2. Drop an ASYNC Node.js function into Deno's global scope
+// 2) Expose a Node async function to Deno
 await worker.global.set("hostFetchData", async (userId: string) => {
     console.log(`[Node.js] Deno asked for data for ${userId}. Fetching securely...`);
 
@@ -64,15 +61,14 @@ await worker.global.set("hostFetchData", async (userId: string) => {
     return { id: userId, secret: "super_classified_payload" };
 });
 
-// 3. Inject an ES Module into Deno
-// Notice how Deno seamlessly awaits the Node.js function we just injected!
+// 3) Evaluate an ES module in Deno that calls back into Node
 const sandbox = await worker.module.eval(`
     export async function processUser(userId) {
 
         console.log(\`[Deno] Initiating secure processing for \${userId}...\`);
 
         // Call the async Node.js function from inside the isolated Deno sandbox
-        const rawData: {  // TS is OK!
+        const rawData: {  // Typescript is OK!
           id: string,
           secret: string 
         } = await globalThis.hostFetchData(userId);
@@ -84,9 +80,9 @@ const sandbox = await worker.module.eval(`
             fingerprint: btoa(rawData.secret).substring(0, 12) 
         };
     }
-`);
+`, {sourceLoader: "ts"}); // enable TS compiler
 
-// 4. Node.js calls the Deno exported module function
+// 4) Call the Deno export from Node
 console.log("[Node.js] Triggering Deno sandbox...");
 const result = await sandbox.processUser("user_999");
 
@@ -97,9 +93,9 @@ await worker.close();
 
 ```
 
-### 🧭 Fleet Orchestration: Managing 1,000 Tenants
+### 🧭 Fleet Orchestration: Multi-Tenant Without Drama
 
-Use the `DenoDirector` to orchestrate massive fleets of sandboxed runtimes.
+Use `DenoDirector` when one runtime turns into fifty and then into five hundred.
 
 ```ts
 import { DenoDirector } from "deno-director";
@@ -125,10 +121,42 @@ await tenantA.eval(`console.log("Hello from", TENANT_ID)`);
 const premiumRuntimes = director.list({ tag: "premium-tier" });
 console.log(`Active premium runtimes: ${premiumRuntimes.length}`);
 
-// Nuke a specific tenant
+// Remove a tenant runtime cleanly
 await director.stopByLabel("tenant-a");
 
 ```
+
+### ☁️ Serverless-Style Execution with Deno
+
+If you want function-style isolation with low overhead, keep a warm runtime pool and dispatch requests onto it.
+
+```ts
+import { DenoDirector } from "deno-director";
+
+const director = new DenoDirector({
+  template: {
+    workerOptions: {
+      permissions: { net: false, read: false, write: false, env: false },
+      limits: { maxEvalMs: 1500, maxMemoryBytes: 256 * 1024 * 1024 },
+    },
+  },
+});
+
+export async function handleRequest(payload: unknown) {
+  // Prestart runtimes at boot and reuse them.
+  const rt = await getLeastBusyWarmRuntime();
+  try {
+    return await rt.eval<{ ok: boolean; data: unknown }>(
+      `(input) => ({ ok: true, data: input })`,
+      { args: [payload] },
+    );
+  } finally {
+    markRuntimeIdle(rt);
+  }
+}
+```
+
+This gives you serverless-style isolation boundaries with much better latency than cold-starting a runtime per request.
 
 ---
 
@@ -136,11 +164,11 @@ await director.stopByLabel("tenant-a");
 
 ### 🌉 The Transdimensional Bridge
 
-When you pass data between Node and Deno using `eval`, `evalSync`, or `global.set`, Deno Director doesn't just `JSON.stringify`. It uses a complex custom codec backed by V8 serialization.
+When you pass data between Node and Deno using `eval`, `evalSync`, `global.set` or `handle`s, Deno Director doesn't just `JSON.stringify`. It uses a complex custom codec backed by V8 serialization.
 
 * `NaN`, `Infinity`, `-0`? Preserved.
 * `Uint8Array`, `DataView`, `SharedArrayBuffer`? Passed instantly via underlying memory views.
-* Promises? Automatically chained across the boundary.
+* Promises? Automatically chained and awaited across the boundary.
 
 ### 📦 ES Module Proxying
 
@@ -199,6 +227,12 @@ const Secret = await import("untrusted-dynamic");  // Dynamic import
 **What it looks like on the Node.js Host:**
 Let's build an interceptor that blocks dynamic imports for security, uses a custom in-memory cache, and compiles a proprietary module scheme (`app:`) on the fly.
 
+Return shape note for `imports` callbacks:
+- `{ source: string, sourceLoader?: string }`
+- `sourceLoader` defaults to `"js"` when omitted.
+- Final runtime source loader must resolve to one of `"js" | "ts" | "tsx" | "jsx"`.
+- When `sourceLoaders: false` is set on the worker, only `"js"` is allowed.
+
 ```ts
 import { DenoWorker } from "deno-director";
 
@@ -206,7 +240,13 @@ import { DenoWorker } from "deno-director";
 const moduleCache = new Map<string, string>();
 
 const worker = new DenoWorker({
-  transpileTs: true, // We want Deno Director to transpile TS/JSX
+  sourceLoaders: [
+    async ({ source, sourceLoader }) => {
+      if (sourceLoader !== "app-ts") return;
+      // Rewrite custom loader names to built-in runtime loaders.
+      return { source, sourceLoader: "ts" };
+    },
+  ],
   
   // The ultimate import interceptor
   imports: async (specifier, referrer, isDynamicImport) => {
@@ -224,7 +264,7 @@ const worker = new DenoWorker({
       
       // Check our Node-side cache first!
       if (moduleCache.has(moduleName)) {
-        return { ts: moduleCache.get(moduleName)! }; // Serve from memory
+        return { source: moduleCache.get(moduleName)!, sourceLoader: "app-ts" }; // Serve from memory
       }
 
       // Simulate fetching or compiling custom code (e.g., from a DB or remote API)
@@ -234,7 +274,7 @@ const worker = new DenoWorker({
       moduleCache.set(moduleName, compiledTsCode);
 
       // Feed it source code directly into Deno's memory as a TypeScript module!
-      return { ts: compiledTsCode }; 
+      return { source: compiledTsCode, sourceLoader: "app-ts" }; 
     }
 
     // 3. Fallback: Allow normal resolution for everything else
@@ -261,8 +301,8 @@ console.log(await result.getData()); // "Super Secret Data for database"
 Handles let you keep a live reference to a runtime value and operate on it without re-evaluating lookup code each time. This is useful for complex object graphs, long-lived instances, and high-frequency operations.
 
 Entry points:
-- `worker.handle.get(path, options?)` -> bind to an existing runtime value (throws if path does not exist)
-- `worker.handle.tryGet(path, options?)` -> same as `get` but returns `undefined` when missing
+- `worker.handle.get(source, options?)` -> bind to an existing runtime value (throws if object does not exist)
+- `worker.handle.tryGet(source, options?)` -> same as `get` but returns `undefined` when missing
 - `worker.handle.eval(source, options?)` -> evaluate source and bind the result as a handle root
 
 Once you have a handle, you can call methods like: `get`, `set`, `has`, `delete`, `keys`, `entries`, `call`, `construct`, `await`, and many more!
@@ -367,7 +407,7 @@ import { DenoWorker } from "deno-director";
 const worker = new DenoWorker();
 
 // Call a global function in the deno runtime ....
-// passing in args fromm Node
+// passing in args from Node
 const json_val = await worker.eval("JSON.parse", { args: ['{"key": "value"}'] });
 console.log(json_val); // {key: "value"}
 
@@ -392,7 +432,7 @@ Notes:
 
 ### 🧩 nodeCompat and nodeResolve Examples
 
-Use `nodeCompat` when you want broader Node compatibility behavior, and `moduleLoader.nodeResolve` when you specifically want Node-style package resolution.
+Use `nodeCompat` when you want broader Node compatibility behavior, and `moduleLoader.nodeResolve` when you specifically just want Node-style package resolution.
 
 ```ts
 import { DenoWorker } from "deno-director";
@@ -427,60 +467,35 @@ console.log(resolveOut.base); // "some-installed-package"
 await resolveWorker.close();
 ```
 
-### 🌊 Streaming Across the Bridge
+### 🧪 Custom Loaders in 20 Seconds
 
-You can stream byte chunks between Node and the worker runtime in both directions.
+`sourceLoader` defaults to `"js"`.  
+Built-in runtime loaders are `"js"`, `"ts"`, `"tsx"`, and `"jsx"`.  
+If final source loader is `"ts"`, `"tsx"`, or `"jsx"`, the built-in transpiler runs.
+
+Custom loaders let the Node host intercept source before runtime execution, so you can adapt code to your own pipeline.
+Use them to alias loader names, precompile custom formats to JS, enforce tenant-specific policy, or hard-disable loader modes for stricter runtime behavior.
 
 ```ts
 import { DenoWorker } from "deno-director";
-import { randomUUID } from "node:crypto";
 
-const worker = new DenoWorker();
-const key = randomUUID();
-const duplex = await worker.stream.connect(key);
-
-await worker.eval(`
-  // Consume Node -> worker bytes on "<key>::h2w", then write response on "<key>::w2h".
-  globalThis.__streamTask = (async (key) => {
-    const inStream = await hostStreams.accept(String(key) + "::h2w");
-    for await (const _chunk of inStream) {}
-
-    const outStream = hostStreams.create(String(key) + "::w2h");
-    await outStream.write(new TextEncoder().encode("ok"));
-    await outStream.close();
-  })(key);
-`, { args: [key] });
-
-// Node -> worker
-await new Promise<void>((resolve, reject) => {
-  duplex.end(Buffer.from("hello world"), (err?: Error | null) => (err ? reject(err) : resolve()));
+const worker = new DenoWorker({
+  sourceLoaders: [
+    async ({ source, sourceLoader }) => {
+      if (sourceLoader !== "custom-ts") return;
+      // Rewrite custom loader name to built-in TS loader.
+      return { source, sourceLoader: "ts" };
+    },
+  ],
 });
 
-// worker -> Node
-for await (const chunk of duplex) {
-  console.log("download chunk bytes:", chunk.byteLength);
-}
+const out = await worker.eval<number>(
+  "const n: number = 41; n + 1;",
+  { sourceLoader: "custom-ts" },
+);
 
-// Ensure worker-side stream task has finished.
-await worker.eval("__streamTask");
-
+console.log(out); // 42
 await worker.close();
-```
-
-Inside worker code:
-
-```ts
-// Keys can be injected via eval args.
-// Example eval src:
-// async (key) => { ... }
-const inStream = await hostStreams.accept(String(key) + "::h2w");
-for await (const chunk of inStream) {
-  // chunk is Uint8Array
-}
-
-const outStream = hostStreams.create(String(key) + "::w2h");
-await outStream.write(new TextEncoder().encode("ok"));
-await outStream.close();
 ```
 
 ### 🌍 Environment Variables: The Secure Way
@@ -564,7 +579,9 @@ Imports a module specifier through the runtime import pipeline and returns a cal
 * `stream.connect(key: string): Promise<Duplex>`
 Opens a bidirectional stream session and returns a Node.js `Duplex` stream.
 
-When `transpileTs: true` is enabled, all three evaluation entrypoints (`eval`, `evalSync`, `module.eval`) run source through the TS/JSX transpiler before execution.
+`EvalOptions.sourceLoader` (and `module.eval(..., { sourceLoader })`) defaults to `"js"`.
+Use `"ts"`, `"tsx"`, or `"jsx"` to request TS/JSX transpilation for that call.
+Custom loader names are supported through `DenoWorkerOptions.sourceLoaders` callback pipelines.
 - async iteration: `for await (const chunk of reader) { ... }`
 
 #### **Environment & Memory**
@@ -607,10 +624,26 @@ Run batched handle operations against a global path root in one roundtrip.
 Read runtime type metadata for global root or nested path.
 * `global.instanceOf(path: string, constructorPath: string, options?: DenoWorkerHandleExecOptions): Promise<boolean>`
 Check `instanceof` against a constructor path.
-* `memory(): Promise<DenoWorkerMemory>`
+* `stats.activeOps: number`
+Current count of active async runtime operations tracked by the wrapper.
+* `stats.lastExecution: { cpuTimeMs?: number, evalTimeMs?: number }`
+Returns telemetry for the most recent runtime operation that reports execution stats (for example: eval, module eval, handle ops, and global ops routed through the handle bridge).
+* `stats.cpu(options?: { measureMs?: number }): Promise<{ usagePercentage: number, measureMs: number, cpuTimeMs: number }>`
+Returns CPU usage estimate over a recent window. `usagePercentage` is clamped to `0`-`100`.
+* `stats.rates(options?: { windowMs?: number }): Promise<{ windowMs: number, evalPerSec: number, handlePerSec: number, globalPerSec: number, messagesPerSec: number }>`
+Returns operation/message throughput over a rolling window.
+* `stats.latency(options?: { windowMs?: number }): Promise<{ windowMs: number, count: number, avgMs: number, p50Ms: number, p95Ms: number, p99Ms: number, maxMs: number }>`
+Returns rolling latency percentiles/summary for tracked operations.
+* `stats.eventLoopLag(options?: { measureMs?: number }): Promise<{ measureMs: number, lagMs: number }>`
+Measures host event-loop lag over a short timer window.
+* `stats.stream: { activeStreams: number, queuedChunks: number, queuedBytes: number, creditDebtBytes: number, backlogSize: number }`
+Returns stream/backpressure queue snapshot from wrapper state.
+* `stats.totals: { ops: number, errors: number, restarts: number, messagesOut: number, messagesIn: number, bytesOut: number, bytesIn: number }`
+Monotonic counters since startup or last stats reset.
+* `stats.reset(options?: { keepTotals?: boolean }): void`
+Clears rolling samples (`cpu`, `rates`, `latency`) and optionally totals.
+* `stats.memory(): Promise<DenoWorkerMemory>`
 Returns granular V8 heap statistics (`totalHeapSize`, `mallocedMemory`, etc.).
-* `lastExecutionStats: { cpuTimeMs?: number, evalTimeMs?: number }`
-Returns telemetry for the most recent `eval` operation.
 
 #### **Messaging & Lifecycle**
 
@@ -665,7 +698,14 @@ type DenoWorkerOptions = {
   envFile?: string | boolean;   // Load from a .env file
   nodeCompat?: boolean;         // Enable Node compatibility mode
   imports?: boolean | ImportsCallback; // Custom module resolution interceptor
-  transpileTs?: boolean;         // Enable TS/TSX/JSX transpilation for eval + imports
+  sourceLoaders?: false | Array<(ctx: { // process custom sourceLoader values. jsx, tsx and ts handled by buit in loader
+    source: string;
+    sourceLoader: string;
+    kind: "eval" | "module-eval" | "import";
+    specifier?: string;
+    referrer?: string;
+    isDynamicImport?: boolean;
+  }) => string | { source: string; sourceLoader?: string } | void | Promise<string | { source: string; sourceLoader?: string } | void>>;
   tsCompiler?: {                 // TS/JSX transpiler options
     jsx?: "react" | "react-jsx" | "react-jsxdev" | "preserve";
     jsxFactory?: string;
@@ -687,8 +727,52 @@ type DenoWorkerOptions = {
 
 ```
 
-`bridge.channelSize` applies independently to multiple internal queues (control-plane, data-plane, and node callback dispatch), not a single shared queue. Under heavy load, total buffered slots can approach roughly `3 * channelSize`.
-`bridge.streamBacklogLimit` caps worker->Node stream opens that arrive before the host side accepts the lane; excess opens are rejected to bound host memory growth.
+Source-loader notes:
+- `sourceLoaders` callbacks run in array order.
+- Callback return values:
+  - `undefined`/`void`: no change
+  - `string`: replace source, keep current source loader
+  - `{ source, sourceLoader? }`: replace source and optionally switch source loader
+- `evalSync` cannot run async source-loader callbacks.
+- If source loader is omitted everywhere, default is `"js"`.
+- Built-in runtime loader runs last, after all callbacks.
+- `sourceLoaders: false` enables strict JS mode:
+  - disables custom callbacks and built-in TS/TSX/JSX transpilation
+  - only final source loader `"js"` is allowed
+- For `module.eval(..., { moduleName })`, final `sourceLoader` must resolve to `"js"` because named registration stores JS source directly.
+
+`EvalOptions` (used by `eval`, `evalSync`, and `module.eval`) in practice:
+
+```ts
+type EvalOptions = {
+  filename?: string;
+  type?: "script" | "module";
+  sourceLoader?: string; // default "js"
+  args?: any[];
+  maxEvalMs?: number;
+  maxCpuMs?: number;
+};
+```
+
+`sourceLoader` behavior:
+- Built-in values:
+  - `"js"`: no transpilation
+  - `"ts" | "tsx" | "jsx"`: built-in transpilation
+- Custom values:
+  - allowed when transformed by `sourceLoaders` into a built-in final value
+  - if unresolved by the end of the pipeline, the call is rejected
+- `sourceLoaders: false`:
+  - only `"js"` is accepted
+  - any non-`"js"` `sourceLoader` is rejected for eval/module/import flows
+
+`imports` callback virtual modules:
+
+```ts
+type ImportsCallbackResult =
+  | boolean
+  | { resolve: string }
+  | { source: string; sourceLoader?: string }; // default sourceLoader is "js"
+```
 
 ## Notes
 

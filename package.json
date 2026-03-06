@@ -34,7 +34,6 @@
     "host-functions",
     "module-loader",
     "eval",
-    "performance",
     "native-addon",
     "neon",
     "v8",

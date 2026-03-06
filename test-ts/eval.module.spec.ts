@@ -116,17 +116,24 @@ describe("module.eval: module namespace API", () => {
     }
   });
 
-  test("transpiles TypeScript in module.eval when top-level transpileTs is enabled", async () => {
+  test("transpiles TypeScript in module.eval when sourceLoader:'ts' is set", async () => {
     const dw = createTestWorker({
-      transpileTs: true,
       console: false,
     });
     try {
+      await expect(
+        dw.module.eval(`
+        export type User = { id: number };
+        const user: User = { id: 42 };
+        export const out: number = user.id;
+      `),
+      ).rejects.toBeDefined();
+
       const mod = await dw.module.eval(`
         export type User = { id: number };
         const user: User = { id: 42 };
         export const out: number = user.id;
-      `);
+      `, { sourceLoader: "ts" });
 
       expect(mod.out).toBe(42);
     } finally {

@@ -1366,7 +1366,7 @@ impl DynamicModuleLoader {
         if !self.transpile_ts_enabled() {
             return Err(JsErrorBox::generic(format!(
                 "Import returned .{ext} source but TypeScript transpilation is disabled. \
-Enable it with transpileTs: true. Specifier: {}",
+Specifier: {}",
                 module_specifier
             )));
         }

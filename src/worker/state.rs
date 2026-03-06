@@ -104,7 +104,7 @@ impl Default for ModuleLoaderConfig {
             http_resolve: false,
             node_resolve: false,
             jsr_resolve: false,
-            transpile_ts: false,
+            transpile_ts: true,
             ts_compiler: None,
             cache_dir: None,
             reload: false,
@@ -818,23 +818,12 @@ impl WorkerCreateOptions {
             }
         }
 
-        // Top-level `transpileTs`.
-        let mut top_level_transpile: Option<bool> = None;
-        if let Ok(v) = obj.get::<JsValue, _, _>(cx, "transpileTs") {
-            if let Ok(b) = v.downcast::<JsBoolean, _>(cx) {
-                top_level_transpile = Some(b.value(cx));
-            }
-        }
-        if let Some(enabled) = top_level_transpile {
-            let cfg = out.runtime_options.module_loader.get_or_insert_with(Default::default);
-            cfg.transpile_ts = enabled;
-        }
-
         // Top-level `tsCompiler` (preferred).
         if let Ok(v) = obj.get::<JsValue, _, _>(cx, "tsCompiler") {
             if let Ok(tco) = v.downcast::<JsObject, _>(cx) {
                 if let Some(tc) = parse_ts_compiler_config(cx, tco) {
                     let cfg = out.runtime_options.module_loader.get_or_insert_with(Default::default);
+                    cfg.transpile_ts = true;
                     cfg.ts_compiler = Some(tc);
                 }
             }

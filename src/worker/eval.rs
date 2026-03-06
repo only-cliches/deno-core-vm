@@ -1,5 +1,5 @@
 // src/worker/eval.rs
-use cpu_time::ProcessTime;
+use cpu_time::ThreadTime;
 use deno_core::url::Url;
 use deno_runtime::deno_core::{self, v8};
 use deno_runtime::worker::MainWorker;
@@ -129,7 +129,7 @@ fn transpile_ts_enabled(limits: &RuntimeLimits) -> bool {
         .module_loader
         .as_ref()
         .map(|m| m.transpile_ts)
-        .unwrap_or(false)
+        .unwrap_or(true)
 }
 
 // Transpiles options from limits as part of runtime eval, module execution, and timeout handling.
@@ -172,18 +172,13 @@ fn transpile_options_from_limits(limits: &RuntimeLimits) -> deno_ast::TranspileO
     out
 }
 
-// Media type for eval filename.
-fn media_type_for_eval_filename(filename: &str) -> deno_ast::MediaType {
-    let ext = filename
-        .rsplit('.')
-        .next()
-        .map(|s| s.trim().to_ascii_lowercase())
-        .unwrap_or_default();
-    match ext.as_str() {
+// Media type for eval loader.
+fn media_type_for_eval_loader(loader: &str) -> deno_ast::MediaType {
+    match loader {
         "tsx" => deno_ast::MediaType::Tsx,
         "jsx" => deno_ast::MediaType::Jsx,
-        "ts" | "mts" | "cts" => deno_ast::MediaType::TypeScript,
-        _ => deno_ast::MediaType::TypeScript,
+        "ts" => deno_ast::MediaType::TypeScript,
+        _ => deno_ast::MediaType::JavaScript,
     }
 }
 
@@ -207,13 +202,32 @@ fn specifier_for_eval_filename(filename: &str, media: deno_ast::MediaType) -> Ur
 fn maybe_transpile_eval_source(
     limits: &RuntimeLimits,
     filename: &str,
+    loader: &str,
     source: &str,
 ) -> Result<String, JsValueBridge> {
+    if loader == "js" {
+        return Ok(source.to_string());
+    }
+    if !matches!(loader, "ts" | "tsx" | "jsx") {
+        return Err(mk_err(
+            "EvalLoaderError",
+            format!("Invalid eval loader: {loader}. Supported loaders: js, ts, tsx, jsx"),
+        ));
+    }
     if !transpile_ts_enabled(limits) {
+        return Err(mk_err(
+            "TranspileError",
+            format!(
+                "Eval loader '{loader}' requires transpilation, but transpilation is disabled."
+            ),
+        ));
+    }
+
+    let media = media_type_for_eval_loader(loader);
+    if matches!(media, deno_ast::MediaType::JavaScript) {
         return Ok(source.to_string());
     }
 
-    let media = media_type_for_eval_filename(filename);
     let maybe_cache_path = transpile_cache_path_from_limits(limits, filename, source, media);
 
     let reload = limits
@@ -454,7 +468,7 @@ pub async fn eval_in_runtime(
     worker.js_runtime.v8_isolate().cancel_terminate_execution();
 
     let start_wall = Instant::now();
-    let start_cpu = ProcessTime::now();
+    let start_cpu = ThreadTime::now();
     let filename = if options.filename.is_empty() {
         if options.is_module {
             "<evalModule>".to_string()
@@ -465,7 +479,7 @@ pub async fn eval_in_runtime(
         options.filename.clone()
     };
 
-    let transpiled_source = match maybe_transpile_eval_source(limits, &filename, source) {
+    let transpiled_source = match maybe_transpile_eval_source(limits, &filename, &options.loader, source) {
         Ok(s) => s,
         Err(error) => {
             let stats = ExecStats {
@@ -737,7 +751,7 @@ async fn settle_until_non_promise(
 
 #[cfg(test)]
 mod tests {
-    use super::{media_type_for_eval_filename, transpile_cache_path_from_limits};
+    use super::{media_type_for_eval_loader, transpile_cache_path_from_limits};
     use crate::worker::state::{ModuleLoaderConfig, RuntimeLimits, TsCompilerConfig};
 
     // Limits with cache.
@@ -765,7 +779,7 @@ mod tests {
     // Transpiles cache path is none without cache dir as part of runtime eval, module execution, and timeout handling.
     fn transpile_cache_path_is_none_without_cache_dir() {
         let limits = limits_with_cache(None, Some("react"), None);
-        let media = media_type_for_eval_filename("x.ts");
+        let media = media_type_for_eval_loader("ts");
         let out = transpile_cache_path_from_limits(&limits, "x.ts", "const a: number = 1;", media);
         assert!(out.is_none());
     }
@@ -774,7 +788,7 @@ mod tests {
     // Transpiles cache path is stable for same inputs as part of runtime eval, module execution, and timeout handling.
     fn transpile_cache_path_is_stable_for_same_inputs() {
         let limits = limits_with_cache(Some("/tmp/cache"), Some("react-jsx"), Some("h"));
-        let media = media_type_for_eval_filename("x.tsx");
+        let media = media_type_for_eval_loader("tsx");
 
         let a =
             transpile_cache_path_from_limits(&limits, "x.tsx", "const a: number = 1;", media)
@@ -791,7 +805,7 @@ mod tests {
         let base = limits_with_cache(Some("/tmp/cache"), Some("react"), None);
         let changed_source = limits_with_cache(Some("/tmp/cache"), Some("react"), None);
         let changed_jsx = limits_with_cache(Some("/tmp/cache"), Some("react-jsx"), None);
-        let media = media_type_for_eval_filename("x.ts");
+        let media = media_type_for_eval_loader("ts");
 
         let a = transpile_cache_path_from_limits(&base, "x.ts", "const a = 1;", media)
             .expect("cache path");

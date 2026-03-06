@@ -24,7 +24,6 @@ All notable changes to this project will be documented in this file.
   - `apply(path, ops, options?)`
   - `getType(path?, options?)`
   - `instanceOf(path, constructorPath, options?)`
-- Added `DenoWorkerGlobalApi` TypeScript type for the new global namespace surface.
 - Added support for shorthand runtime permission config booleans:
   - `permissions: true` enables all runtime permissions.
   - `permissions: false` disables all runtime permissions.
@@ -33,18 +32,38 @@ All notable changes to this project will be documented in this file.
   - `worker.global.get<T>(...)`, `worker.global.call<T>(...)`, `worker.global.construct<T>(...)`, `worker.global.await<T>(...)`, `worker.global.toJSON<T>(...)`, `worker.global.apply<T>(...)`
   - `worker.handle.get<T>(...)`, `worker.handle.call<T>(...)`, `worker.handle.construct<T>(...)`, `worker.handle.await<T>(...)`, `worker.handle.toJSON<T>(...)`, `worker.handle.apply<T>(...)`
   - module APIs included: `worker.module.import<T>(...)`, `worker.module.eval<T>(...)`
-- Added tests covering permission shorthand expansion and env-access behavior:
-  - `ensure_env_permission_enabled_expands_permissions_true_shorthand`
-  - `env_access_invalid_or_false_config_denies` (extended for top-level bool shorthand)
-- Added tests for global namespace behavior in `test-ts/globals.spec.ts`, including mirrored handle-parity operations.
+- Added expanded `worker.stats` telemetry surface:
+  - `stats.activeOps`
+  - `stats.lastExecution`
+  - `stats.cpu({ measureMs? })` with `usagePercentage` in range `0-100`
+  - `stats.rates({ windowMs? })`
+  - `stats.latency({ windowMs? })`
+  - `stats.eventLoopLag({ measureMs? })`
+  - `stats.stream`
+  - `stats.totals`
+  - `stats.reset({ keepTotals? })`
+- Added examples for:
+  - custom source loaders (`examples/14-custom-loaders.ts`)
+  - serverless-style warm runtime routing by host (`examples/13-serverless-style.ts`)
+- Added tests for:
+  - global namespace handle-parity behavior (`test-ts/globals.spec.ts`)
+  - permission shorthand behavior (including env access and startup warning paths)
+  - `worker.stats` APIs (`test-ts/api.spec.ts`)
+  - source loader + import callback compile flows (`test-ts/imports.ts_compile.spec.ts`)
 
 ### Changed
-- Changed public global mutation usage from top-level `worker.setGlobal(...)` to `worker.global.set(...)` for API consistency with `worker.stream`, `worker.handle`, and `worker.module`.
-- Updated worker option merging logic for `permissions` to correctly handle boolean/object combinations in `mergeWorkerOptions(...)`.
-- Updated WASM permission check in the TypeScript wrapper to safely handle boolean permissions shorthand.
-- Updated runtime permission parsing in Rust to normalize boolean shorthand before env-permission enrichment and startup warning logic.
-- Updated examples, tests, and docs to use `worker.global.set(...)`.
-- Updated `worker.global.set(...)` to accept dot-path writes (for example `a.b.c`) while preserving the optimized top-level-key fast path.
+- Changed public global mutation/reads usage from legacy top-level helpers to `worker.global.*` for API consistency with `worker.stream`, `worker.handle`, and `worker.module`.
+- Changed stats placement:
+  - moved memory API under `worker.stats.memory()`
+  - moved last execution stats under `worker.stats.lastExecution`
+- Changed import callback virtual module return shape to explicit source form:
+  - `{ source: string, sourceLoader?: string }`
+  - `sourceLoader` defaults to `"js"`.
+- Changed eval/module loader option naming/docs to `sourceLoader` (default `"js"`), with built-in runtime loaders `js | ts | tsx | jsx`.
+- Changed worker loader configuration to `sourceLoaders` callback pipeline (`Array<loaderFn>`) with async callback support.
+- Changed `sourceLoaders: false` behavior to strict JS mode (disables custom and built-in non-JS loader behavior).
+- Changed worker option normalization/merge behavior around permissions and module loader fields to correctly preserve boolean/object combinations and nested overrides.
+- Updated README and examples to reflect API changes and new serverless/custom-loader workflows.
 
 ### Fixed
 - Fixed top-level permission shorthand interoperability across host/runtime layers:
@@ -52,14 +71,36 @@ All notable changes to this project will be documented in this file.
   - Env permission access control now correctly interprets top-level boolean permissions.
   - `permissions.run` startup warning detection now accounts for shorthand `permissions: true`.
 - Fixed TypeScript surface/implementation mismatches for generic return typing by aligning `types.ts` and `worker.ts` signatures.
+- Fixed worker CPU execution telemetry source:
+  - `lastExecution` CPU time now uses thread CPU time measurement in Rust eval path (instead of process-wide CPU time).
+- Fixed README example reliability in restricted environments:
+  - HTTPS import example now has an offline fallback path.
+  - serverless-style example now handles port-bind failure with a non-network fallback run.
 
-### Docs
-- Updated README API sections to document full `worker.global` handle-parity methods and generic return signatures.
-- Updated examples documentation to reflect `global.set` usage.
+### Removed
+- Removed legacy top-level `worker.memory()` API in favor of `worker.stats.memory()`.
+- Removed legacy top-level `worker.lastExecutionStats` API in favor of `worker.stats.lastExecution`.
+- Removed legacy worker option key `loaders`; use `sourceLoaders`.
+- Removed legacy `transpileTs` option; transpilation flow is now loader-driven.
+
+### Breaking Changes
+- `worker.memory()` -> `worker.stats.memory()`.
+- `worker.lastExecutionStats` -> `worker.stats.lastExecution`.
+- `worker.setGlobal(...)` usage replaced by `worker.global.set(...)` (and related `worker.global.*` APIs).
+- Worker option key `loaders` removed; use `sourceLoaders`.
+- `transpileTs` removed; loader/transpile behavior is now driven by `sourceLoader` + `sourceLoaders`.
+- Import callback virtual module shape now uses `{ source, sourceLoader? }` (default `sourceLoader: "js"`).
 
 ### Tests
 - Revalidated TypeScript build (`tsc --project tsconfig.idx.json --noEmit`) after API/type updates.
-- Revalidated globals behavior with Jest (`test-ts/globals.spec.ts`) including mirrored `worker.global` handle-parity operations.
+- Revalidated Jest suites covering API/type/runtime behavior updates, including:
+  - `test-ts/api.spec.ts`
+  - `test-ts/eval.spec.ts`
+  - `test-ts/eval.module.spec.ts`
+  - `test-ts/globals.spec.ts`
+  - `test-ts/imports.ts_compile.spec.ts`
+  - `test-ts/memory.spec.ts`
+  - `test-ts/modules.spec.ts`
 
 ## [0.9.4] Mar 5, 2026
 

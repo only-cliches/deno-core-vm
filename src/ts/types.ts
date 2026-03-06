@@ -34,37 +34,37 @@ export type DenoWorkerRuntimeEvent = {
 };
 export type DenoWorkerRuntimeHandler = (event: DenoWorkerRuntimeEvent) => void;
 
+/** Source loader mode used for import callback virtual modules and eval/module.eval calls. */
+export type DenoSourceLoader = "js" | "ts" | "tsx" | "jsx";
+
 /**
- * Result shape for import policy callbacks.
+ * Virtual source return shape for import policy callbacks.
  *
- * Examples:
- * - `true`: allow default disk loading
- * - `false`: block import
- * - `{ js: "export default 1" }`: provide in-memory JS source
- * - `{ tsx: "export default <div />" }`: provide in-memory TS/JSX source
- * - `{ resolve: "file:///abs/path/mod.ts" }`: redirect to another module specifier
+ * `sourceLoader` controls whether transpilation is required (`ts`/`tsx`/`jsx`) or not (`js`).
+ * Default source loader is `"js"` when omitted.
  */
-export type ImportsCallbackTypedSource =
-    | {
-            /** JavaScript module source text. */
-            js: string;
-      }
-    | {
-            /** TypeScript module source text. */
-            ts: string;
-      }
-    | {
-            /** TSX module source text. */
-            tsx: string;
-      }
-    | {
-            /** JSX module source text. */
-            jsx: string;
-      };
+export type ImportsCallbackSource = {
+    /** Module source text to load. */
+    source: string;
+    /**
+     * Source loader mode.
+     *
+     * Built-in runtime values are `"js"`, `"ts"`, `"tsx"`, and `"jsx"`.
+     * Custom values are allowed when `sourceLoaders` transforms rewrite them.
+     *
+     * Execution order:
+     * 1) host `sourceLoaders` callbacks run first (in configured array order)
+     * 2) built-in runtime loader executes last using the final source loader value
+     *
+     * If omitted, defaults to `"js"`.
+     * If worker option `sourceLoaders` is `false`, only `"js"` is permitted.
+     */
+    sourceLoader?: string;
+};
 
 export type ImportsCallbackResult =
     | boolean
-    | ImportsCallbackTypedSource
+    | ImportsCallbackSource
     | {
             /** Replacement specifier to resolve instead of the original. */
             resolve: string;
@@ -86,6 +86,49 @@ export type ImportsCallback = (
     referrer?: string,
     isDynamicImport?: boolean,
 ) => ImportsCallbackResult | Promise<ImportsCallbackResult>;
+
+export type DenoLoaderTransformContext = {
+    /** Source text provided to the loader. */
+    source: string;
+    /** Requested source loader name for this transform step. */
+    sourceLoader: string;
+    /** Call site category. */
+    kind: "eval" | "module-eval" | "import";
+    /** Import specifier when `kind === "import"`. */
+    specifier?: string;
+    /** Import referrer when `kind === "import"`. */
+    referrer?: string;
+    /** Whether import was dynamic when `kind === "import"`. */
+    isDynamicImport?: boolean;
+};
+
+export type DenoLoaderTransformResult =
+    | string
+    | void
+    | {
+            /** Transformed source text. */
+            source: string;
+            /**
+             * Optional next source loader to apply after this transform step.
+             * Defaults to the current source loader when omitted.
+             */
+            sourceLoader?: string;
+      };
+
+export type DenoLoaderTransform = (
+    ctx: DenoLoaderTransformContext,
+) => DenoLoaderTransformResult | Promise<DenoLoaderTransformResult>;
+
+/**
+ * Ordered source transform callbacks applied before built-in runtime loader execution.
+ *
+ * Built-in loader execution is terminal and always happens after this callback chain,
+ * using the final source loader value produced by the chain.
+ */
+export type DenoWorkerLoadersOption = DenoLoaderTransform[];
+
+/** Disable all loader behavior (custom + built-in). Only `sourceLoader: "js"` is allowed. */
+export type DenoWorkerLoadersDisabled = false;
 
 /**
  * Permission field value shape.
@@ -214,7 +257,6 @@ export type DenoWorkerEnvOption = undefined | string | Record<string, string>;
  * `httpResolve`: allow `http://` module specifiers (warned at startup).
  * `nodeResolve`: enable Node-style disk/module resolution.
  * `jsrResolve`: resolve `jsr:` and `@std/*` via `https://jsr.io/...`.
- * `transpileTs`: allow `.ts/.tsx/.jsx` module loads.
  * `tsCompiler`: optional TS/JSX transpile settings.
  */
 export type DenoWorkerModuleLoaderOption =
@@ -504,8 +546,21 @@ export type DenoWorkerOptions = {
      * - object: custom host/port/break settings
      */
     inspect?: DenoWorkerInspectOption;
-    /** Enable transpilation for eval/imported `.ts/.tsx/.jsx` sources. */
-    transpileTs?: boolean;
+    /**
+     * Optional host-side source transform callbacks applied in array order.
+     *
+     * Built-in runtime loaders are available for `js`, `ts`, `tsx`, and `jsx`.
+     * Custom callbacks may be async and can rewrite to another source loader by returning
+     * `{ source, sourceLoader }`.
+     *
+     * The built-in runtime loader always runs last, after this array completes.
+     * If no source loader is set anywhere, the default source loader is `"js"`.
+     * `evalSync` cannot execute async loader callbacks.
+     *
+     * Set `sourceLoaders: false` to disable all loader behavior (custom and built-in).
+     * In that mode, only final source loader `"js"` is allowed.
+     */
+    sourceLoaders?: DenoWorkerLoadersDisabled | DenoWorkerLoadersOption;
     /** TypeScript/JSX transpiler settings (and optional compiler cache directory). */
     tsCompiler?: DenoWorkerTsCompilerOption;
     /**
@@ -646,6 +701,20 @@ export type EvalOptions = {
     filename?: string;
     /** Source interpretation mode. */
     type?: "script" | "module";
+    /**
+     * Source loader mode.
+     *
+     * Built-in runtime values are `"js"`, `"ts"`, `"tsx"`, and `"jsx"`.
+     * Custom values are allowed when `sourceLoaders` transforms rewrite them.
+     *
+     * Execution order:
+     * 1) host `sourceLoaders` callbacks run first (in configured array order)
+     * 2) built-in runtime loader executes last using the final source loader value
+     *
+     * If omitted, defaults to `"js"`.
+     * If worker option `sourceLoaders` is `false`, only `"js"` is permitted.
+     */
+    sourceLoader?: string;
     /** Positional args exposed to eval entrypoint (bridge-dehydrated). */
     args?: any[];
     /** Per-call timeout override in milliseconds. */
@@ -659,6 +728,102 @@ export type ExecStats = {
     cpuTimeMs?: number;
     /** Wall-clock execution time for the last call (milliseconds). */
     evalTimeMs?: number;
+};
+
+export type DenoWorkerCpuOptions = {
+    /** Sampling window in milliseconds. Clamped to [10, 60_000]. Defaults to 1000. */
+    measureMs?: number;
+};
+
+export type DenoWorkerCpuStats = {
+    /** Estimated runtime utilization over the measurement window (0-100). */
+    usagePercentage: number;
+    /** Effective sampling window used for computation, in milliseconds. */
+    measureMs: number;
+    /** Summed CPU milliseconds observed from completed runtime operations in the window. */
+    cpuTimeMs: number;
+};
+
+export type DenoWorkerRatesOptions = {
+    /** Rolling window in milliseconds. Clamped to [10, 60_000]. Defaults to 1000. */
+    windowMs?: number;
+};
+
+export type DenoWorkerRatesStats = {
+    /** Effective rolling window used for computation, in milliseconds. */
+    windowMs: number;
+    /** Eval operation throughput per second over the window. */
+    evalPerSec: number;
+    /** Handle operation throughput per second over the window. */
+    handlePerSec: number;
+    /** Global operation throughput per second over the window. */
+    globalPerSec: number;
+    /** Message throughput per second over the window (host->runtime post APIs). */
+    messagesPerSec: number;
+};
+
+export type DenoWorkerLatencyStats = {
+    /** Effective rolling window used for computation, in milliseconds. */
+    windowMs: number;
+    /** Number of completed operations included in the latency sample set. */
+    count: number;
+    /** Arithmetic mean latency in milliseconds. */
+    avgMs: number;
+    /** 50th percentile latency in milliseconds. */
+    p50Ms: number;
+    /** 95th percentile latency in milliseconds. */
+    p95Ms: number;
+    /** 99th percentile latency in milliseconds. */
+    p99Ms: number;
+    /** Maximum observed latency in milliseconds. */
+    maxMs: number;
+};
+
+export type DenoWorkerEventLoopLagOptions = {
+    /** Timer measurement window in milliseconds. Clamped to [10, 60_000]. Defaults to 100. */
+    measureMs?: number;
+};
+
+export type DenoWorkerEventLoopLagStats = {
+    /** Effective measurement window used for the timer sample, in milliseconds. */
+    measureMs: number;
+    /** Measured event-loop lag in milliseconds (actual delay beyond requested window). */
+    lagMs: number;
+};
+
+export type DenoWorkerStreamStats = {
+    /** Count of active stream ids currently tracked by the wrapper. */
+    activeStreams: number;
+    /** Number of queued inbound stream chunks waiting for local consumption. */
+    queuedChunks: number;
+    /** Total bytes buffered in queued inbound stream chunks. */
+    queuedBytes: number;
+    /** Total pending writer credit debt in bytes across active outbound streams. */
+    creditDebtBytes: number;
+    /** Number of queued incoming stream-open requests waiting to be accepted. */
+    backlogSize: number;
+};
+
+export type DenoWorkerTotalsStats = {
+    /** Total tracked operations completed since worker creation or last reset. */
+    ops: number;
+    /** Total failed tracked operations since worker creation or last reset. */
+    errors: number;
+    /** Total restart calls completed successfully. */
+    restarts: number;
+    /** Total host->runtime message count accepted by post APIs. */
+    messagesOut: number;
+    /** Total runtime->host message count delivered to message channel (non-stream frames). */
+    messagesIn: number;
+    /** Estimated bytes accepted by host->runtime post APIs. */
+    bytesOut: number;
+    /** Estimated bytes delivered on runtime->host message channel (non-stream frames). */
+    bytesIn: number;
+};
+
+export type DenoWorkerStatsResetOptions = {
+    /** Preserve cumulative totals while clearing rolling windows and samples. */
+    keepTotals?: boolean;
 };
 
 export type V8HeapStatistics = {
@@ -935,7 +1100,7 @@ export type DenoWorkerHandleApi = {
      *
      * `options.maxEvalMs` is used both for creation and as the handle-level default timeout for subsequent handle calls.
      */
-    eval(source: string, options?: Omit<EvalOptions, "args" | "type">): Promise<DenoWorkerHandle>;
+    eval(source: string, options?: Omit<EvalOptions, "args" | "type" | "sourceLoader">): Promise<DenoWorkerHandle>;
 };
 
 /** Global namespace exposed on `DenoWorker.global`. */
@@ -976,6 +1141,30 @@ export type DenoWorkerGlobalApi = {
     getType(path?: string, options?: DenoWorkerHandleExecOptions): Promise<DenoWorkerHandleTypeInfo>;
     /** Check global value `instanceof` a constructor path rooted at `globalThis`. */
     instanceOf(path: string, constructorPath: string, options?: DenoWorkerHandleExecOptions): Promise<boolean>;
+};
+
+/** Runtime stats namespace exposed on `DenoWorker.stats`. */
+export type DenoWorkerStatsApi = {
+    /** Number of currently active async operations tracked by the wrapper. */
+    readonly activeOps: number;
+    /** Last known execution stats snapshot from the native runtime. */
+    readonly lastExecution: ExecStats;
+    /** CPU usage estimate for recent runtime operations (usagePercentage is 0-100). */
+    cpu(options?: DenoWorkerCpuOptions): Promise<DenoWorkerCpuStats>;
+    /** Operation throughput by category over a rolling window. */
+    rates(options?: DenoWorkerRatesOptions): Promise<DenoWorkerRatesStats>;
+    /** Latency summary over completed operations in a rolling window. */
+    latency(options?: DenoWorkerRatesOptions): Promise<DenoWorkerLatencyStats>;
+    /** Measures host event-loop lag over a short timer window. */
+    eventLoopLag(options?: DenoWorkerEventLoopLagOptions): Promise<DenoWorkerEventLoopLagStats>;
+    /** Snapshot of stream backpressure/backlog internals. */
+    readonly stream: DenoWorkerStreamStats;
+    /** Cumulative counters tracked since startup or last reset. */
+    readonly totals: DenoWorkerTotalsStats;
+    /** Clears rolling samples and optionally totals counters. */
+    reset(options?: DenoWorkerStatsResetOptions): void;
+    /** Query V8 heap memory stats for the runtime. */
+    memory(): Promise<DenoWorkerMemory>;
 };
 
 /**
