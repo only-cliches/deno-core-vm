@@ -255,7 +255,7 @@ describe("DenoWorker nodeResolve/nodeCompat", () => {
   });
 
   test(
-    "nodeResolve: extensionless directory imports currently do not resolve to index.* (document current behavior)",
+    "nodeResolve: extensionless directory imports resolve to index.*",
     async () => {
       const dw = createTestWorker({
         cwd: dir,
@@ -264,14 +264,14 @@ describe("DenoWorker nodeResolve/nodeCompat", () => {
       });
 
       try {
-        writeFile(path.join(dir, "dir", "index.js"), `export const v = "index";\n`);
+        await writeFile(path.join(dir, "dir", "index.js"), `export const v = "index";\n`);
 
         const code = `
         import { v } from "./dir";
         export const out = v;
       `;
 
-        await expect(dw.module.eval(code)).rejects.toBeTruthy();
+        await expect(dw.module.eval(code)).resolves.toMatchObject({ out: "index" });
       } finally {
         if (!dw.isClosed()) await dw.close();
       }
@@ -279,7 +279,7 @@ describe("DenoWorker nodeResolve/nodeCompat", () => {
   );
 
   test(
-    "nodeResolve: bare package directory subpath imports currently do not resolve to index.* (document current behavior)",
+    "nodeResolve: bare package directory subpath imports resolve to package entry or index.*",
     async () => {
       const dw = createTestWorker({
         cwd: dir,
@@ -288,12 +288,20 @@ describe("DenoWorker nodeResolve/nodeCompat", () => {
       });
 
       try {
-        writeFile(
+        await writeFile(
           path.join(dir, "node_modules", "pkgdir", "package.json"),
           JSON.stringify({ name: "pkgdir", version: "1.0.0", main: "main.js" }, null, 2)
         );
-        writeFile(path.join(dir, "node_modules", "pkgdir", "main.js"), `export const ok = true;\n`);
-        writeFile(
+        await writeFile(path.join(dir, "node_modules", "pkgdir", "main.js"), `export const ok = true;\n`);
+        await writeFile(
+          path.join(dir, "node_modules", "pkgdir", "dir", "package.json"),
+          JSON.stringify({ main: "entry.js" }, null, 2)
+        );
+        await writeFile(
+          path.join(dir, "node_modules", "pkgdir", "dir", "entry.js"),
+          `export const z = "dir-entry";\n`
+        );
+        await writeFile(
           path.join(dir, "node_modules", "pkgdir", "dir", "index.js"),
           `export const z = "dir-index";\n`
         );
@@ -303,7 +311,7 @@ describe("DenoWorker nodeResolve/nodeCompat", () => {
         export const out = z;
       `;
 
-        await expect(dw.module.eval(code)).rejects.toBeTruthy();
+        await expect(dw.module.eval(code)).resolves.toMatchObject({ out: "dir-entry" });
       } finally {
         if (!dw.isClosed()) await dw.close();
       }

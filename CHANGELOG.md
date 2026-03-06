@@ -14,6 +14,8 @@ All notable changes to this project will be documented in this file.
   - added package lifecycle `install` hook that runs the native build step and emits local `index.node`.
 - Fixed runtime observability gap for module evaluation failures:
   - `worker.module.eval(...)` now emits `error.thrown` runtime events with `surface: "module.eval"`.
+- Fixed Node-style disk resolution returning directory URLs for extensionless directory targets:
+  - `moduleLoader.nodeResolve` now resolves directory imports via nested `package.json` (`module`/`main`) and `index.*` fallback.
 
 ### Changed
 - Updated docs to reflect sandbox-bounded `envFile: true` behavior (cwd-local discovery).
@@ -32,6 +34,7 @@ All notable changes to this project will be documented in this file.
 - Added Jest coverage for `imports` callback string-shorthand returns with loader-transform parity.
 - Added Rust unit coverage for readable named virtual specifier formatting.
 - Added Jest coverage for `module.eval` runtime event/error telemetry.
+- Updated node-compat resolve tests to assert directory subpath resolution (`package.json` entry and `index.*` fallback).
 
 ## [0.9.6] Mar 6, 2026
 

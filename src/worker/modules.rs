@@ -528,6 +528,82 @@ impl DynamicModuleLoader {
         cand_abs.starts_with(&root_abs)
     }
 
+    // Resolves Node-style file candidates with extension fallback and directory entry resolution.
+    fn resolve_node_candidate(candidate: &std::path::Path, exts: &[&str]) -> Option<PathBuf> {
+        if candidate.is_file() {
+            return Some(candidate.to_path_buf());
+        }
+
+        if candidate.extension().is_none() {
+            for ext in exts {
+                let mut pp = candidate.to_path_buf();
+                pp.set_extension(ext);
+                if pp.is_file() {
+                    return Some(pp);
+                }
+            }
+        }
+
+        if candidate.is_dir() {
+            if let Some(from_pkg) = Self::resolve_node_package_dir(candidate, exts) {
+                return Some(from_pkg);
+            }
+            for ext in exts {
+                let idx = candidate.join(format!("index.{ext}"));
+                if idx.is_file() {
+                    return Some(idx);
+                }
+            }
+        }
+
+        None
+    }
+
+    // Resolves package.json entry fields for a directory (`module` then `main`) with fallback.
+    fn resolve_node_package_dir(pkg_dir: &std::path::Path, exts: &[&str]) -> Option<PathBuf> {
+        let pkg_json = pkg_dir.join("package.json");
+        if !pkg_json.exists() {
+            return None;
+        }
+
+        let text = std::fs::read_to_string(&pkg_json).ok()?;
+        let j = serde_json::from_str::<serde_json::Value>(&text).ok()?;
+        let entry = j
+            .get("module")
+            .and_then(|v| v.as_str())
+            .or_else(|| j.get("main").and_then(|v| v.as_str()))
+            .map(str::trim)
+            .filter(|s| !s.is_empty())?;
+
+        let cand = pkg_dir.join(entry);
+        if cand == pkg_dir {
+            return None;
+        }
+        // Do not recurse into package.json parsing again for entry targets.
+        if cand.is_file() {
+            return Some(cand);
+        }
+        if cand.extension().is_none() {
+            for ext in exts {
+                let mut pp = cand.clone();
+                pp.set_extension(ext);
+                if pp.is_file() {
+                    return Some(pp);
+                }
+            }
+        }
+        if cand.is_dir() {
+            for ext in exts {
+                let idx = cand.join(format!("index.{ext}"));
+                if idx.is_file() {
+                    return Some(idx);
+                }
+            }
+        }
+
+        None
+    }
+
     /// Attempts Node-style disk resolution for a specifier/referrer pair.
     pub fn try_node_resolve_disk(&self, specifier: &str, referrer: &str) -> Option<Url> {
         if !self.node_disk_resolve_enabled() {
@@ -554,26 +630,9 @@ impl DynamicModuleLoader {
                 base_dir.join(specifier)
             };
 
-            if p.exists() {
-                return Url::from_file_path(p).ok();
-            }
-
             let exts = ["js", "mjs", "cjs", "ts", "mts"];
-            for ext in exts {
-                let mut pp = p.clone();
-                pp.set_extension(ext);
-                if pp.exists() {
-                    return Url::from_file_path(pp).ok();
-                }
-            }
-
-            if p.extension().is_none() && p.is_dir() {
-                for ext in exts {
-                    let idx = p.join(format!("index.{ext}"));
-                    if idx.exists() {
-                        return Url::from_file_path(idx).ok();
-                    }
-                }
+            if let Some(resolved) = Self::resolve_node_candidate(&p, &exts) {
+                return Url::from_file_path(resolved).ok();
             }
 
             return None;
@@ -604,55 +663,16 @@ impl DynamicModuleLoader {
 
             if let Some(sp) = subpath {
                 let candidate = pkg_dir.join(sp);
-                if candidate.exists() {
-                    return Url::from_file_path(candidate).ok();
-                }
                 let exts = ["js", "mjs", "cjs", "ts", "mts"];
-                for ext in exts {
-                    let mut pp = candidate.clone();
-                    pp.set_extension(ext);
-                    if pp.exists() {
-                        return Url::from_file_path(pp).ok();
-                    }
+                if let Some(resolved) = Self::resolve_node_candidate(&candidate, &exts) {
+                    return Url::from_file_path(resolved).ok();
                 }
                 return None;
             }
 
-            // Use package.json module/main fallback, then index.*.
-            let pkg_json = pkg_dir.join("package.json");
-            if pkg_json.exists() {
-                if let Ok(text) = std::fs::read_to_string(&pkg_json) {
-                    if let Ok(j) = serde_json::from_str::<serde_json::Value>(&text) {
-                        let entry = j
-                            .get("module")
-                            .and_then(|v| v.as_str())
-                            .or_else(|| j.get("main").and_then(|v| v.as_str()))
-                            .map(|s| s.to_string());
-
-                        if let Some(entry) = entry {
-                            let cand = pkg_dir.join(entry);
-                            if cand.exists() {
-                                return Url::from_file_path(cand).ok();
-                            }
-                            let exts = ["js", "mjs", "cjs"];
-                            for ext in exts {
-                                let mut pp = cand.clone();
-                                pp.set_extension(ext);
-                                if pp.exists() {
-                                    return Url::from_file_path(pp).ok();
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
             let exts = ["js", "mjs", "cjs"];
-            for ext in exts {
-                let idx = pkg_dir.join(format!("index.{ext}"));
-                if idx.exists() {
-                    return Url::from_file_path(idx).ok();
-                }
+            if let Some(resolved) = Self::resolve_node_candidate(&pkg_dir, &exts) {
+                return Url::from_file_path(resolved).ok();
             }
         }
 
