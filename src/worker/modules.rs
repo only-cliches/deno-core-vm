@@ -140,11 +140,53 @@ impl ModuleRegistry {
 
     // Returns a deterministic internal virtual URL for a user-provided module name.
     fn named_virtual_specifier(module_name: &str) -> String {
-        let mut encoded = String::with_capacity(module_name.len() * 2);
-        for b in module_name.as_bytes() {
-            let _ = std::fmt::Write::write_fmt(&mut encoded, format_args!("{b:02x}"));
+        let mut label = String::new();
+        let mut last_was_dash = false;
+        for ch in module_name.chars() {
+            if ch.is_ascii_alphanumeric() {
+                label.push(ch.to_ascii_lowercase());
+                last_was_dash = false;
+                continue;
+            }
+            if ch == '-' || ch == '_' || ch == '.' {
+                label.push(ch);
+                last_was_dash = false;
+                continue;
+            }
+            if !last_was_dash {
+                label.push('-');
+                last_was_dash = true;
+            }
         }
-        format!("denojs-worker://virtual/__named_{encoded}.js")
+
+        let label = label
+            .trim_matches('-')
+            .chars()
+            .take(64)
+            .collect::<String>();
+        let label = if label.is_empty() {
+            "unnamed".to_string()
+        } else {
+            label
+        };
+
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        module_name.hash(&mut hasher);
+        let fingerprint = hasher.finish();
+
+        format!("denojs-worker://virtual/__named_{label}_{fingerprint:016x}.js")
+    }
+
+    #[cfg(test)]
+    fn module_name_label(module_name: &str) -> String {
+        let spec = Self::named_virtual_specifier(module_name);
+        let tail = spec
+            .strip_prefix("denojs-worker://virtual/__named_")
+            .and_then(|s| s.strip_suffix(".js"))
+            .unwrap_or("");
+        tail.rsplit_once('_')
+            .map(|(label, _)| label.to_string())
+            .unwrap_or_default()
     }
 
     /// Returns a unique virtual module specifier for generated source modules.
@@ -2145,6 +2187,21 @@ mod tests {
         assert!(wrapper.contains(
             "export { default } from \"denojs-worker://virtual/__vm_42.js\";"
         ));
+    }
+
+    #[test]
+    // Named virtual specifier includes readable module-name label and stable unique suffix.
+    fn named_virtual_specifier_is_readable_and_unique() {
+        let a = ModuleRegistry::named_virtual_specifier("intent_bootstrap");
+        let b = ModuleRegistry::named_virtual_specifier("intent bootstrap");
+        let c = ModuleRegistry::named_virtual_specifier("intent/bootstrap");
+
+        assert!(a.starts_with("denojs-worker://virtual/__named_intent_bootstrap_"));
+        assert!(a.ends_with(".js"));
+        assert_eq!(ModuleRegistry::module_name_label("intent/bootstrap"), "intent-bootstrap");
+        assert_eq!(ModuleRegistry::module_name_label(""), "unnamed");
+        assert_ne!(a, b);
+        assert_ne!(b, c);
     }
 
     #[test]

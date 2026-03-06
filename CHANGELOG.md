@@ -18,11 +18,15 @@ All notable changes to this project will be documented in this file.
 - Expanded `imports` callback return contract:
   - string return values are now supported as shorthand for `{ src: "...", srcLoader: "js" }`.
   - string shorthand now passes through `sourceLoaders` transforms the same way object `{ src, srcLoader }` returns do.
+- Improved internal virtual module URL readability for named registry entries:
+  - canonical specifiers now include a sanitized module-name label and stable fingerprint suffix
+  - runtime `import.*` events and stack traces now surface user-relevant module context more clearly.
 
 ### Tests
 - Added IPv6 permission matching regression coverage in Rust module-loader tests.
 - Added `envFile: true` sandbox-boundary regression coverage in Jest inspect/env tests.
 - Added Jest coverage for `imports` callback string-shorthand returns with loader-transform parity.
+- Added Rust unit coverage for readable named virtual specifier formatting.
 
 ## [0.9.6] Mar 6, 2026
 
