@@ -63,7 +63,7 @@ export class DenoWorkerTemplate {
                 ...(createOptions?.globals ?? {}),
             };
             for (const [k, v] of Object.entries(globals)) {
-                await worker.setGlobal(k, v);
+                await worker.global.set(k, v);
             }
 
             for (const script of [...asStringArray(this.options.bootstrapScripts), ...asStringArray(createOptions?.bootstrapScripts)]) {

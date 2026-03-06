@@ -38,6 +38,13 @@ pub fn env_access_from_permissions(permissions: Option<&serde_json::Value>) -> E
         return EnvAccess::Deny;
     };
 
+    if *cfg == serde_json::Value::Bool(true) {
+        return EnvAccess::AllowAll;
+    }
+    if *cfg == serde_json::Value::Bool(false) {
+        return EnvAccess::Deny;
+    }
+
     let Some(v) = cfg.get("env") else {
         return EnvAccess::Deny;
     };
@@ -106,6 +113,11 @@ mod tests {
     fn env_access_invalid_or_false_config_denies() {
         let false_cfg = env_access_from_permissions(Some(&serde_json::json!({ "env": false })));
         assert!(matches!(false_cfg, EnvAccess::Deny));
+        let false_shorthand = env_access_from_permissions(Some(&serde_json::Value::Bool(false)));
+        assert!(matches!(false_shorthand, EnvAccess::Deny));
+
+        let true_shorthand = env_access_from_permissions(Some(&serde_json::Value::Bool(true)));
+        assert!(matches!(true_shorthand, EnvAccess::AllowAll));
 
         let invalid_cfg = env_access_from_permissions(Some(&serde_json::json!({ "env": 123 })));
         assert!(matches!(invalid_cfg, EnvAccess::Deny));

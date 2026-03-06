@@ -388,6 +388,19 @@ fn load_dotenv_file_strict(
     Ok(map)
 }
 
+fn expand_permissions_shorthand(value: serde_json::Value) -> serde_json::Value {
+    let serde_json::Value::Bool(all) = value else {
+        return value;
+    };
+    let mut out = serde_json::Map::new();
+    for key in [
+        "read", "write", "net", "env", "run", "ffi", "sys", "import", "hrtime", "wasm",
+    ] {
+        out.insert(key.to_string(), serde_json::Value::Bool(all));
+    }
+    serde_json::Value::Object(out)
+}
+
 // Ensure env permission enabled.
 fn ensure_env_permission_enabled(
     permissions: Option<serde_json::Value>,
@@ -400,6 +413,7 @@ fn ensure_env_permission_enabled(
     let env_keys_set: std::collections::HashSet<String> = env_keys.keys().cloned().collect();
     let mut warnings = Vec::new();
 
+    let permissions = permissions.map(expand_permissions_shorthand);
     let mut out = match permissions {
         Some(serde_json::Value::Object(map)) => map,
         _ => serde_json::Map::new(),
@@ -450,6 +464,9 @@ fn ensure_env_permission_enabled(
 
 // Checks whether `permissions.run` enables subprocess execution.
 fn run_permission_enabled(permissions: Option<&serde_json::Value>) -> bool {
+    if permissions == Some(&serde_json::Value::Bool(true)) {
+        return true;
+    }
     let Some(obj) = permissions.and_then(|v| v.as_object()) else {
         return false;
     };
@@ -517,6 +534,7 @@ impl WorkerCreateOptions {
             if !v.is_a::<JsNull, _>(cx) && !v.is_a::<JsUndefined, _>(cx) {
                 if let Ok(bridged) = from_neon_value(cx, v) {
                     if let JsValueBridge::Json(j) = bridged {
+                        let j = expand_permissions_shorthand(j);
                         if let Some(w) = j.get("wasm").and_then(|v| v.as_bool()) {
                             out.runtime_options.wasm = w;
                         }
@@ -922,8 +940,22 @@ mod tests {
     }
 
     #[test]
+    // Ensure shorthand permissions=true expands to allow-all semantics.
+    fn ensure_env_permission_enabled_expands_permissions_true_shorthand() {
+        let env = env_map(&["A"]);
+        let (out, warnings) = ensure_env_permission_enabled(Some(serde_json::Value::Bool(true)), Some(&env));
+        let env_allow = out
+            .and_then(|v| v.as_object().cloned())
+            .and_then(|o| o.get("env").cloned())
+            .and_then(|v| v.as_bool());
+        assert_eq!(env_allow, Some(true));
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
     // Checks whether permissions run enables subprocess execution.
     fn run_permission_enabled_detects_supported_forms() {
+        assert!(run_permission_enabled(Some(&serde_json::Value::Bool(true))));
         assert!(run_permission_enabled(Some(&serde_json::json!({ "run": true }))));
         assert!(run_permission_enabled(Some(&serde_json::json!({ "run": ["deno"] }))));
         assert!(!run_permission_enabled(Some(&serde_json::json!({ "run": false }))));

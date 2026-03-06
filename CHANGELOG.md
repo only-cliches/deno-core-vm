@@ -2,6 +2,64 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.5] Future
+
+### Added
+- Added full `worker.global` handle-parity namespace API rooted at `globalThis`:
+  - `set(path, value, options?)`
+  - `get(path, options?)`
+  - `has(path, options?)`
+  - `delete(path, options?)`
+  - `keys(path?, options?)`
+  - `entries(path?, options?)`
+  - `getOwnPropertyDescriptor(path, options?)`
+  - `define(path, descriptor, options?)`
+  - `isCallable(path?, options?)`
+  - `isPromise(path?, options?)`
+  - `call(path, args?, options?)`
+  - `construct(path, args?, options?)`
+  - `await(path, options?)`
+  - `clone(path, options?)`
+  - `toJSON(path?, options?)`
+  - `apply(path, ops, options?)`
+  - `getType(path?, options?)`
+  - `instanceOf(path, constructorPath, options?)`
+- Added `DenoWorkerGlobalApi` TypeScript type for the new global namespace surface.
+- Added support for shorthand runtime permission config booleans:
+  - `permissions: true` enables all runtime permissions.
+  - `permissions: false` disables all runtime permissions.
+- Added generic return typing across public value-returning APIs so callers can provide expected return types:
+  - `worker.eval<T>(...)`, `worker.evalSync<T>(...)`
+  - `worker.global.get<T>(...)`, `worker.global.call<T>(...)`, `worker.global.construct<T>(...)`, `worker.global.await<T>(...)`, `worker.global.toJSON<T>(...)`, `worker.global.apply<T>(...)`
+  - `worker.handle.get<T>(...)`, `worker.handle.call<T>(...)`, `worker.handle.construct<T>(...)`, `worker.handle.await<T>(...)`, `worker.handle.toJSON<T>(...)`, `worker.handle.apply<T>(...)`
+  - module APIs included: `worker.module.import<T>(...)`, `worker.module.eval<T>(...)`
+- Added tests covering permission shorthand expansion and env-access behavior:
+  - `ensure_env_permission_enabled_expands_permissions_true_shorthand`
+  - `env_access_invalid_or_false_config_denies` (extended for top-level bool shorthand)
+- Added tests for global namespace behavior in `test-ts/globals.spec.ts`, including mirrored handle-parity operations.
+
+### Changed
+- Changed public global mutation usage from top-level `worker.setGlobal(...)` to `worker.global.set(...)` for API consistency with `worker.stream`, `worker.handle`, and `worker.module`.
+- Updated worker option merging logic for `permissions` to correctly handle boolean/object combinations in `mergeWorkerOptions(...)`.
+- Updated WASM permission check in the TypeScript wrapper to safely handle boolean permissions shorthand.
+- Updated runtime permission parsing in Rust to normalize boolean shorthand before env-permission enrichment and startup warning logic.
+- Updated examples, tests, and docs to use `worker.global.set(...)`.
+- Updated `worker.global.set(...)` to accept dot-path writes (for example `a.b.c`) while preserving the optimized top-level-key fast path.
+
+### Fixed
+- Fixed top-level permission shorthand interoperability across host/runtime layers:
+  - Rust runtime permission mapping now handles `permissions: true|false` directly.
+  - Env permission access control now correctly interprets top-level boolean permissions.
+  - `permissions.run` startup warning detection now accounts for shorthand `permissions: true`.
+- Fixed TypeScript surface/implementation mismatches for generic return typing by aligning `types.ts` and `worker.ts` signatures.
+
+### Docs
+- Updated README API sections to document full `worker.global` handle-parity methods and generic return signatures.
+- Updated examples documentation to reflect `global.set` usage.
+
+### Tests
+- Revalidated TypeScript build (`tsc --project tsconfig.idx.json --noEmit`) after API/type updates.
+- Revalidated globals behavior with Jest (`test-ts/globals.spec.ts`) including mirrored `worker.global` handle-parity operations.
 
 ## [0.9.4] Mar 5, 2026
 

@@ -37,7 +37,7 @@ describe("deno_worker: promises and error propagation", () => {
       throw new Error("SyncBoom");
     });
 
-    await dw.setGlobal("nodeFn", nodeFn);
+    await dw.global.set("nodeFn", nodeFn);
 
     const script = `
       (async () => {
@@ -75,7 +75,7 @@ describe("deno_worker: promises and error propagation", () => {
       return "Node processed: " + val;
     };
 
-    await dw.setGlobal("asyncIdentity", asyncIdentity);
+    await dw.global.set("asyncIdentity", asyncIdentity);
 
     const script = `
       (async () => {
@@ -95,7 +95,7 @@ describe("deno_worker: promises and error propagation", () => {
       throw err;
     });
 
-    await dw.setGlobal("nodeFn", nodeFn);
+    await dw.global.set("nodeFn", nodeFn);
 
     const script = `
       (async () => {
@@ -120,7 +120,7 @@ describe("deno_worker: promises and error propagation", () => {
   });
 
   it("in-flight eval from prior runtime always settles across restart", async () => {
-    await dw.setGlobal(
+    await dw.global.set(
       "nodeDelay",
       async () => {
         await sleep(200);

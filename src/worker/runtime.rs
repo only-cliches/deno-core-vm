@@ -147,32 +147,43 @@ fn permissions_from_limits(limits: &RuntimeLimits, root: &Path) -> PermissionsCo
             .to_string_lossy()
             .to_string();
 
-        apply_perm_field(
-            cfg,
-            "read",
-            &mut opts.allow_read,
-            Some(&|items| sandboxed_path_list(root, &items)),
-        );
-        if cfg.get("read") == Some(&serde_json::Value::Bool(true)) {
+        if *cfg == serde_json::Value::Bool(true) {
             opts.allow_read = Some(vec![canon_root.clone()]);
-        }
+            opts.allow_write = Some(vec![canon_root.clone()]);
+            opts.allow_net = Some(vec![]);
+            opts.allow_env = Some(vec![]);
+            opts.allow_run = Some(vec![]);
+            opts.allow_ffi = Some(vec![]);
+            opts.allow_sys = Some(vec![]);
+            opts.allow_import = Some(vec![]);
+        } else if *cfg != serde_json::Value::Bool(false) {
+            apply_perm_field(
+                cfg,
+                "read",
+                &mut opts.allow_read,
+                Some(&|items| sandboxed_path_list(root, &items)),
+            );
+            if cfg.get("read") == Some(&serde_json::Value::Bool(true)) {
+                opts.allow_read = Some(vec![canon_root.clone()]);
+            }
 
-        apply_perm_field(
-            cfg,
-            "write",
-            &mut opts.allow_write,
-            Some(&|items| sandboxed_path_list(root, &items)),
-        );
-        if cfg.get("write") == Some(&serde_json::Value::Bool(true)) {
-            opts.allow_write = Some(vec![canon_root]);
-        }
+            apply_perm_field(
+                cfg,
+                "write",
+                &mut opts.allow_write,
+                Some(&|items| sandboxed_path_list(root, &items)),
+            );
+            if cfg.get("write") == Some(&serde_json::Value::Bool(true)) {
+                opts.allow_write = Some(vec![canon_root]);
+            }
 
-        apply_perm_field(cfg, "net", &mut opts.allow_net, None);
-        apply_perm_field(cfg, "env", &mut opts.allow_env, None);
-        apply_perm_field(cfg, "run", &mut opts.allow_run, None);
-        apply_perm_field(cfg, "ffi", &mut opts.allow_ffi, None);
-        apply_perm_field(cfg, "sys", &mut opts.allow_sys, None);
-        apply_perm_field(cfg, "import", &mut opts.allow_import, None);
+            apply_perm_field(cfg, "net", &mut opts.allow_net, None);
+            apply_perm_field(cfg, "env", &mut opts.allow_env, None);
+            apply_perm_field(cfg, "run", &mut opts.allow_run, None);
+            apply_perm_field(cfg, "ffi", &mut opts.allow_ffi, None);
+            apply_perm_field(cfg, "sys", &mut opts.allow_sys, None);
+            apply_perm_field(cfg, "import", &mut opts.allow_import, None);
+        }
     }
 
     let perms = Permissions::from_options(desc_parser.as_ref(), &opts)

@@ -60,7 +60,7 @@ describe("deno_worker: eval", () => {
     "evalSync calling an injected host function fails fast with an explicit error",
     async () => {
       const hostFn = jest.fn((x: number) => x + 1);
-      await dw.setGlobal("hostFn", hostFn);
+      await dw.global.set("hostFn", hostFn);
 
       const started = Date.now();
       expect(() => dw.evalSync("hostFn(1)")).toThrow(/evalsync|cross-runtime/i);
@@ -74,7 +74,7 @@ describe("deno_worker: eval", () => {
   it(
     "evalSync calling an injected async host function fails fast with an explicit error",
     async () => {
-      await dw.setGlobal("hostAsync", async (x: number) => x + 1);
+      await dw.global.set("hostAsync", async (x: number) => x + 1);
 
       const started = Date.now();
       expect(() => dw.evalSync("hostAsync(1)")).toThrow(/evalsync|cross-runtime/i);

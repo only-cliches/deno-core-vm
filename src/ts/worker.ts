@@ -20,6 +20,7 @@ import type {
     DenoWorkerHandleAwaitOptions,
     DenoWorkerHandleExecOptions,
     DenoWorkerHandleApi,
+    DenoWorkerGlobalApi,
     DenoWorkerCloseHandler,
     DenoWorkerEvent,
     DenoWorkerHandle,
@@ -749,6 +750,33 @@ export class DenoWorker {
         tryGet: (path: string, options?: DenoWorkerHandleExecOptions) => this.handleTryGet(path, options),
         eval: (source: string, options?: Omit<EvalOptions, "args" | "type">) => this.handleEval(source, options),
     };
+    /** Global namespace API for setting, reading, and calling runtime globals. */
+    readonly global: DenoWorkerGlobalApi = {
+        set: (path: string, value: any, options?: DenoWorkerHandleExecOptions) => this.globalSet(path, value, options),
+        get: <T = any>(path: string, options?: DenoWorkerHandleExecOptions) => this.globalGet<T>(path, options),
+        has: (path: string, options?: DenoWorkerHandleExecOptions) => this.globalHas(path, options),
+        delete: (path: string, options?: DenoWorkerHandleExecOptions) => this.globalDelete(path, options),
+        keys: (path?: string, options?: DenoWorkerHandleExecOptions) => this.globalKeys(path, options),
+        entries: (path?: string, options?: DenoWorkerHandleExecOptions) => this.globalEntries(path, options),
+        getOwnPropertyDescriptor: (path: string, options?: DenoWorkerHandleExecOptions) =>
+            this.globalGetOwnPropertyDescriptor(path, options),
+        define: (path: string, descriptor: PropertyDescriptor, options?: DenoWorkerHandleExecOptions) =>
+            this.globalDefine(path, descriptor, options),
+        isCallable: (path?: string, options?: DenoWorkerHandleExecOptions) => this.globalIsCallable(path, options),
+        isPromise: (path?: string, options?: DenoWorkerHandleExecOptions) => this.globalIsPromise(path, options),
+        call: <T = any>(path: string, args?: any[], options?: DenoWorkerHandleExecOptions) => this.globalCall<T>(path, args, options),
+        construct: <T = any>(path: string, args?: any[], options?: DenoWorkerHandleExecOptions) =>
+            this.globalConstruct<T>(path, args, options),
+        await: <T = any>(path: string, options?: DenoWorkerHandleAwaitOptions & DenoWorkerHandleExecOptions) =>
+            this.globalAwait<T>(path, options),
+        clone: (path: string, options?: DenoWorkerHandleExecOptions) => this.globalClone(path, options),
+        toJSON: <T = any>(path?: string, options?: DenoWorkerHandleExecOptions) => this.globalToJSON<T>(path, options),
+        apply: <T = any[]>(path: string, ops: DenoWorkerHandleApplyOp[], options?: DenoWorkerHandleExecOptions) =>
+            this.globalApply<T>(path, ops, options),
+        getType: (path?: string, options?: DenoWorkerHandleExecOptions) => this.globalGetType(path, options),
+        instanceOf: (path: string, constructorPath: string, options?: DenoWorkerHandleExecOptions) =>
+            this.globalInstanceOf(path, constructorPath, options),
+    };
     /** Module API for source evaluation and named module registry operations. */
     readonly module: DenoWorkerModuleApi = {
         import: <T extends Record<string, any> = Record<string, any>>(specifier: string) =>
@@ -862,9 +890,9 @@ export class DenoWorker {
 
         const handle: Record<string, unknown> = {
             id,
-            get: async (path?: string, options?: DenoWorkerHandleExecOptions) => {
+            get: async <T = any>(path?: string, options?: DenoWorkerHandleExecOptions): Promise<T> => {
                 ensureUsable();
-                return await self.runHandleOp({ op: "get", id, path: path ?? "" }, toExecOptions(options));
+                return await self.runHandleOp({ op: "get", id, path: path ?? "" }, toExecOptions(options)) as T;
             },
             has: async (path: string, options?: DenoWorkerHandleExecOptions) => {
                 ensureUsable();
@@ -918,11 +946,11 @@ export class DenoWorker {
                 ensureUsable();
                 return await self.runHandleOp({ op: "isPromise", id, path: path ?? "" }, toExecOptions(options));
             },
-            call: async (
+            call: async <T = any>(
                 pathOrArgs?: string | any[],
                 argsOrOptions?: any[] | DenoWorkerHandleExecOptions,
                 optionsMaybe?: DenoWorkerHandleExecOptions,
-            ) => {
+            ): Promise<T> => {
                 ensureUsable();
                 const opId = `handle.call:${id}:${randomUUID()}`;
                 if (typeof pathOrArgs === "string") {
@@ -936,7 +964,7 @@ export class DenoWorker {
                     try {
                         const out = await self.runHandleCallOp(id, p, args, toExecOptions(optionsMaybe));
                         self.emitRuntimeEvent({ kind: "handle.call.end", opId, handleId: id, path: p, ok: true });
-                        return out;
+                        return out as T;
                     } catch (e) {
                         self.emitRuntimeEvent({ kind: "handle.call.end", opId, handleId: id, path: p, ok: false });
                         self.emitThrownError(opId, "handle.call", e);
@@ -953,14 +981,14 @@ export class DenoWorker {
                 try {
                     const out = await self.runHandleCallOp(id, "", callArgs, execOptions);
                     self.emitRuntimeEvent({ kind: "handle.call.end", opId, handleId: id, path: "", ok: true });
-                    return out;
+                    return out as T;
                 } catch (e) {
                     self.emitRuntimeEvent({ kind: "handle.call.end", opId, handleId: id, path: "", ok: false });
                     self.emitThrownError(opId, "handle.call", e);
                     throw e;
                 }
             },
-            construct: async (args?: any[], options?: DenoWorkerHandleExecOptions) => {
+            construct: async <T = any>(args?: any[], options?: DenoWorkerHandleExecOptions): Promise<T> => {
                 ensureUsable();
                 if (args !== undefined && !Array.isArray(args)) {
                     throw new Error("handle.construct(args?) expects args as an array");
@@ -968,9 +996,9 @@ export class DenoWorker {
                 return await self.runHandleOp(
                     { op: "construct", id, args: Array.isArray(args) ? args : [] },
                     toExecOptions(options),
-                );
+                ) as T;
             },
-            await: async (options?: DenoWorkerHandleAwaitOptions & DenoWorkerHandleExecOptions) => {
+            await: async <T = any>(options?: DenoWorkerHandleAwaitOptions & DenoWorkerHandleExecOptions): Promise<T> => {
                 ensureUsable();
                 const resolved = await self.runHandleOp({
                     op: "await",
@@ -979,7 +1007,7 @@ export class DenoWorker {
                     untilNonPromise: options?.untilNonPromise,
                 }, toExecOptions(options));
                 rootTypeCache = (await self.runHandleOp({ op: "getType", id, path: "" }, toExecOptions(options))) as DenoWorkerHandleTypeInfo;
-                return resolved;
+                return resolved as T;
             },
             clone: async (options?: DenoWorkerHandleExecOptions) => {
                 ensureUsable();
@@ -995,14 +1023,14 @@ export class DenoWorker {
                 self.activeHandleIds.add(nextId);
                 return self.createHandle(nextId, generation, clonedRootType, defaultExecOptions);
             },
-            toJSON: async (path?: string, options?: DenoWorkerHandleExecOptions) => {
+            toJSON: async <T = any>(path?: string, options?: DenoWorkerHandleExecOptions): Promise<T> => {
                 ensureUsable();
-                return await self.runHandleOp({ op: "toJSON", id, path: path ?? "" }, toExecOptions(options));
+                return await self.runHandleOp({ op: "toJSON", id, path: path ?? "" }, toExecOptions(options)) as T;
             },
-            apply: async (ops: DenoWorkerHandleApplyOp[], options?: DenoWorkerHandleExecOptions) => {
+            apply: async <T = any[]>(ops: DenoWorkerHandleApplyOp[], options?: DenoWorkerHandleExecOptions): Promise<T> => {
                 ensureUsable();
                 if (!Array.isArray(ops)) throw new Error("handle.apply(ops) expects an array");
-                return await self.runHandleOp({ op: "apply", id, ops }, toExecOptions(options));
+                return await self.runHandleOp({ op: "apply", id, ops }, toExecOptions(options)) as T;
             },
             getType: async (path?: string, options?: DenoWorkerHandleExecOptions): Promise<DenoWorkerHandleTypeInfo> => {
                 ensureUsable();
@@ -2743,23 +2771,156 @@ export class DenoWorker {
         return coerceMemoryPayload(raw);
     }
 
-    /**
-     * Set a global value inside the runtime (`globalThis[key] = value`).
-     *
-     * Serialization behavior:
-     * - functions are bridged as host-callable functions
-     * - special runtime values (Date/Map/Set/TypedArrays/URL/Error/etc) preserve type via wire tags
-     * - nested object functions are preserved (e.g. `fs.readFileSync`)
-     *
-     * @example
-     * ```ts
-     * await dw.setGlobal("API_URL", "https://example.com");
-     * await dw.eval("API_URL"); // "https://example.com"
-     * ```
-     */
-    async setGlobal(key: string, value: any): Promise<void> {
+    /** Runs a callback with a temporary handle rooted at `globalThis` and always disposes it. */
+    private async withGlobalRootHandle<T>(
+        options: DenoWorkerHandleExecOptions | undefined,
+        fn: (handle: DenoWorkerHandle) => Promise<T>,
+    ): Promise<T> {
         await this.startupPromise;
-        await this.setGlobalInternal(key, value);
+        const handle = await this.handleGet("globalThis", options);
+        try {
+            return await fn(handle);
+        } finally {
+            await handle.dispose(options).catch(() => undefined);
+        }
+    }
+
+    /** Runs a callback with a temporary handle rooted at `path` and always disposes it. */
+    private async withGlobalPathHandle<T>(
+        path: string,
+        options: DenoWorkerHandleExecOptions | undefined,
+        fn: (handle: DenoWorkerHandle) => Promise<T>,
+    ): Promise<T> {
+        await this.startupPromise;
+        const handle = await this.handleGet(path, options);
+        try {
+            return await fn(handle);
+        } finally {
+            await handle.dispose(options).catch(() => undefined);
+        }
+    }
+
+    /** Sets a global value by path rooted at `globalThis` (`a.b.c` dot notation). */
+    private async globalSet(path: string, value: any, options?: DenoWorkerHandleExecOptions): Promise<void> {
+        const p = String(path ?? "").trim();
+        if (!p) throw new Error("global.set(path, value) requires a non-empty path");
+        if (!options && !p.includes(".")) {
+            await this.startupPromise;
+            await this.setGlobalInternal(p, value);
+            return;
+        }
+        await this.withGlobalRootHandle(options, async (handle) => {
+            await handle.set(p, value, options);
+        });
+    }
+
+    /** Reads a global value by path rooted at `globalThis` (`a.b.c` dot notation). */
+    private async globalGet<T = any>(path: string, options?: DenoWorkerHandleExecOptions): Promise<T> {
+        return await this.withGlobalPathHandle(path, options, async (handle) => await handle.get<T>("", options));
+    }
+
+    /** Returns true when a global path exists (`a.b.c` dot notation). */
+    private async globalHas(path: string, options?: DenoWorkerHandleExecOptions): Promise<boolean> {
+        return await this.withGlobalRootHandle(options, async (handle) => await handle.has(path, options));
+    }
+
+    /** Deletes a global path (`a.b.c` dot notation). */
+    private async globalDelete(path: string, options?: DenoWorkerHandleExecOptions): Promise<boolean> {
+        return await this.withGlobalRootHandle(options, async (handle) => await handle.delete(path, options));
+    }
+
+    /** Returns keys for `globalThis` root or nested global path. */
+    private async globalKeys(path?: string, options?: DenoWorkerHandleExecOptions): Promise<any[]> {
+        return await this.withGlobalRootHandle(options, async (handle) => await handle.keys(path ?? "", options));
+    }
+
+    /** Returns entries for `globalThis` root or nested global path. */
+    private async globalEntries(path?: string, options?: DenoWorkerHandleExecOptions): Promise<any[]> {
+        return await this.withGlobalRootHandle(options, async (handle) => await handle.entries(path ?? "", options));
+    }
+
+    /** Returns an own-property descriptor for a global path (`a.b.c` dot notation). */
+    private async globalGetOwnPropertyDescriptor(
+        path: string,
+        options?: DenoWorkerHandleExecOptions,
+    ): Promise<PropertyDescriptor | undefined> {
+        return await this.withGlobalRootHandle(
+            options,
+            async (handle) => await handle.getOwnPropertyDescriptor(path, options),
+        );
+    }
+
+    /** Defines a global property via descriptor semantics (`a.b.c` dot notation). */
+    private async globalDefine(
+        path: string,
+        descriptor: PropertyDescriptor,
+        options?: DenoWorkerHandleExecOptions,
+    ): Promise<boolean> {
+        return await this.withGlobalRootHandle(options, async (handle) => await handle.define(path, descriptor, options));
+    }
+
+    /** Returns true when a global path value is callable. */
+    private async globalIsCallable(path?: string, options?: DenoWorkerHandleExecOptions): Promise<boolean> {
+        return await this.withGlobalRootHandle(options, async (handle) => await handle.isCallable(path ?? "", options));
+    }
+
+    /** Returns true when a global path value is promise-like. */
+    private async globalIsPromise(path?: string, options?: DenoWorkerHandleExecOptions): Promise<boolean> {
+        return await this.withGlobalRootHandle(options, async (handle) => await handle.isPromise(path ?? "", options));
+    }
+
+    /** Calls a global function by path rooted at `globalThis` (`a.b.c` dot notation). */
+    private async globalCall<T = any>(path: string, args?: any[], options?: DenoWorkerHandleExecOptions): Promise<T> {
+        const callArgs = Array.isArray(args) ? args : [];
+        return await this.withGlobalPathHandle(path, options, async (handle) => await handle.call<T>(callArgs, options));
+    }
+
+    /** Constructs a global constructor by path rooted at `globalThis` (`a.b.c` dot notation). */
+    private async globalConstruct<T = any>(path: string, args?: any[], options?: DenoWorkerHandleExecOptions): Promise<T> {
+        const ctorArgs = Array.isArray(args) ? args : [];
+        return await this.withGlobalPathHandle(path, options, async (handle) => await handle.construct<T>(ctorArgs, options));
+    }
+
+    /** Awaits a global promise-like value by path rooted at `globalThis` (`a.b.c` dot notation). */
+    private async globalAwait<T = any>(
+        path: string,
+        options?: DenoWorkerHandleAwaitOptions & DenoWorkerHandleExecOptions,
+    ): Promise<T> {
+        return await this.withGlobalPathHandle(path, options, async (handle) => await handle.await<T>(options));
+    }
+
+    /** Clones a global value path into a durable runtime handle. */
+    private async globalClone(path: string, options?: DenoWorkerHandleExecOptions): Promise<DenoWorkerHandle> {
+        await this.startupPromise;
+        return await this.handleGet(path, options);
+    }
+
+    /** Returns a JSON snapshot for `globalThis` root or nested global path. */
+    private async globalToJSON<T = any>(path?: string, options?: DenoWorkerHandleExecOptions): Promise<T> {
+        return await this.withGlobalRootHandle(options, async (handle) => await handle.toJSON<T>(path ?? "", options));
+    }
+
+    /** Applies a sequence of handle operations against a global path root in one roundtrip. */
+    private async globalApply<T = any[]>(
+        path: string,
+        ops: DenoWorkerHandleApplyOp[],
+        options?: DenoWorkerHandleExecOptions,
+    ): Promise<T> {
+        return await this.withGlobalPathHandle(path, options, async (handle) => await handle.apply<T>(ops, options));
+    }
+
+    /** Returns type metadata for `globalThis` root or nested global path. */
+    private async globalGetType(path?: string, options?: DenoWorkerHandleExecOptions): Promise<DenoWorkerHandleTypeInfo> {
+        return await this.withGlobalRootHandle(options, async (handle) => await handle.getType(path ?? "", options));
+    }
+
+    /** Checks whether a global value is `instanceof` a constructor path rooted at `globalThis`. */
+    private async globalInstanceOf(
+        path: string,
+        constructorPath: string,
+        options?: DenoWorkerHandleExecOptions,
+    ): Promise<boolean> {
+        return await this.withGlobalPathHandle(path, options, async (handle) => await handle.instanceOf(constructorPath, options));
     }
 
     /** Creates a handle rooted at an existing runtime path (throws when path is absent). */
@@ -2834,7 +2995,7 @@ export class DenoWorker {
      *
      * If evaluated source resolves to a Promise, this method waits until fulfillment/rejection.
      */
-    eval(src: string, options?: EvalOptions): Promise<any> {
+    eval<T = any>(src: string, options?: EvalOptions): Promise<T> {
         const opId = `eval:${randomUUID()}`;
         this.emitRuntimeEvent({
             kind: "eval.begin",
@@ -2851,7 +3012,7 @@ export class DenoWorker {
             try {
                 const raw = await this.trackInFlight(this.native.eval(src, normalizeEvalOptions(options)));
                 this.emitRuntimeEvent({ kind: "eval.end", opId, ok: true });
-                return hydrateFromWire(raw);
+                return hydrateFromWire(raw) as T;
             } catch (e) {
                 const hydrated = hydrateFromWire(e);
                 this.emitRuntimeEvent({ kind: "eval.end", opId, ok: false });
@@ -2870,7 +3031,7 @@ export class DenoWorker {
      *
      * Throws while constructor globals are still initializing.
      */
-    evalSync(src: string, options?: EvalOptions): any {
+    evalSync<T = any>(src: string, options?: EvalOptions): T {
         const opId = `evalSync:${randomUUID()}`;
         this.emitRuntimeEvent({
             kind: "evalSync.begin",
@@ -2890,7 +3051,7 @@ export class DenoWorker {
         try {
             const raw = this.native.evalSync(src, normalizeEvalOptions(options));
             this.emitRuntimeEvent({ kind: "evalSync.end", opId, ok: true });
-            return hydrateFromWire(raw);
+            return hydrateFromWire(raw) as T;
         } catch (e) {
             const hydrated = hydrateFromWire(e);
             this.emitRuntimeEvent({ kind: "evalSync.end", opId, ok: false });
@@ -2946,7 +3107,8 @@ export class DenoWorker {
     private async moduleApiImport<T extends Record<string, any> = Record<string, any>>(specifier: string): Promise<T> {
         await this.startupPromise;
         const spec = String(specifier);
-        if (this.creationOptions?.permissions?.wasm === false && this.isWasmSpecifier(spec)) {
+        const permissions = this.creationOptions?.permissions;
+        if (permissions && typeof permissions === "object" && permissions.wasm === false && this.isWasmSpecifier(spec)) {
             throw new Error(`WASM module loading is disabled by permissions.wasm: ${spec}`);
         }
 

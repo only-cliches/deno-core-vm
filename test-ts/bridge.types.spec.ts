@@ -47,7 +47,7 @@ describe("bridge: expanded types", () => {
   test("Node -> Deno: BigInt", async () => {
     const dw = createTestWorker({ console: false });
     try {
-      await dw.setGlobal("x", 9007199254740993n);
+      await dw.global.set("x", 9007199254740993n);
       expect(await dw.eval("typeof x")).toBe("bigint");
       expect(await dw.eval("x + 2n")).toBe(9007199254740995n);
     } finally {
@@ -70,7 +70,7 @@ describe("bridge: expanded types", () => {
     const dw = createTestWorker({ console: false });
     try {
       const d = new Date(1700000000000);
-      await dw.setGlobal("d", d);
+      await dw.global.set("d", d);
       expect(await dw.eval("d instanceof Date")).toBe(true);
       expect(await dw.eval("d.getTime()")).toBe(1700000000000);
     } finally {
@@ -94,7 +94,7 @@ describe("bridge: expanded types", () => {
   test("Node -> Deno: RegExp", async () => {
     const dw = createTestWorker({ console: false });
     try {
-      await dw.setGlobal("r", /a+b/gi);
+      await dw.global.set("r", /a+b/gi);
       expect(await dw.eval("r instanceof RegExp")).toBe(true);
       expect(await dw.eval("r.test('AAB')")).toBe(true);
     } finally {
@@ -120,7 +120,7 @@ describe("bridge: expanded types", () => {
     try {
       const ab = new ArrayBuffer(3);
       new Uint8Array(ab).set([7, 8, 9]);
-      await dw.setGlobal("ab", ab);
+      await dw.global.set("ab", ab);
       expect(await dw.eval("ab instanceof ArrayBuffer")).toBe(true);
       expect(await dw.eval("Array.from(new Uint8Array(ab))")).toEqual([7, 8, 9]);
     } finally {
@@ -193,14 +193,14 @@ describe("bridge: expanded types", () => {
     const dw = createTestWorker({ console: false });
     try {
       const i16 = new Int16Array([1, 2, 3]);
-      await dw.setGlobal("i16", i16);
+      await dw.global.set("i16", i16);
       expect(await dw.eval("i16 instanceof Int16Array")).toBe(true);
       expect(await dw.eval("i16[1]")).toBe(2);
 
       const ab = new ArrayBuffer(4);
       const dv = new DataView(ab);
       dv.setUint32(0, 0x01020304, false);
-      await dw.setGlobal("dv", dv);
+      await dw.global.set("dv", dv);
       expect(await dw.eval("dv instanceof DataView")).toBe(true);
       expect(await dw.eval("dv.getUint32(0, false)")).toBe(0x01020304);
     } finally {
@@ -243,7 +243,7 @@ describe("bridge: expanded types", () => {
         [2, "b"],
         [true, false],
       ]);
-      await dw.setGlobal("m", m);
+      await dw.global.set("m", m);
       expect(await dw.eval("m instanceof Map")).toBe(true);
       expect(await dw.eval("m.get('a')")).toBe(1);
       expect(await dw.eval("m.get(2)")).toBe("b");
@@ -267,7 +267,7 @@ describe("bridge: expanded types", () => {
     const dw = createTestWorker({ console: false });
     try {
       const s = new Set<any>([1, "a", true]);
-      await dw.setGlobal("s", s);
+      await dw.global.set("s", s);
       expect(await dw.eval("s instanceof Set")).toBe(true);
       expect(await dw.eval("s.has(1)")).toBe(true);
       expect(await dw.eval("s.has('a')")).toBe(true);
@@ -320,14 +320,14 @@ describe("bridge: expanded types", () => {
     const dw = createTestWorker({ console: false });
     try {
       const url = new URL("https://example.com/a?b=c");
-      await dw.setGlobal("u", url);
+      await dw.global.set("u", url);
 
       expect(await dw.eval("u instanceof URL")).toBe(true);
       expect(await dw.eval("u.href")).toBe("https://example.com/a?b=c");
       expect(await dw.eval("u.searchParams.get('b')")).toBe("c");
 
       const usp = new URLSearchParams("a=1&b=2");
-      await dw.setGlobal("usp", usp);
+      await dw.global.set("usp", usp);
       expect(await dw.eval("usp instanceof URLSearchParams")).toBe(true);
       expect(await dw.eval("usp.get('a')")).toBe("1");
       expect(await dw.eval("usp.get('b')")).toBe("2");

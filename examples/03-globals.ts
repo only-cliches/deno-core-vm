@@ -3,8 +3,8 @@ import { DenoWorker } from "../src/index";
 async function main() {
     const worker = new DenoWorker();
     try {
-        await worker.setGlobal("APP_NAME", "deno-director");
-        await worker.setGlobal("double", (x: number) => x * 2);
+        await worker.global.set("APP_NAME", "deno-director");
+        await worker.global.set("double", (x: number) => x * 2);
 
         const out = await worker.eval(`
             ({

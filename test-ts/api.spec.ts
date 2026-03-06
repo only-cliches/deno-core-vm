@@ -125,7 +125,7 @@ describe("DenoWorker API", () => {
   });
 
   test("close({ force: true }) rejects in-flight API promises promptly", async () => {
-    await dw.setGlobal(
+    await dw.global.set(
       "nodeDelay",
       async () => {
         await sleep(200);
@@ -153,7 +153,7 @@ describe("DenoWorker API", () => {
   });
 
   test("restart({ force: true }) rejects in-flight work and boots a fresh runtime", async () => {
-    await dw.setGlobal(
+    await dw.global.set(
       "nodeDelay",
       async () => {
         await sleep(200);

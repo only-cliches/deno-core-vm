@@ -6,7 +6,7 @@ Simple usage examples for `deno-director`.
 
 - `01-basic-eval.ts`: basic `eval` and `evalSync`.
 - `02-eval-module.ts`: `worker.module.eval` and export access.
-- `03-globals.ts`: inject globals/functions with `setGlobal`.
+- `03-globals.ts`: inject globals/functions with `global.set`.
 - `04-messages.ts`: worker `postMessage` + host `message` listener.
 - `05-imports-callback.ts`: custom import callback and virtual modules.
 - `06-https-imports.ts`: remote HTTPS imports.

@@ -277,8 +277,21 @@ export function mergeWorkerOptions(base?: DenoWorkerOptions, overrides?: DenoWor
     if (!base && !overrides) return undefined;
     const out: DenoWorkerOptions = { ...(base ?? {}), ...(overrides ?? {}) };
 
-    if (base?.permissions || overrides?.permissions) {
-        out.permissions = { ...(base?.permissions ?? {}), ...(overrides?.permissions ?? {}) };
+    if (base?.permissions !== undefined || overrides?.permissions !== undefined) {
+        const basePerms = base?.permissions;
+        const overridePerms = overrides?.permissions;
+        if (typeof overridePerms === "boolean") {
+            out.permissions = overridePerms;
+        }
+        else if (typeof basePerms === "boolean") {
+            out.permissions = overridePerms ?? basePerms;
+        }
+        else if (basePerms && overridePerms) {
+            out.permissions = { ...basePerms, ...overridePerms };
+        }
+        else {
+            out.permissions = (overridePerms ?? basePerms) as any;
+        }
     }
 
     if (base?.lifecycle || overrides?.lifecycle) {

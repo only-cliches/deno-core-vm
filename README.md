@@ -56,7 +56,7 @@ const worker = new DenoWorker({
 });
 
 // 2. Drop an ASYNC Node.js function into Deno's global scope
-await worker.setGlobal("hostFetchData", async (userId: string) => {
+await worker.global.set("hostFetchData", async (userId: string) => {
     console.log(`[Node.js] Deno asked for data for ${userId}. Fetching securely...`);
 
     // Simulate an async database or API call on the Node side
@@ -136,7 +136,7 @@ await director.stopByLabel("tenant-a");
 
 ### 🌉 The Transdimensional Bridge
 
-When you pass data between Node and Deno using `eval`, `evalSync`, or `setGlobal`, Deno Director doesn't just `JSON.stringify`. It uses a complex custom codec backed by V8 serialization.
+When you pass data between Node and Deno using `eval`, `evalSync`, or `global.set`, Deno Director doesn't just `JSON.stringify`. It uses a complex custom codec backed by V8 serialization.
 
 * `NaN`, `Infinity`, `-0`? Preserved.
 * `Uint8Array`, `DataView`, `SharedArrayBuffer`? Passed instantly via underlying memory views.
@@ -307,8 +307,8 @@ const worker = new DenoWorker({
 });
 
 // ...but we can smuggle Node's `fs` module in anyway!
-await worker.setGlobal("nodeFs", fs);
-await worker.setGlobal("nodeCrypto", crypto);
+await worker.global.set("nodeFs", fs);
+await worker.global.set("nodeCrypto", crypto);
 
 const result = await worker.eval(`
   // Calling Node.js fs functions from inside Deno!
@@ -549,11 +549,11 @@ The core runtime isolate. Maps 1:1 with a V8 Thread.
 
 #### **Execution Methods**
 
-* `eval(src: string, options?: EvalOptions): Promise<any>`
+* `eval<T = any>(src: string, options?: EvalOptions): Promise<T>`
 Evaluates JavaScript or TypeScript asynchronously.
-* `evalSync(src: string, options?: EvalOptions): any`
+* `evalSync<T = any>(src: string, options?: EvalOptions): T`
 Evaluates JavaScript or TypeScript synchronously (blocks Node event loop while waiting).
-* `module.eval<T>(src: string, options?: EvalOptions & { moduleName?: string }): Promise<T>`
+* `module.eval<T>(src: string, options?: DenoWorkerModuleEvalOptions): Promise<T>`
 Evaluates the source as an ES Module and returns a callable Proxy namespace to the exports.
 * `module.register(moduleName: string, source: string): Promise<void>`
 Registers source under a module name for future imports.
@@ -569,8 +569,44 @@ When `transpileTs: true` is enabled, all three evaluation entrypoints (`eval`, `
 
 #### **Environment & Memory**
 
-* `setGlobal(key: string, value: any): Promise<void>`
-Injects a value or function into the `globalThis` of the Deno isolate.
+`worker.global` mirrors the handle operation surface, rooted at `globalThis`.
+
+* `global.set(path: string, value: any, options?: DenoWorkerHandleExecOptions): Promise<void>`
+Set a global value by dot-path.
+* `global.get<T = any>(path: string, options?: DenoWorkerHandleExecOptions): Promise<T>`
+Read a global value by dot-path.
+* `global.has(path: string, options?: DenoWorkerHandleExecOptions): Promise<boolean>`
+Check if a global path exists.
+* `global.delete(path: string, options?: DenoWorkerHandleExecOptions): Promise<boolean>`
+Delete a global path.
+* `global.keys(path?: string, options?: DenoWorkerHandleExecOptions): Promise<any[]>`
+Return keys from `globalThis` root or nested path.
+* `global.entries(path?: string, options?: DenoWorkerHandleExecOptions): Promise<any[]>`
+Return entries from `globalThis` root or nested path.
+* `global.getOwnPropertyDescriptor(path: string, options?: DenoWorkerHandleExecOptions): Promise<PropertyDescriptor | undefined>`
+Read a property descriptor from a global path.
+* `global.define(path: string, descriptor: PropertyDescriptor, options?: DenoWorkerHandleExecOptions): Promise<boolean>`
+Define a property descriptor at a global path.
+* `global.isCallable(path?: string, options?: DenoWorkerHandleExecOptions): Promise<boolean>`
+Check whether a global value is callable.
+* `global.isPromise(path?: string, options?: DenoWorkerHandleExecOptions): Promise<boolean>`
+Check whether a global value is promise-like.
+* `global.call<T = any>(path: string, args?: any[], options?: DenoWorkerHandleExecOptions): Promise<T>`
+Call a global function by path.
+* `global.construct<T = any>(path: string, args?: any[], options?: DenoWorkerHandleExecOptions): Promise<T>`
+Construct a global constructor by path.
+* `global.await<T = any>(path: string, options?: DenoWorkerHandleAwaitOptions & DenoWorkerHandleExecOptions): Promise<T>`
+Await a global promise-like value by path.
+* `global.clone(path: string, options?: DenoWorkerHandleExecOptions): Promise<DenoWorkerHandle>`
+Create a durable handle from a global path.
+* `global.toJSON<T = any>(path?: string, options?: DenoWorkerHandleExecOptions): Promise<T>`
+Return a JSON snapshot from global root or nested path.
+* `global.apply<T = any[]>(path: string, ops: DenoWorkerHandleApplyOp[], options?: DenoWorkerHandleExecOptions): Promise<T>`
+Run batched handle operations against a global path root in one roundtrip.
+* `global.getType(path?: string, options?: DenoWorkerHandleExecOptions): Promise<DenoWorkerHandleTypeInfo>`
+Read runtime type metadata for global root or nested path.
+* `global.instanceOf(path: string, constructorPath: string, options?: DenoWorkerHandleExecOptions): Promise<boolean>`
+Check `instanceof` against a constructor path.
 * `memory(): Promise<DenoWorkerMemory>`
 Returns granular V8 heap statistics (`totalHeapSize`, `mallocedMemory`, etc.).
 * `lastExecutionStats: { cpuTimeMs?: number, evalTimeMs?: number }`
@@ -612,7 +648,7 @@ type DenoWorkerOptions = {
   };
   cwd?: string;                 // Virtual root for the filesystem sandbox
   startup?: string;             // Script evaluated before user code runs
-  permissions?: {               // Deno secure sandbox permissions
+  permissions?: boolean | {     // true=allow all, false=deny all, or per-capability config
     read?: boolean | string[];  // Allow read everywhere, or specific paths
     write?: boolean | string[]; // Allow write everywhere, or specific paths
     net?: boolean | string[];   // Allow network, or specific domains/ports
@@ -649,25 +685,6 @@ type DenoWorkerOptions = {
 
 `bridge.channelSize` applies independently to multiple internal queues (control-plane, data-plane, and node callback dispatch), not a single shared queue. Under heavy load, total buffered slots can approach roughly `3 * channelSize`.
 `bridge.streamBacklogLimit` caps worker->Node stream opens that arrive before the host side accepts the lane; excess opens are rejected to bound host memory growth.
-
-### 🧩 `nodeCompat` vs `moduleLoader.nodeResolve`
-
-Both options affect how bare specifiers (for example, `"lodash"` or `"pkg/subpath"`) are resolved.
-
-- `moduleLoader.nodeResolve: true`
-  - Enables Node-style disk/package resolution for imports.
-  - This is the explicit import-resolution switch and the preferred option when you only need Node-like module lookup.
-
-- `nodeCompat: true`
-  - Enables broader Node compatibility behavior in the runtime.
-  - Also enables Node-style module resolution behavior for imports.
-  - Use this when you want Node compatibility semantics beyond just resolving packages.
-
-Current behavior notes:
-
-- If both are `false`/unset, unresolved bare imports are rejected.
-- If either is enabled, bare package resolution is allowed.
-- `moduleLoader.nodeResolve` is more targeted; `nodeCompat` is the broader compatibility mode.
 
 ## Notes
 

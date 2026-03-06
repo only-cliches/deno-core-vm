@@ -145,7 +145,7 @@ describe("DenoWorker stress and backpressure", () => {
 
         try {
             const double = jest.fn((x: number) => x * 2);
-            await dw.setGlobal("double", double);
+            await dw.global.set("double", double);
 
             const N = 250;
             const results = await Promise.all(
@@ -172,7 +172,7 @@ describe("DenoWorker stress and backpressure", () => {
                 await sleep(2);
                 return x + 1;
             });
-            await dw.setGlobal("addAsync", addAsync);
+            await dw.global.set("addAsync", addAsync);
 
             const N = 100;
             const results = await Promise.all(

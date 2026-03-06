@@ -87,7 +87,7 @@ describe("deno_worker: contention", () => {
 
       try {
         await Promise.all(
-          workers.map((dw, idx) => dw.setGlobal("hostBump", (n: number) => n + idx)),
+          workers.map((dw, idx) => dw.global.set("hostBump", (n: number) => n + idx)),
         );
 
         const perWorkerTasks = workers.map(async (dw, idx) => {
@@ -178,7 +178,7 @@ describe("deno_worker: contention", () => {
 
       try {
         await Promise.all(
-          workers.map((dw, idx) => dw.setGlobal("hostBump", (n: number) => n + idx)),
+          workers.map((dw, idx) => dw.global.set("hostBump", (n: number) => n + idx)),
         );
 
         const perWorker = workers.map(async (dw, idx) => {
@@ -278,7 +278,7 @@ describe("deno_worker: contention", () => {
       const startAt = Date.now() + 800;
 
       try {
-        await dw.setGlobal("hostInc", (n: number) => n + 1);
+        await dw.global.set("hostInc", (n: number) => n + 1);
 
         const pairData = Array.from({ length: pairs }, (_x, i) => ({
           up: `extreme-up-${i}`,
@@ -384,7 +384,7 @@ describe("deno_worker: contention", () => {
 
       try {
         await Promise.all(
-          workers.map((dw, idx) => dw.setGlobal("hostMix", (n: number) => n + idx)),
+          workers.map((dw, idx) => dw.global.set("hostMix", (n: number) => n + idx)),
         );
 
         for (let wave = 0; wave < waves; wave += 1) {

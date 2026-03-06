@@ -137,7 +137,7 @@ describe("module.eval: module namespace API", () => {
   test("async module exports do not deadlock when awaiting async host callbacks", async () => {
     const dw = createTestWorker({ console: false });
     try {
-      await dw.setGlobal("hostFetchData", async (userId: string) => {
+      await dw.global.set("hostFetchData", async (userId: string) => {
         await new Promise((resolve) => setTimeout(resolve, 25));
         return { id: userId, secret: "super_classified_payload" };
       });
@@ -169,7 +169,7 @@ describe("module.eval: module namespace API", () => {
     async () => {
       const dw = createTestWorker({ console: false });
       try {
-        await dw.setGlobal("hostDouble", (x: number) => x * 2);
+        await dw.global.set("hostDouble", (x: number) => x * 2);
 
         const mod = await dw.module.eval(`
           export function run() {

@@ -133,6 +133,9 @@ export type DenoPermissions = {
     wasm?: boolean;
 };
 
+/** Runtime permissions config can be a detailed object or an all-on/all-off boolean shorthand. */
+export type DenoPermissionsConfig = DenoPermissions | boolean;
+
 export type DenoConsoleMethod = "log" | "info" | "warn" | "error" | "debug" | "trace";
 /**
  * Console callback type used by {@link DenoWorkerConsoleOption}.
@@ -253,7 +256,7 @@ export type DenoWorkerBridgeOption =
              * Per-queue capacity for internal host/runtime bridge channels.
              *
              * The runtime currently maintains separate bounded queues for:
-             * - control-plane work (`eval`, `setGlobal`, `memory`, `close`)
+             * - control-plane work (`eval`, `global.set`, `memory`, `close`)
              * - data-plane work (`postMessage` and stream envelopes)
              * - node callback dispatch (`message`/`close`/host-callback settlements)
              *
@@ -462,7 +465,7 @@ export type DenoWorkerOptions = {
      *
      * Use `true` for allow-all, `false` for deny-all, or `string[]` allow-lists.
      */
-    permissions?: DenoPermissions;
+    permissions?: DenoPermissionsConfig;
 
     /** Enable broader Node compatibility helpers. */
     nodeCompat?: boolean;
@@ -868,7 +871,7 @@ export type DenoWorkerHandle = {
     /** True after `dispose()` is called or worker lifecycle invalidates the handle. */
     readonly disposed: boolean;
     /** Get the handle root or a nested property under the handle root (`a.b.c` dot notation). */
-    get(path?: string, options?: DenoWorkerHandleExecOptions): Promise<any>;
+    get<T = any>(path?: string, options?: DenoWorkerHandleExecOptions): Promise<T>;
     /** Returns true when a nested path exists under the handle root (`a.b.c` dot notation). */
     has(path: string, options?: DenoWorkerHandleExecOptions): Promise<boolean>;
     /** Set a nested property under the handle root (`a.b.c` dot notation). */
@@ -890,22 +893,22 @@ export type DenoWorkerHandle = {
     /** Return true when root value (or nested path value) is promise-like (`then` function). */
     isPromise(path?: string, options?: DenoWorkerHandleExecOptions): Promise<boolean>;
     /** Call the handle root function with args. */
-    call(args?: any[], options?: DenoWorkerHandleExecOptions): Promise<any>;
+    call<T = any>(args?: any[], options?: DenoWorkerHandleExecOptions): Promise<T>;
     /** Call a nested function path under the handle root with args (`a.b.c` dot notation). */
-    call(path: string, args?: any[], options?: DenoWorkerHandleExecOptions): Promise<any>;
+    call<T = any>(path: string, args?: any[], options?: DenoWorkerHandleExecOptions): Promise<T>;
     /** Construct a new value with root function/class as constructor. */
-    construct(args?: any[], options?: DenoWorkerHandleExecOptions): Promise<any>;
+    construct<T = any>(args?: any[], options?: DenoWorkerHandleExecOptions): Promise<T>;
     /** Await root value and update handle root to the resolved value. */
-    await(options?: DenoWorkerHandleAwaitOptions & DenoWorkerHandleExecOptions): Promise<any>;
+    await<T = any>(options?: DenoWorkerHandleAwaitOptions & DenoWorkerHandleExecOptions): Promise<T>;
     /** Clone this handle to a new handle id that references the same runtime value. */
     clone(options?: DenoWorkerHandleExecOptions): Promise<DenoWorkerHandle>;
     /** JSON snapshot for root or nested path value. */
-    toJSON(path?: string, options?: DenoWorkerHandleExecOptions): Promise<any>;
+    toJSON<T = any>(path?: string, options?: DenoWorkerHandleExecOptions): Promise<T>;
     /**
      * Apply a sequence of operations in one runtime roundtrip.
      * Supported op kinds: `get`, `set`, `call`, `has`, `delete`, `getType`, `toJSON`, `isCallable`, `isPromise`.
      */
-    apply(ops: DenoWorkerHandleApplyOp[], options?: DenoWorkerHandleExecOptions): Promise<any[]>;
+    apply<T = any[]>(ops: DenoWorkerHandleApplyOp[], options?: DenoWorkerHandleExecOptions): Promise<T>;
     /** Return type metadata for the root value or nested property. */
     getType(path?: string, options?: DenoWorkerHandleExecOptions): Promise<DenoWorkerHandleTypeInfo>;
     /** Release runtime-side handle reference. Idempotent. */
@@ -933,6 +936,46 @@ export type DenoWorkerHandleApi = {
      * `options.maxEvalMs` is used both for creation and as the handle-level default timeout for subsequent handle calls.
      */
     eval(source: string, options?: Omit<EvalOptions, "args" | "type">): Promise<DenoWorkerHandle>;
+};
+
+/** Global namespace exposed on `DenoWorker.global`. */
+export type DenoWorkerGlobalApi = {
+    /** Set a global value by path rooted at `globalThis` (`a.b.c` dot notation). */
+    set(path: string, value: any, options?: DenoWorkerHandleExecOptions): Promise<void>;
+    /** Read a global value by path rooted at `globalThis` (`a.b.c` dot notation). */
+    get<T = any>(path: string, options?: DenoWorkerHandleExecOptions): Promise<T>;
+    /** Returns true when a global path exists (`a.b.c` dot notation). */
+    has(path: string, options?: DenoWorkerHandleExecOptions): Promise<boolean>;
+    /** Delete a global path (`a.b.c` dot notation). */
+    delete(path: string, options?: DenoWorkerHandleExecOptions): Promise<boolean>;
+    /** Return enumerable keys for `globalThis` root or nested global path. */
+    keys(path?: string, options?: DenoWorkerHandleExecOptions): Promise<any[]>;
+    /** Return entries for `globalThis` root or nested global path. */
+    entries(path?: string, options?: DenoWorkerHandleExecOptions): Promise<any[]>;
+    /** Return own-property descriptor for a global path (`a.b.c` dot notation). */
+    getOwnPropertyDescriptor(path: string, options?: DenoWorkerHandleExecOptions): Promise<PropertyDescriptor | undefined>;
+    /** Define a global property via descriptor semantics (`a.b.c` dot notation). */
+    define(path: string, descriptor: PropertyDescriptor, options?: DenoWorkerHandleExecOptions): Promise<boolean>;
+    /** Check whether a global value is callable. */
+    isCallable(path?: string, options?: DenoWorkerHandleExecOptions): Promise<boolean>;
+    /** Check whether a global value is promise-like (`then` function). */
+    isPromise(path?: string, options?: DenoWorkerHandleExecOptions): Promise<boolean>;
+    /** Call a global function by path rooted at `globalThis` (`a.b.c` dot notation). */
+    call<T = any>(path: string, args?: any[], options?: DenoWorkerHandleExecOptions): Promise<T>;
+    /** Construct a global constructor by path rooted at `globalThis` (`a.b.c` dot notation). */
+    construct<T = any>(path: string, args?: any[], options?: DenoWorkerHandleExecOptions): Promise<T>;
+    /** Await a global promise-like value by path rooted at `globalThis` (`a.b.c` dot notation). */
+    await<T = any>(path: string, options?: DenoWorkerHandleAwaitOptions & DenoWorkerHandleExecOptions): Promise<T>;
+    /** Clone a global value path into a durable runtime handle. */
+    clone(path: string, options?: DenoWorkerHandleExecOptions): Promise<DenoWorkerHandle>;
+    /** JSON snapshot for `globalThis` root or nested global path. */
+    toJSON<T = any>(path?: string, options?: DenoWorkerHandleExecOptions): Promise<T>;
+    /** Apply a sequence of operations against a global path root in one runtime roundtrip. */
+    apply<T = any[]>(path: string, ops: DenoWorkerHandleApplyOp[], options?: DenoWorkerHandleExecOptions): Promise<T>;
+    /** Return type metadata for `globalThis` root or nested global path. */
+    getType(path?: string, options?: DenoWorkerHandleExecOptions): Promise<DenoWorkerHandleTypeInfo>;
+    /** Check global value `instanceof` a constructor path rooted at `globalThis`. */
+    instanceOf(path: string, constructorPath: string, options?: DenoWorkerHandleExecOptions): Promise<boolean>;
 };
 
 /**
@@ -975,12 +1018,12 @@ export type NativeWorker = {
     setGlobal(key: string, value: any): Promise<void>;
 
     /** Evaluate script/module source asynchronously. */
-    eval(src: string, options?: EvalOptions): Promise<any>;
+    eval<T = any>(src: string, options?: EvalOptions): Promise<T>;
     /** Evaluate source synchronously. */
-    evalSync(src: string, options?: EvalOptions): any;
+    evalSync<T = any>(src: string, options?: EvalOptions): T;
 
     /** Evaluate source as module and resolve module result/namespace. */
-    evalModule?: (src: string, options?: EvalOptions) => Promise<any>;
+    evalModule?: <T = any>(src: string, options?: EvalOptions) => Promise<T>;
     registerModule?: (moduleName: string, source: string) => Promise<void>;
     clearModule?: (moduleName: string) => Promise<boolean>;
 
