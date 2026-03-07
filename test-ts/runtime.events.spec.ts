@@ -129,8 +129,8 @@ describe("DenoWorker runtime events", () => {
         expect(msg).toMatch(/Code context \(/);
         const count = (msg.match(/Code context \(/g) || []).length;
         expect(count).toBeGreaterThanOrEqual(2);
-        expect(String(err?.codeContext?.specifier?.friendlyName ?? "")).toBe("stacked-error.js");
-        expect(String(err?.codeContext?.specifier?.denoSysName ?? "")).toContain("denojs-worker://virtual/__named_");
+        expect(String(err?.codeContext?.srcFileName ?? "")).toBe("stacked-error.js");
+        expect(String(err?.codeContext?.srcDenoRef ?? "")).toContain("denojs-worker://virtual/__named_");
       }
     } finally {
       await dw.close();

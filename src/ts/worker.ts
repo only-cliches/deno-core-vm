@@ -1538,9 +1538,16 @@ export class DenoWorker {
             if (missingMessageBlocks.length > 0) {
                 error.message = `${messageText}\n${missingMessageBlocks.join("\n\n")}`;
             }
-            (error as any).codeContext = { specifier: first.specifierInfo, line: first.line, column: first.column, frame: first.frame };
+            (error as any).codeContext = {
+                srcFileName: first.specifierInfo.friendlyName,
+                srcDenoRef: first.specifierInfo.denoSysName,
+                line: first.line,
+                column: first.column,
+                frame: first.frame,
+            };
             (error as any).codeContexts = contexts.map((c) => ({
-                specifier: c.specifierInfo,
+                srcFileName: c.specifierInfo.friendlyName,
+                srcDenoRef: c.specifierInfo.denoSysName,
                 line: c.line,
                 column: c.column,
                 frame: c.frame,
@@ -1560,9 +1567,16 @@ export class DenoWorker {
             if (missingStackBlocks.length > 0) {
                 e.stack = `${stackText}\n${missingStackBlocks.join("\n\n")}`;
             }
-            (e as any).codeContext = { specifier: first.specifierInfo, line: first.line, column: first.column, frame: first.frame };
+            (e as any).codeContext = {
+                srcFileName: first.specifierInfo.friendlyName,
+                srcDenoRef: first.specifierInfo.denoSysName,
+                line: first.line,
+                column: first.column,
+                frame: first.frame,
+            };
             (e as any).codeContexts = contexts.map((c) => ({
-                specifier: c.specifierInfo,
+                srcFileName: c.specifierInfo.friendlyName,
+                srcDenoRef: c.specifierInfo.denoSysName,
                 line: c.line,
                 column: c.column,
                 frame: c.frame,
