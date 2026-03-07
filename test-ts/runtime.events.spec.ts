@@ -105,4 +105,32 @@ describe("DenoWorker runtime events", () => {
       await dw.close();
     }
   });
+
+  test("module.import errors include code context for multiple stack frames", async () => {
+    const dw = createTestWorker();
+
+    try {
+      expect.assertions(2);
+      await dw.module.register(
+        "named:stacked-error",
+        `
+          function a() { b(); }
+          function b() { c(); }
+          function c() { throw new Error("boom"); }
+          a();
+          export const ok = true;
+        `,
+      );
+      try {
+        await dw.module.import("named:stacked-error");
+      } catch (e) {
+        const msg = String((e as any)?.message ?? "");
+        expect(msg).toMatch(/Code context \(/);
+        const count = (msg.match(/Code context \(/g) || []).length;
+        expect(count).toBeGreaterThanOrEqual(2);
+      }
+    } finally {
+      await dw.close();
+    }
+  });
 });

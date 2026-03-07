@@ -1409,15 +1409,28 @@ export class DenoWorker {
         return m?.[1] || null;
     }
 
-    /** Parses first `url:line:column` frame from an Error-like value. */
-    private parseErrorLocation(error: unknown): { specifier: string; line: number; column: number } | null {
-        const text = error instanceof Error ? `${String(error.message ?? "")}\n${String(error.stack ?? "")}` : String(error ?? "");
-        const m = text.match(/((?:denojs-worker|file):\/\/[^\s)\]]+):(\d+):(\d+)/);
-        if (!m) return null;
-        const line = Number(m[2]);
-        const column = Number(m[3]);
-        if (!Number.isFinite(line) || line < 1 || !Number.isFinite(column) || column < 1) return null;
-        return { specifier: m[1], line, column };
+    /** Parses all stack `url:line:column` frames from an Error-like value (deduped, in order). */
+    private parseErrorLocations(error: unknown): Array<{ specifier: string; line: number; column: number }> {
+        const text = error instanceof Error
+            ? String(error.stack ?? error.message ?? "")
+            : typeof (error as any)?.stack === "string"
+                ? String((error as any).stack)
+                : String(error ?? "");
+        const re = /((?:denojs-worker|file):\/\/[^\s)\]]+):(\d+):(\d+)/g;
+        const out: Array<{ specifier: string; line: number; column: number }> = [];
+        const seen = new Set<string>();
+        for (const m of text.matchAll(re)) {
+            const specifier = String(m[1] ?? "");
+            const line = Number(m[2]);
+            const column = Number(m[3]);
+            if (!specifier) continue;
+            if (!Number.isFinite(line) || line < 1 || !Number.isFinite(column) || column < 1) continue;
+            const key = `${specifier}:${line}:${column}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            out.push({ specifier, line, column });
+        }
+        return out;
     }
 
     /** Builds a small code frame around a 1-based source location. */
@@ -1456,39 +1469,63 @@ export class DenoWorker {
 
     /** Adds code context around runtime errors when location and source are available. */
     private enrichErrorWithCodeContext(error: unknown, sourceHint?: string): unknown {
-        const loc = this.parseErrorLocation(error);
-        if (!loc) return error;
-        const source = this.sourceForErrorSpecifier(loc.specifier, sourceHint);
-        if (!source) return error;
-        const frame = this.buildCodeFrame(source, loc.line, loc.column);
-        if (!frame) return error;
-
-        const header = `Code context (${loc.specifier}:${loc.line}:${loc.column})`;
-        const block = `${header}\n${frame}`;
+        const locations = this.parseErrorLocations(error);
+        if (locations.length === 0) return error;
+        const contexts: Array<{ specifier: string; line: number; column: number; frame: string; header: string; block: string }> = [];
+        for (const loc of locations) {
+            const source = this.sourceForErrorSpecifier(loc.specifier, sourceHint);
+            if (!source) continue;
+            const frame = this.buildCodeFrame(source, loc.line, loc.column);
+            if (!frame) continue;
+            const header = `Code context (${loc.specifier}:${loc.line}:${loc.column})`;
+            contexts.push({ specifier: loc.specifier, line: loc.line, column: loc.column, frame, header, block: `${header}\n${frame}` });
+        }
+        if (contexts.length === 0) return error;
+        const first = contexts[0];
         if (error instanceof Error) {
-            if (!String(error.stack ?? "").includes(header)) {
-                error.stack = `${String(error.stack ?? error.message ?? "Error")}\n${block}`;
+            const stackText = String(error.stack ?? error.message ?? "Error");
+            const missingStackBlocks = contexts.filter((c) => !stackText.includes(c.header)).map((c) => c.block);
+            if (missingStackBlocks.length > 0) {
+                error.stack = `${stackText}\n${missingStackBlocks.join("\n\n")}`;
             }
-            if (!String(error.message ?? "").includes(header)) {
-                error.message = `${String(error.message ?? "")}\n${block}`;
+            const messageText = String(error.message ?? "");
+            const missingMessageBlocks = contexts.filter((c) => !messageText.includes(c.header)).map((c) => c.block);
+            if (missingMessageBlocks.length > 0) {
+                error.message = `${messageText}\n${missingMessageBlocks.join("\n\n")}`;
             }
-            (error as any).codeContext = { specifier: loc.specifier, line: loc.line, column: loc.column, frame };
+            (error as any).codeContext = { specifier: first.specifier, line: first.line, column: first.column, frame: first.frame };
+            (error as any).codeContexts = contexts.map((c) => ({
+                specifier: c.specifier,
+                line: c.line,
+                column: c.column,
+                frame: c.frame,
+            }));
             return error;
         }
 
         if (error && typeof error === "object") {
             const e = error as Record<string, unknown>;
-            if (typeof e.message === "string" && !e.message.includes(header)) {
-                e.message = `${e.message}\n${block}`;
+            const messageText = typeof e.message === "string" ? e.message : "";
+            const missingMessageBlocks = contexts.filter((c) => !messageText.includes(c.header)).map((c) => c.block);
+            if (missingMessageBlocks.length > 0) {
+                e.message = `${messageText}\n${missingMessageBlocks.join("\n\n")}`;
             }
-            if (typeof e.stack === "string" && !e.stack.includes(header)) {
-                e.stack = `${e.stack}\n${block}`;
+            const stackText = typeof e.stack === "string" ? e.stack : "";
+            const missingStackBlocks = contexts.filter((c) => !stackText.includes(c.header)).map((c) => c.block);
+            if (missingStackBlocks.length > 0) {
+                e.stack = `${stackText}\n${missingStackBlocks.join("\n\n")}`;
             }
-            (e as any).codeContext = { specifier: loc.specifier, line: loc.line, column: loc.column, frame };
+            (e as any).codeContext = { specifier: first.specifier, line: first.line, column: first.column, frame: first.frame };
+            (e as any).codeContexts = contexts.map((c) => ({
+                specifier: c.specifier,
+                line: c.line,
+                column: c.column,
+                frame: c.frame,
+            }));
             return e;
         }
 
-        return new Error(`${String(error ?? "Error")}\n${block}`);
+        return new Error(`${String(error ?? "Error")}\n${contexts.map((c) => c.block).join("\n\n")}`);
     }
 
     /** Constructs a new native worker instance and routes creation failures through crash hooks. */
