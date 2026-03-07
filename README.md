@@ -2,15 +2,15 @@
 
 # 🦕 Deno Director 🎬
 
-**Run Deno inside Node.js like you own both runtimes.**
-
-</div>
+**Run Deno inside Node.js like a boss.**
 
 [![GitHub Repo stars](https://img.shields.io/github/stars/only-cliches/deno-director)](https://github.com/only-cliches/deno-director)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.0+-blue.svg)](https://www.typescriptlang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-**Deno Director** is a native Rust/Neon bridge that lets your Node process spin up isolated Deno runtimes, execute TS/JSX directly, stream bytes, call functions both ways, and keep strict permission boundaries.
+</div>
+
+**Deno Director** is a native Rust/Neon bridge that lets your Node process spin up isolated Deno runtimes, execute TS/JSX directly, stream bytes between them, call functions both ways, and keep strict permission boundaries.
 
 You get one process, two ecosystems, and clean runtime seperation.
 

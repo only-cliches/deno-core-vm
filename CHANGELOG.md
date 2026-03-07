@@ -2,23 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.9.12] Mar 6, 2026
+## [0.9.20] Future
 
 ### Fixed
-- Hardened `permissions.net` / `permissions.import` host allow-list matching for IPv6 entries:
-  - bracketed IPv6 `host:port` values now enforce port constraints correctly
-  - malformed bracketed IPv6 entries are rejected instead of falling back to host-only matching
-- Hardened `envFile: true` loading to stay within the worker `cwd` sandbox:
-  - automatic `.env` discovery no longer traverses parent directories outside the configured worker cwd
 - Fixed package install flow for consumers by compiling the platform-specific native addon during install:
   - added package lifecycle `install` hook that runs the native build step and emits local `index.node`.
 - Fixed runtime observability gap for module evaluation failures:
   - `worker.module.eval(...)` now emits `error.thrown` runtime events with `surface: "module.eval"`.
 - Fixed Node-style disk resolution returning directory URLs for extensionless directory targets:
   - `moduleLoader.nodeResolve` now resolves directory imports via nested `package.json` (`module`/`main`) and `index.*` fallback.
+- Fixed CommonJS package interop gap for ESM named imports under Node-style resolution:
+  - added opt-in `moduleLoader.cjsInterop` to rewrite common transpiled CJS patterns into ESM exports at load time.
+  - `cjsInterop` now accepts `true` or `"esbuild"` mode values.
 
 ### Changed
-- Updated docs to reflect sandbox-bounded `envFile: true` behavior (cwd-local discovery).
 - Expanded `imports` callback return contract:
   - string return values are now supported as shorthand for `{ src: "...", srcLoader: "js" }`.
   - string shorthand now passes through `sourceLoaders` transforms the same way object `{ src, srcLoader }` returns do.
@@ -29,12 +26,27 @@ All notable changes to this project will be documented in this file.
   - emits `module.eval.begin` and `module.eval.end` on `on("runtime")` subscribers.
 
 ### Tests
-- Added IPv6 permission matching regression coverage in Rust module-loader tests.
-- Added `envFile: true` sandbox-boundary regression coverage in Jest inspect/env tests.
 - Added Jest coverage for `imports` callback string-shorthand returns with loader-transform parity.
 - Added Rust unit coverage for readable named virtual specifier formatting.
 - Added Jest coverage for `module.eval` runtime event/error telemetry.
 - Updated node-compat resolve tests to assert directory subpath resolution (`package.json` entry and `index.*` fallback).
+- Added node-compat resolve coverage for CJS interop behavior (`cjsInterop` enabled/disabled/`"esbuild"` mode value).
+
+## [0.9.12] Mar 6, 2026
+
+### Fixed
+- Hardened `permissions.net` / `permissions.import` host allow-list matching for IPv6 entries:
+  - bracketed IPv6 `host:port` values now enforce port constraints correctly
+  - malformed bracketed IPv6 entries are rejected instead of falling back to host-only matching
+- Hardened `envFile: true` loading to stay within the worker `cwd` sandbox:
+  - automatic `.env` discovery no longer traverses parent directories outside the configured worker cwd
+
+### Changed
+- Updated docs to reflect sandbox-bounded `envFile: true` behavior (cwd-local discovery).
+
+### Tests
+- Added IPv6 permission matching regression coverage in Rust module-loader tests.
+- Added `envFile: true` sandbox-boundary regression coverage in Jest inspect/env tests.
 
 ## [0.9.6] Mar 6, 2026
 

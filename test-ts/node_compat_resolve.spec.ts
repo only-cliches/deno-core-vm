@@ -317,4 +317,110 @@ describe("DenoWorker nodeResolve/nodeCompat", () => {
       }
     }
   );
+
+  test("nodeResolve: CJS package named exports fail by default (no interop)", async () => {
+    const dw = createTestWorker({
+      cwd: dir,
+      imports: true,
+      nodeCompat: true,
+      moduleLoader: { nodeResolve: true },
+    });
+
+    try {
+      await writeFile(
+        path.join(dir, "node_modules", "cjspkg", "package.json"),
+        JSON.stringify({ name: "cjspkg", version: "1.0.0", main: "index.js" }, null, 2)
+      );
+      await writeFile(
+        path.join(dir, "node_modules", "cjspkg", "index.js"),
+        `"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.Provider = exports.Storage = void 0;
+const Provider = "provider";
+exports.Provider = Provider;
+class Storage {}
+exports.Storage = Storage;
+`
+      );
+
+      const code = `
+        import { Provider, Storage } from "cjspkg";
+        export const out = [Provider, typeof Storage === "function"];
+      `;
+
+      await expect(dw.module.eval(code)).rejects.toThrow(/does not provide an export named 'Provider'/i);
+    } finally {
+      if (!dw.isClosed()) await dw.close();
+    }
+  });
+
+  test("nodeResolve: cjsInterop wraps CJS package for named ESM imports", async () => {
+    const dw = createTestWorker({
+      cwd: dir,
+      imports: true,
+      nodeCompat: true,
+      moduleLoader: { nodeResolve: true, cjsInterop: true },
+    });
+
+    try {
+      await writeFile(
+        path.join(dir, "node_modules", "cjspkg", "package.json"),
+        JSON.stringify({ name: "cjspkg", version: "1.0.0", main: "index.js" }, null, 2)
+      );
+      await writeFile(
+        path.join(dir, "node_modules", "cjspkg", "index.js"),
+        `"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.Provider = exports.Storage = void 0;
+const Provider = "provider";
+exports.Provider = Provider;
+class Storage {}
+exports.Storage = Storage;
+`
+      );
+
+      const code = `
+        import { Provider, Storage } from "cjspkg";
+        export const out = [Provider, typeof Storage === "function"];
+      `;
+
+      await expect(dw.module.eval(code)).resolves.toMatchObject({ out: ["provider", true] });
+    } finally {
+      if (!dw.isClosed()) await dw.close();
+    }
+  });
+
+  test("nodeResolve: cjsInterop accepts \"esbuild\" mode value", async () => {
+    const dw = createTestWorker({
+      cwd: dir,
+      imports: true,
+      nodeCompat: true,
+      moduleLoader: { nodeResolve: true, cjsInterop: "esbuild" },
+    });
+
+    try {
+      await writeFile(
+        path.join(dir, "node_modules", "cjspkg", "package.json"),
+        JSON.stringify({ name: "cjspkg", version: "1.0.0", main: "index.js" }, null, 2)
+      );
+      await writeFile(
+        path.join(dir, "node_modules", "cjspkg", "index.js"),
+        `"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.Provider = void 0;
+const Provider = "provider";
+exports.Provider = Provider;
+`
+      );
+
+      const code = `
+        import { Provider } from "cjspkg";
+        export const out = Provider;
+      `;
+
+      await expect(dw.module.eval(code)).resolves.toMatchObject({ out: "provider" });
+    } finally {
+      if (!dw.isClosed()) await dw.close();
+    }
+  });
 });

@@ -83,11 +83,20 @@ pub struct TsCompilerConfig {
     pub cache_dir: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CjsInteropMode {
+    #[default]
+    Disabled,
+    Builtin,
+    Esbuild,
+}
+
 #[derive(Debug, Clone)]
 pub struct ModuleLoaderConfig {
     pub https_resolve: bool,
     pub http_resolve: bool,
     pub node_resolve: bool,
+    pub cjs_interop: CjsInteropMode,
     pub jsr_resolve: bool,
     pub transpile_ts: bool,
     pub ts_compiler: Option<TsCompilerConfig>,
@@ -103,6 +112,7 @@ impl Default for ModuleLoaderConfig {
             https_resolve: false,
             http_resolve: false,
             node_resolve: false,
+            cjs_interop: CjsInteropMode::Disabled,
             jsr_resolve: false,
             transpile_ts: true,
             ts_compiler: None,
@@ -762,6 +772,7 @@ impl WorkerCreateOptions {
         //   httpsResolve?: boolean;
         //   httpResolve?: boolean;
         //   nodeResolve?: boolean;
+        //   cjsInterop?: boolean | "esbuild";
         //   jsrResolve?: boolean;
         //   cacheDir?: string;
         //   reload?: boolean;
@@ -781,6 +792,20 @@ impl WorkerCreateOptions {
                     if let Ok(nb) = nv.downcast::<JsBoolean, _>(cx) {
                         cfg.node_resolve = nb.value(cx);
                         out.runtime_options.node_resolve = cfg.node_resolve;
+                    }
+                }
+
+                if let Ok(cv) = o.get::<JsValue, _, _>(cx, "cjsInterop") {
+                    if let Ok(cb) = cv.downcast::<JsBoolean, _>(cx) {
+                        cfg.cjs_interop = if cb.value(cx) {
+                            CjsInteropMode::Builtin
+                        } else {
+                            CjsInteropMode::Disabled
+                        };
+                    } else if let Ok(cs) = cv.downcast::<JsString, _>(cx) {
+                        if cs.value(cx).trim().eq_ignore_ascii_case("esbuild") {
+                            cfg.cjs_interop = CjsInteropMode::Esbuild;
+                        }
                     }
                 }
 
