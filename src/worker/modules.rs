@@ -1831,13 +1831,9 @@ const c = require("cjs2esm");
         match mode {
             crate::worker::state::CjsInteropMode::Disabled => source.to_string(),
             crate::worker::state::CjsInteropMode::Builtin => {
-                if source.contains("Object.defineProperty(exports, \"__esModule\"")
-                    || source.contains("Object.defineProperty(exports, '__esModule'")
-                    || source.contains(" = void 0;")
-                {
-                    return Self::transpile_cjs_to_esm(source)
-                        .unwrap_or_else(|| source.to_string());
-                }
+                // Prefer robust cjs2esm conversion first; fall back to the built-in
+                // line-oriented transpiler for environments or sources where cjs2esm
+                // cannot produce stable ESM output.
                 match Self::cjs2esm_convert_source(source) {
                     Ok(esm)
                         if (esm.contains("export ") || esm.contains("import "))
