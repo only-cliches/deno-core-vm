@@ -1,7 +1,9 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 import { randomBytes, randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { Duplex } from "node:stream";
+import { fileURLToPath } from "node:url";
 import { nativeAddon } from "./native";
 import { wrapModuleNamespace } from "./module-namespace";
 import { buildImportModuleSource } from "./module-source";
@@ -739,6 +741,8 @@ export class DenoWorker {
     private readonly closeHandlers = new Set<DenoWorkerCloseHandler>();
     private readonly lifecycleHandlers = new Set<DenoWorkerLifecycleHandler>();
     private readonly runtimeHandlers = new Set<DenoWorkerRuntimeHandler>();
+    private readonly moduleSourceByName = new Map<string, string>();
+    private readonly moduleSourceByVirtualSpecifier = new Map<string, string>();
     private readonly inFlightRejectors = new Set<(reason: unknown) => void>();
     private nativeEpoch = 0;
     private closeNotified = false;
@@ -1219,7 +1223,9 @@ export class DenoWorker {
         if (typeof this.native.registerModule !== "function") {
             throw new Error("registerModule is not available in this runtime");
         }
-        await this.trackInFlight(this.native.registerModule(name, String(source ?? ""), options));
+        const normalizedSource = String(source ?? "");
+        this.moduleSourceByName.set(name, normalizedSource);
+        await this.trackInFlight(this.native.registerModule(name, normalizedSource, options));
     }
 
     /** Clears a module source from native runtime without waiting on startup gates. */
@@ -1228,6 +1234,13 @@ export class DenoWorker {
         if (!name) throw new Error("clearModule(moduleName) requires non-empty moduleName");
         if (typeof this.native.clearModule !== "function") {
             throw new Error("clearModule is not available in this runtime");
+        }
+        const priorSource = this.moduleSourceByName.get(name);
+        this.moduleSourceByName.delete(name);
+        if (typeof priorSource === "string") {
+            for (const [specifier, source] of [...this.moduleSourceByVirtualSpecifier.entries()]) {
+                if (source === priorSource) this.moduleSourceByVirtualSpecifier.delete(specifier);
+            }
         }
         return Boolean(await this.trackInFlight(this.native.clearModule(name)));
     }
@@ -1334,13 +1347,106 @@ export class DenoWorker {
     }
 
     /** Emits standardized user-visible thrown error events. */
-    private emitThrownError(opId: string, surface: string, error: unknown): void {
+    private emitThrownError(opId: string, surface: string, error: unknown, sourceHint?: string): void {
+        const enriched = this.enrichErrorWithCodeContext(error, sourceHint);
         this.emitRuntimeEvent({
             kind: "error.thrown",
             opId,
             surface,
-            error,
+            error: enriched,
         });
+    }
+
+    /** Records virtual registry specifier -> source mappings from runtime import telemetry. */
+    private ingestRuntimeImportEvent(event: DenoWorkerRuntimeEvent): void {
+        if (event?.kind !== "import.resolved" || event?.source !== "registry" || event?.blocked === true) return;
+        const resolvedSpecifier = typeof (event as any).resolvedSpecifier === "string" ? String((event as any).resolvedSpecifier) : "";
+        const specifier = typeof (event as any).specifier === "string" ? String((event as any).specifier) : "";
+        if (!resolvedSpecifier) return;
+        const fromName = this.moduleSourceByName.get(specifier);
+        if (typeof fromName === "string") this.moduleSourceByVirtualSpecifier.set(resolvedSpecifier, fromName);
+    }
+
+    /** Parses first `url:line:column` frame from an Error-like value. */
+    private parseErrorLocation(error: unknown): { specifier: string; line: number; column: number } | null {
+        const text = error instanceof Error ? `${String(error.message ?? "")}\n${String(error.stack ?? "")}` : String(error ?? "");
+        const m = text.match(/((?:denojs-worker|file):\/\/[^\s)\]]+):(\d+):(\d+)/);
+        if (!m) return null;
+        const line = Number(m[2]);
+        const column = Number(m[3]);
+        if (!Number.isFinite(line) || line < 1 || !Number.isFinite(column) || column < 1) return null;
+        return { specifier: m[1], line, column };
+    }
+
+    /** Builds a small code frame around a 1-based source location. */
+    private buildCodeFrame(source: string, line: number, column: number, radius = 2): string | null {
+        const lines = String(source ?? "").split(/\r?\n/);
+        if (line < 1 || line > lines.length) return null;
+        const start = Math.max(1, line - radius);
+        const end = Math.min(lines.length, line + radius);
+        const width = String(end).length;
+        const frame: string[] = [];
+        for (let n = start; n <= end; n += 1) {
+            const mark = n === line ? ">" : " ";
+            frame.push(`${mark}${String(n).padStart(width, " ")} | ${lines[n - 1] ?? ""}`);
+            if (n === line) {
+                const caretCol = Math.max(1, column);
+                frame.push(` ${" ".repeat(width)} | ${" ".repeat(caretCol - 1)}^`);
+            }
+        }
+        return frame.join("\n");
+    }
+
+    /** Resolves source text for an error specifier from hints, registry maps, or file:// disk reads. */
+    private sourceForErrorSpecifier(specifier: string, sourceHint?: string): string | null {
+        if (typeof sourceHint === "string" && sourceHint.length > 0) return sourceHint;
+        const fromVirtual = this.moduleSourceByVirtualSpecifier.get(specifier);
+        if (typeof fromVirtual === "string" && fromVirtual.length > 0) return fromVirtual;
+        if (specifier.startsWith("file://")) {
+            try {
+                return readFileSync(fileURLToPath(specifier), "utf8");
+            } catch {
+                return null;
+            }
+        }
+        return null;
+    }
+
+    /** Adds code context around runtime errors when location and source are available. */
+    private enrichErrorWithCodeContext(error: unknown, sourceHint?: string): unknown {
+        const loc = this.parseErrorLocation(error);
+        if (!loc) return error;
+        const source = this.sourceForErrorSpecifier(loc.specifier, sourceHint);
+        if (!source) return error;
+        const frame = this.buildCodeFrame(source, loc.line, loc.column);
+        if (!frame) return error;
+
+        const header = `Code context (${loc.specifier}:${loc.line}:${loc.column})`;
+        const block = `${header}\n${frame}`;
+        if (error instanceof Error) {
+            if (!String(error.stack ?? "").includes(header)) {
+                error.stack = `${String(error.stack ?? error.message ?? "Error")}\n${block}`;
+            }
+            if (!String(error.message ?? "").includes(header)) {
+                error.message = `${String(error.message ?? "")}\n${block}`;
+            }
+            (error as any).codeContext = { specifier: loc.specifier, line: loc.line, column: loc.column, frame };
+            return error;
+        }
+
+        if (error && typeof error === "object") {
+            const e = error as Record<string, unknown>;
+            if (typeof e.message === "string" && !e.message.includes(header)) {
+                e.message = `${e.message}\n${block}`;
+            }
+            if (typeof e.stack === "string" && !e.stack.includes(header)) {
+                e.stack = `${e.stack}\n${block}`;
+            }
+            (e as any).codeContext = { specifier: loc.specifier, line: loc.line, column: loc.column, frame };
+            return e;
+        }
+
+        return new Error(`${String(error ?? "Error")}\n${block}`);
     }
 
     /** Constructs a new native worker instance and routes creation failures through crash hooks. */
@@ -1577,6 +1683,7 @@ export class DenoWorker {
             const hydrated = this.canBypassWireHydration(event) ? event : hydrateFromWire(event);
             if (!hydrated || typeof hydrated !== "object") return;
             const payload = hydrated as DenoWorkerRuntimeEvent;
+            this.ingestRuntimeImportEvent(payload);
             this.emitRuntimeEvent(payload);
         });
     }
@@ -3560,6 +3667,7 @@ export class DenoWorker {
             }
             let opKind: StatsOpKind | null = "eval";
             let startedAt = Date.now();
+            let sourceForErrorContext: string | undefined;
             const liveCpuKey = `cpu:${opId}`;
             try {
                 const transformed = await this.applyLoadersAsync({
@@ -3567,6 +3675,7 @@ export class DenoWorker {
                     src: String(src),
                     srcLoader: options?.srcLoader ?? (options as any)?.loader ?? "js",
                 });
+                sourceForErrorContext = transformed.src;
                 opKind = this.classifyEvalOp(transformed.src);
                 startedAt = Date.now();
                 if (opKind) this.beginLiveCpuTracking(liveCpuKey);
@@ -3585,9 +3694,9 @@ export class DenoWorker {
                 if (opKind) this.endLiveCpuTracking(liveCpuKey);
                 this.recordLastExecutionSample();
                 if (opKind) this.recordOpSample(opKind, Date.now() - startedAt, false);
-                const hydrated = hydrateFromWire(e);
+                const hydrated = this.enrichErrorWithCodeContext(hydrateFromWire(e), sourceForErrorContext);
                 this.emitRuntimeEvent({ kind: "eval.end", opId, ok: false });
-                this.emitThrownError(opId, "eval", hydrated);
+                this.emitThrownError(opId, "eval", hydrated, sourceForErrorContext);
                 throw hydrated;
             }
         })();
@@ -3621,12 +3730,14 @@ export class DenoWorker {
         }
         let opKind: StatsOpKind | null = "eval";
         let startedAt = Date.now();
+        let sourceForErrorContext: string | undefined;
         try {
             const transformed = this.applyLoadersSync({
                 kind: "eval",
                 src: String(src),
                 srcLoader: options?.srcLoader ?? (options as any)?.loader ?? "js",
             });
+            sourceForErrorContext = transformed.src;
             opKind = this.classifyEvalOp(transformed.src);
             startedAt = Date.now();
             const raw = this.native.evalSync(
@@ -3640,9 +3751,9 @@ export class DenoWorker {
         } catch (e) {
             this.recordLastExecutionSample();
             if (opKind) this.recordOpSample(opKind, Date.now() - startedAt, false);
-            const hydrated = hydrateFromWire(e);
+            const hydrated = this.enrichErrorWithCodeContext(hydrateFromWire(e), sourceForErrorContext);
             this.emitRuntimeEvent({ kind: "evalSync.end", opId, ok: false });
-            this.emitThrownError(opId, "evalSync", hydrated);
+            this.emitThrownError(opId, "evalSync", hydrated, sourceForErrorContext);
             throw hydrated;
         }
     }
@@ -3671,9 +3782,9 @@ export class DenoWorker {
                 this.emitRuntimeEvent({ kind: "module.eval.end", opId, ok: true });
                 return imported;
             } catch (e) {
-                const hydrated = hydrateFromWire(e);
+                const hydrated = this.enrichErrorWithCodeContext(hydrateFromWire(e), transformed.src);
                 this.emitRuntimeEvent({ kind: "module.eval.end", opId, ok: false });
-                this.emitThrownError(opId, "module.eval", hydrated);
+                this.emitThrownError(opId, "module.eval", hydrated, transformed.src);
                 throw hydrated;
             }
         }
@@ -3717,9 +3828,9 @@ export class DenoWorker {
                 this.recordLastExecutionSample();
                 this.recordOpSample("eval", Date.now() - nativeStartedAt, false);
             }
-            const hydrated = hydrateFromWire(e);
+            const hydrated = this.enrichErrorWithCodeContext(hydrateFromWire(e), transformed.src);
             this.emitRuntimeEvent({ kind: "module.eval.end", opId, ok: false });
-            this.emitThrownError(opId, "module.eval", hydrated);
+            this.emitThrownError(opId, "module.eval", hydrated, transformed.src);
             throw hydrated;
         }
         const wrapped = wrapModuleNamespace<T>(this, hydrateFromWire(raw));

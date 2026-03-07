@@ -9,6 +9,8 @@ All notable changes to this project will be documented in this file.
   - added package lifecycle `install` hook that runs the native build step and emits local `index.node`.
 - Fixed runtime observability gap for module evaluation failures:
   - `worker.module.eval(...)` now emits `error.thrown` runtime events with `surface: "module.eval"`.
+- Fixed runtime error diagnostics to include local code context:
+  - thrown `eval`, `evalSync`, and `module.eval` errors now append a small code frame (a few lines before/after the failing location) when source is available.
 - Fixed Node-style disk resolution returning directory URLs for extensionless directory targets:
   - `moduleLoader.nodeResolve` now resolves directory imports via nested `package.json` (`module`/`main`) and `index.*` fallback.
 - Fixed CommonJS package interop gap for ESM named imports under Node-style resolution:

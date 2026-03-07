@@ -88,6 +88,8 @@ describe("DenoWorker runtime events", () => {
       expect(end).toBeTruthy();
       expect(end?.ok).toBe(false);
       expect(thrown).toBeTruthy();
+      expect(String(thrown?.error?.message ?? "")).toContain("Code context (");
+      expect(String(thrown?.error?.message ?? "")).toContain("^");
     } finally {
       await dw.close();
     }
