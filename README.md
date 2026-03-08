@@ -13,7 +13,7 @@
 
 **Deno Director** is a native Rust/Neon bridge that lets your Node process spin up isolated Deno runtimes, execute TS/JSX directly, stream bytes between them, call functions both ways, and keep strict permission boundaries.
 
-You get one process, two ecosystems, and clean runtime seperation.
+You get one process, two ecosystems, and clean runtime separation.
 
 ## 🔥 Why Deno Director?
 
@@ -21,7 +21,7 @@ You get one process, two ecosystems, and clean runtime seperation.
 * **Host function bridging:** inject Node functions into Deno and call them from sandboxed code, sync or async.
 * **Real sandbox controls:** enforce `read`, `write`, `net`, `env`, `run`, `ffi`, `sys`, `import`, `hrtime`, and `wasm` permissions per worker.
 * **TS/JSX first-class:** run TypeScript and TSX through `eval`, `evalSync`, and module APIs with built-in transpilation.
-* **NodeJS compatibility:** enjoy NodeJ support across module resolution, runtime behavior, and CommonJS interop.
+* **Node.js compatibility:** enjoy Node-like support across module resolution, runtime behavior, and CommonJS interop.
 * **Fast stream transport:** push bytes through `worker.stream.connect(...)` when message-style APIs are not enough.
 * **Handles and global ops:** mutate and inspect runtime object graphs through `worker.handle.*` and `worker.global.*` APIs.
 * **Fleet controls:** orchestrate large runtime pools with `DenoDirector`.
@@ -40,7 +40,6 @@ You get one process, two ecosystems, and clean runtime seperation.
 
 ```bash
 npm install deno-director
-
 ```
 
 ### 🚀 The Basics: TS Evaluation + Host Callback Bridge
@@ -70,16 +69,16 @@ const sandbox = await worker.module.eval(`
         console.log(\`[Deno] Initiating secure processing for \${userId}...\`);
 
         // Call the async Node.js function from inside the isolated Deno sandbox
-        const rawData: {  // Typescript is OK!
+        const rawData: {  // TypeScript is OK!
           id: string,
-          secret: string 
+          secret: string
         } = await hostFetchData(userId);
-        
+
         // Return the processed data back to Node
-        return { 
-            status: "SECURED", 
+        return {
+            status: "SECURED",
             originalId: rawData.id,
-            fingerprint: btoa(rawData.secret).substring(0, 12) 
+            fingerprint: btoa(rawData.secret).substring(0, 12)
         };
     }
 `, {srcLoader: "ts"}); // enable TS compiler
@@ -104,7 +103,7 @@ import { DenoDirector } from "deno-director";
 
 const director = new DenoDirector({
   template: {
-    // Base configuration for ALL workers
+    // Base configuration for all workers
     workerOptions: { limits: { maxMemoryBytes: 128 * 1024 * 1024 } }, // 128MB limit
     bootstrapScripts: ["globalThis.APP_RUNTIME = 'DenoDirector';"]
   }
@@ -158,7 +157,7 @@ export async function handleRequest(payload: unknown) {
 }
 ```
 
-This gives you serverless-style isolation boundaries with much better latency than cold-starting a runtime per request.
+This gives you serverless-style isolation boundaries with much lower latency than cold-starting a runtime per request.
 
 ---
 
@@ -269,12 +268,12 @@ const worker = new DenoWorker({
       return { src, srcLoader: "ts" };
     },
   ],
-  
-  // The ultimate import interceptor
+
+  // Import interceptor
   imports: async (specifier, referrer, isDynamicImport) => {
     console.log(`[Deno] requesting: ${specifier} (from ${referrer})`);
 
-    // 1. Security: Block ALL dynamic imports (const y = await import("..")) to prevent code-injection attacks
+    // 1. Security: Block all dynamic imports (const y = await import("..")) to prevent code-injection attacks
     if (isDynamicImport) {
       console.warn(`Blocked dynamic import of ${specifier}`);
       return false; // false = block module with error
@@ -283,7 +282,7 @@ const worker = new DenoWorker({
     // 2. Custom Scheme: Intercept "app:*" imports and compile them on the fly
     if (specifier.startsWith("app:")) {
       const moduleName = specifier.replace("app:", "");
-      
+
       // Check our Node-side cache first!
       if (moduleCache.has(moduleName)) {
         return { src: moduleCache.get(moduleName)!, srcLoader: "app-ts" }; // Serve from memory
@@ -291,16 +290,16 @@ const worker = new DenoWorker({
 
       // Simulate fetching or compiling custom code (e.g., from a DB or remote API)
       const compiledTsCode = `export const ${moduleName} = "Super Secret Data for ${moduleName}";`;
-      
+
       // Save to cache
       moduleCache.set(moduleName, compiledTsCode);
 
       // Feed it source code directly into Deno's memory as a TypeScript module!
-      return { src: compiledTsCode, srcLoader: "app-ts" }; 
+      return { src: compiledTsCode, srcLoader: "app-ts" };
     }
 
     // 3. Fallback: Allow normal resolution for everything else
-    return true; 
+    return true;
   }
 });
 
@@ -368,7 +367,7 @@ const worker = new DenoWorker({
   permissions: { read: false }
 });
 
-// ...but we can smuggle Node's `fs` module in anyway!
+// ...but we can inject Node's `fs` module in anyway!
 await worker.global.set("nodeFs", fs);
 await worker.global.set("nodeCrypto", crypto);
 
@@ -376,9 +375,9 @@ const result = await worker.eval(`
   // Calling Node.js fs functions from inside Deno!
   const cwdEntries = nodeFs.readdirSync(".");
   const payload = new TextEncoder().encode(String(cwdEntries.length));
-  
+
   // Calling Node's crypto module from Deno
-  // this function runs in the NODE context!
+  // This function runs in the Node context.
   const hash = nodeCrypto.createHash("sha256");
   hash.update(payload);
   hash.digest("hex");
@@ -428,7 +427,7 @@ import { DenoWorker } from "deno-director";
 
 const worker = new DenoWorker();
 
-// Call a global function in the deno runtime ....
+// Call a global function in the Deno runtime...
 // passing in args from Node
 const json_val = await worker.eval("JSON.parse", { args: ['{"key": "value"}'] });
 console.log(json_val); // {key: "value"}
@@ -452,7 +451,7 @@ Notes:
 - If `args` are provided but the evaluated value is not callable, the value is returned as-is.
 ---
 
-### 🧩 NodeJS Compatibility
+### 🧩 Node.js Compatibility
 
 Use `nodeJs` as the centralized API for Node-style module/runtime compatibility.
 
@@ -611,7 +610,7 @@ const worker = new DenoWorker({
   // env: true,
 
   // OR 4. Auto-load <cwd>/.env at startup; warns if file is missing
-  // envFile: true, 
+  // envFile: true,
 
   // OR 5. provide exact file path (resolved from cwd); errors if missing
   // envFile: ".my.env"
@@ -716,7 +715,7 @@ The primary class for orchestrating multiple `DenoWorker` instances.
 
 ### 🛡️ `class DenoWorker`
 
-The core runtime isolate. Maps 1:1 with a V8 Thread.
+The core runtime isolate. Maps 1:1 with a V8 thread.
 
 #### **Execution Methods**
 

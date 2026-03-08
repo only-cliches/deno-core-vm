@@ -2,6 +2,9 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.21] Mar 7, 2026
+- Readme updates.
+
 ## [0.9.20] Mar 7, 2026
 
 ### Fixed
