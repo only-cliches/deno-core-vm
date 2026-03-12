@@ -8,6 +8,7 @@ import chalk from "chalk";
 import { DenoWorker } from "../../src/index";
 import { randomUUID } from "node:crypto";
 import { Duplex } from "node:stream";
+import { QuickJSWorker } from "quickjs-vm";
 
 type ScenarioKey =
   | "node-node-fn"
@@ -16,6 +17,8 @@ type ScenarioKey =
   | "node+deno-postmessage"
   | "node+deno-eval"
   | "node+deno-handle"
+  | "node+quickjs-eval"
+  | "node+quickjs-handle"
   | "node+deno-stream"
   | "bun+bun-postmessage"
   | "bun+bun-http"
@@ -41,7 +44,7 @@ type ScenarioMeta = {
   label: string;
   main: "Node" | "Bun" | "Deno";
   ipc: string;
-  worker: "Node" | "Deno" | "Bun";
+  worker: "Node" | "Deno" | "Bun" | "QuickJS";
 };
 
 type TileJob = {
@@ -87,6 +90,8 @@ const scenarioOrder: ScenarioKey[] = [
   "node+deno-postmessage",
   "node+deno-eval",
   "node+deno-handle",
+  "node+quickjs-eval",
+  "node+quickjs-handle",
   "node+deno-stream",
   "bun+bun-postmessage",
   "bun+bun-http",
@@ -101,6 +106,8 @@ const scenarioCatalog: ScenarioMeta[] = [
   { key: "node+deno-postmessage", label: "Node | postMessage | Deno", main: "Node", ipc: "postMessage", worker: "Deno" },
   { key: "node+deno-eval", label: "Node | worker.eval | Deno", main: "Node", ipc: "worker.eval", worker: "Deno" },
   { key: "node+deno-handle", label: "Node | worker.handle | Deno", main: "Node", ipc: "worker.handle", worker: "Deno" },
+  { key: "node+quickjs-eval", label: "Node | worker.eval | QuickJS", main: "Node", ipc: "worker.eval", worker: "QuickJS" },
+  { key: "node+quickjs-handle", label: "Node | worker.handle | QuickJS", main: "Node", ipc: "worker.handle", worker: "QuickJS" },
   { key: "node+deno-stream", label: "Node | worker.stream.connect | Deno", main: "Node", ipc: "worker.stream.connect", worker: "Deno" },
   { key: "bun+bun-postmessage", label: "Bun | postMessage | Bun", main: "Bun", ipc: "postMessage", worker: "Bun" },
   { key: "bun+bun-http", label: "Bun | HTTP | Bun", main: "Bun", ipc: "HTTP", worker: "Bun" },
@@ -399,6 +406,10 @@ function createBenchDenoWorker(cfg: BenchConfig): DenoWorker {
   return new DenoWorker(opts);
 }
 
+function createBenchQuickJSWorker(): QuickJSWorker {
+  return new QuickJSWorker();
+}
+
 function isRuntimeOnPath(runtimeBin: string): boolean {
   try {
     const result = spawnSync(runtimeBin, ["--version"], { stdio: "ignore" });
@@ -672,6 +683,43 @@ async function runNodeDenoHandle(cfg: BenchConfig, workers: number): Promise<Ite
   }
 }
 
+async function runNodeQuickJSEval(cfg: BenchConfig, workers: number): Promise<IterationStats> {
+  const quickjsWorkers = Array.from({ length: workers }, () => createBenchQuickJSWorker());
+  await Promise.all(quickjsWorkers.map((w) => w.eval(RAYTRACE_SOURCE)));
+  try {
+    const runOne = async (): Promise<{ checksum: number; pixels: number }> => {
+      const jobs = jobsFor(cfg, workers);
+      const parts = await Promise.all(
+        jobs.map((job, i) => quickjsWorkers[i % workers].eval<TileResult>("globalThis.__raytraceTile", { args: [job] })),
+      );
+      return aggregate(parts);
+    };
+
+    return await runMeasured(runOne, cfg.warmup, cfg.iterations);
+  } finally {
+    await Promise.all(quickjsWorkers.map((w) => w.close()));
+  }
+}
+
+async function runNodeQuickJSHandle(cfg: BenchConfig, workers: number): Promise<IterationStats> {
+  const quickjsWorkers = Array.from({ length: workers }, () => createBenchQuickJSWorker());
+  await Promise.all(quickjsWorkers.map((w) => w.eval(RAYTRACE_SOURCE)));
+  const handles = await Promise.all(quickjsWorkers.map((w) => w.handle.eval("globalThis.__raytraceTile")));
+
+  try {
+    const runOne = async (): Promise<{ checksum: number; pixels: number }> => {
+      const jobs = jobsFor(cfg, workers);
+      const parts = await Promise.all(jobs.map((job, i) => handles[i % workers].call<TileResult>([job])));
+      return aggregate(parts);
+    };
+
+    return await runMeasured(runOne, cfg.warmup, cfg.iterations);
+  } finally {
+    await Promise.all(handles.map((h) => h.dispose()));
+    await Promise.all(quickjsWorkers.map((w) => w.close()));
+  }
+}
+
 async function writeLine(duplex: Duplex, line: string): Promise<void> {
   return await new Promise((resolve, reject) => {
     duplex.write(line, (err) => (err ? reject(err) : resolve()));
@@ -808,6 +856,8 @@ const nodeScenarioRunners: Record<string, ScenarioRunner> = {
   "node+deno-postmessage": runNodeDenoPostMessage,
   "node+deno-eval": runNodeDenoEval,
   "node+deno-handle": runNodeDenoHandle,
+  "node+quickjs-eval": runNodeQuickJSEval,
+  "node+quickjs-handle": runNodeQuickJSHandle,
   "node+deno-stream": runNodeDenoStream,
 };
 

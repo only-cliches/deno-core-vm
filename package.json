@@ -1,7 +1,7 @@
 {
   "name": "deno-director",
   "version": "0.9.30",
-  "description": "High-performance Node.js <-> Deno bridge with native worker isolation, fast binary channels, and rich type-safe cross-runtime messaging.",
+  "description": "Embed isolated Deno runtimes inside a Node.js process with a native bridge, explicit runtime policy, and a full host-side control surface.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {
@@ -43,7 +43,8 @@
   "author": "me@scottlott.com",
   "license": "MIT",
   "dependencies": {
-    "cargo-cp-artifact": "^0.1.9"
+    "cargo-cp-artifact": "^0.1.9",
+    "quickjs-vm": "^0.3.0"
   },
   "devDependencies": {
     "@types/jest": "^29.5.0",

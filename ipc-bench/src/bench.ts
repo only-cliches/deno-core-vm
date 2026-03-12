@@ -5,6 +5,7 @@ import { Worker as NodeWorker } from "node:worker_threads";
 import { spawn, spawnSync } from "node:child_process";
 import path from "node:path";
 import { DenoWorker } from "../../src/index";
+import { QuickJSWorker } from "quickjs-vm";
 
 type ScenarioKey =
     | "node+node-postmessage"
@@ -12,6 +13,8 @@ type ScenarioKey =
     | "node+deno-postmessage"
     | "node+deno-eval"
     | "node+deno-handle"
+    | "node+quickjs-eval"
+    | "node+quickjs-handle"
     | "node+deno-stream"
     | "bun+bun-postmessage"
     | "bun+bun-http"
@@ -38,7 +41,7 @@ type ScenarioMeta = {
     label: string;
     main: "Node" | "Bun" | "Deno";
     ipc: string;
-    worker: "Node" | "Deno" | "Bun";
+    worker: "Node" | "Deno" | "Bun" | "QuickJS";
 };
 
 type LocalScenarioDef = ScenarioMeta & {
@@ -54,6 +57,8 @@ const scenarioOrder: ScenarioKey[] = [
     "node+deno-postmessage",
     "node+deno-eval",
     "node+deno-handle",
+    "node+quickjs-eval",
+    "node+quickjs-handle",
     "node+deno-stream",
     "bun+bun-postmessage",
     "bun+bun-http",
@@ -67,6 +72,8 @@ const scenarioCatalog: ScenarioMeta[] = [
     { key: "node+deno-postmessage", label: "Node | postMessage | Deno", main: "Node", ipc: "postMessage", worker: "Deno" },
     { key: "node+deno-eval", label: "Node | worker.eval | Deno", main: "Node", ipc: "worker.eval", worker: "Deno" },
     { key: "node+deno-handle", label: "Node | worker.handle | Deno", main: "Node", ipc: "worker.handle", worker: "Deno" },
+    { key: "node+quickjs-eval", label: "Node | worker.eval | QuickJS", main: "Node", ipc: "worker.eval", worker: "QuickJS" },
+    { key: "node+quickjs-handle", label: "Node | worker.handle | QuickJS", main: "Node", ipc: "worker.handle", worker: "QuickJS" },
     { key: "node+deno-stream", label: "Node | worker.stream.connect | Deno", main: "Node", ipc: "worker.stream.connect", worker: "Deno" },
     { key: "bun+bun-postmessage", label: "Bun | postMessage | Bun", main: "Bun", ipc: "postMessage", worker: "Bun" },
     { key: "bun+bun-http", label: "Bun | HTTP | Bun", main: "Bun", ipc: "HTTP", worker: "Bun" },
@@ -81,6 +88,10 @@ function createBenchDenoWorker(): DenoWorker {
         return new DenoWorker({ bridge: { enableUnsafeStreamMemory: true } });
     }
     return new DenoWorker();
+}
+
+function createBenchQuickJSWorker(): QuickJSWorker {
+    return new QuickJSWorker();
 }
 
 function parseArgs(): BenchConfig {
@@ -546,6 +557,47 @@ async function teardownDenoEval(ctx: any): Promise<void> {
     await Promise.all(ctx.workers.map((w: DenoWorker) => w.close({ force: true })));
 }
 
+async function setupQuickJSEval(workerCount: number): Promise<any> {
+    const workers = Array.from({ length: workerCount }, () => createBenchQuickJSWorker());
+    const src = `
+        globalThis.__benchEcho = (p) => {
+            if (p instanceof Uint8Array) {
+                const first = p.length > 0 ? p[0] : 0;
+                const last = p.length > 0 ? p[p.length - 1] : 0;
+                return { size: p.length >>> 0, checksum: ((p.length >>> 0) ^ first ^ (last << 8)) >>> 0 };
+            }
+            if (typeof p === "string") {
+                const size = p.length >>> 0;
+                const first = p.length > 0 ? (p.charCodeAt(0) & 0xff) : 0;
+                const last = p.length > 0 ? (p.charCodeAt(p.length - 1) & 0xff) : 0;
+                return { size, checksum: ((size >>> 0) ^ first ^ (last << 8)) >>> 0 };
+            }
+            const blob = p && typeof p.blob === "string" ? p.blob : "";
+            const size = blob.length >>> 0;
+            const first = blob.length > 0 ? (blob.charCodeAt(0) & 0xff) : 0;
+            const last = blob.length > 0 ? (blob.charCodeAt(blob.length - 1) & 0xff) : 0;
+            const salt = p && Number.isFinite(p.salt) ? (p.salt >>> 0) : 0;
+            return { size, checksum: ((size >>> 0) ^ first ^ (last << 8) ^ salt) >>> 0 };
+        };
+        true;
+    `;
+    await Promise.all(workers.map((w) => w.eval(src)));
+    return { workers };
+}
+
+async function runQuickJSEval(payload: TransferPayload, messages: number, workerCount: number, ctx: any): Promise<number> {
+    const { workers } = ctx;
+    const promises = Array.from({ length: messages }, (_, i) =>
+        workers[i % workerCount].eval("(p) => globalThis.__benchEcho(p)", { args: [payload] }) as Promise<Ack>,
+    );
+    const out = await Promise.all(promises);
+    return mergeChecksums(out.map((a) => ((a.checksum ^ a.size) >>> 0)));
+}
+
+async function teardownQuickJSEval(ctx: any): Promise<void> {
+    await Promise.all(ctx.workers.map((w: QuickJSWorker) => w.close()));
+}
+
 async function setupDenoHandle(workerCount: number): Promise<any> {
     const workers = Array.from({ length: workerCount }, () => createBenchDenoWorker());
     const handles = await Promise.all(
@@ -770,6 +822,50 @@ async function teardownDenoHandle(ctx: any): Promise<void> {
     await Promise.all(ctx.workers.map((w: DenoWorker) => w.close({ force: true })));
 }
 
+async function setupQuickJSHandle(workerCount: number): Promise<any> {
+    const workers = Array.from({ length: workerCount }, () => createBenchQuickJSWorker());
+    const handles = await Promise.all(
+        workers.map((w) =>
+            w.handle.eval(`(p) => {
+                if (p instanceof Uint8Array || Array.isArray(p)) {
+                    const size = p.length >>> 0;
+                    const first = p.length > 0 ? p[0] : 0;
+                    const last = p.length > 0 ? p[p.length - 1] : 0;
+                    return { size, checksum: ((size >>> 0) ^ first ^ (last << 8)) >>> 0 };
+                }
+                if (typeof p === "string") {
+                    const size = p.length >>> 0;
+                    const first = p.length > 0 ? (p.charCodeAt(0) & 0xff) : 0;
+                    const last = p.length > 0 ? (p.charCodeAt(p.length - 1) & 0xff) : 0;
+                    return { size, checksum: ((size >>> 0) ^ first ^ (last << 8)) >>> 0 };
+                }
+                const blob = p && typeof p.blob === "string" ? p.blob : "";
+                const size = blob.length >>> 0;
+                const first = blob.length > 0 ? (blob.charCodeAt(0) & 0xff) : 0;
+                const last = blob.length > 0 ? (blob.charCodeAt(blob.length - 1) & 0xff) : 0;
+                const salt = p && Number.isFinite(p.salt) ? (p.salt >>> 0) : 0;
+                return { size, checksum: ((size >>> 0) ^ first ^ (last << 8) ^ salt) >>> 0 };
+            }`),
+        ),
+    );
+    return { workers, handles };
+}
+
+async function runQuickJSHandle(payload: TransferPayload, messages: number, workerCount: number, ctx: any): Promise<number> {
+    const { handles } = ctx;
+    const handlePayload = payload instanceof Uint8Array ? Array.from(payload) : payload;
+    const promises = Array.from({ length: messages }, (_, i) =>
+        handles[i % workerCount].call([handlePayload]) as Promise<Ack>,
+    );
+    const out = await Promise.all(promises);
+    return mergeChecksums(out.map((a) => ((a.checksum ^ a.size) >>> 0)));
+}
+
+async function teardownQuickJSHandle(ctx: any): Promise<void> {
+    await Promise.all(ctx.handles.map((h: any) => h.dispose()));
+    await Promise.all(ctx.workers.map((w: QuickJSWorker) => w.close()));
+}
+
 const localScenarios: LocalScenarioDef[] = [
     {
         key: "node+node-postmessage",
@@ -821,6 +917,26 @@ const localScenarios: LocalScenarioDef[] = [
         setup: setupDenoHandle,
         run: runDenoHandle,
         teardown: teardownDenoHandle,
+    },
+    {
+        key: "node+quickjs-eval",
+        label: "Node | worker.eval | QuickJS",
+        main: "Node",
+        ipc: "worker.eval",
+        worker: "QuickJS",
+        setup: setupQuickJSEval,
+        run: runQuickJSEval,
+        teardown: teardownQuickJSEval,
+    },
+    {
+        key: "node+quickjs-handle",
+        label: "Node | worker.handle | QuickJS",
+        main: "Node",
+        ipc: "worker.handle",
+        worker: "QuickJS",
+        setup: setupQuickJSHandle,
+        run: runQuickJSHandle,
+        teardown: teardownQuickJSHandle,
     },
     {
         key: "node+deno-stream",
